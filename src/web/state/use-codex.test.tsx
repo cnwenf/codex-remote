@@ -865,6 +865,101 @@ describe("useCodex", () => {
     vi.unstubAllGlobals();
   });
 
+  it("refreshes a selected Desktop thread while live control is available", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    act(() => {
+      fake.serverSend({
+        type: "session",
+        state: "ready",
+        transport: "desktop-live",
+        readOnly: false,
+      });
+    });
+
+    let refresh: Promise<void>;
+    act(() => { refresh = result.current.refreshThreads(); });
+    const liveList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({ type: "rpc", payload: { id: liveList.id, result: { data: [] } } });
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    const desktopList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: desktopList.id, result: { data: [{ id: "t1", title: "Live task" }] } },
+    });
+    await act(() => refresh);
+
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const initialRead = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: initialRead.id,
+        result: {
+          desktopMirror: true,
+          thread: {
+            id: "t1",
+            status: { type: "active" },
+            turns: [{ id: "turn-1", status: "inProgress", items: [] }],
+          },
+        },
+      },
+    });
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    const resume = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(resume.method).toBe("thread/resume");
+    fake.serverSend({ type: "rpc", payload: { id: resume.id, result: {} } });
+    await act(() => selection);
+
+    let steering: Promise<void>;
+    act(() => { steering = result.current.sendInstruction("Visible steer"); });
+    const steer = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(steer.method).toBe("turn/steer");
+    fake.serverSend({ type: "rpc", payload: { id: steer.id, result: {} } });
+    await act(() => steering);
+
+    await act(() => new Promise((resolve) => setTimeout(resolve, 2_100)));
+    const poll = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(poll).toMatchObject({
+      method: "desktopState/readThread",
+      params: { threadId: "t1", history: { limitTurns: 1 } },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: poll.id,
+        result: {
+          desktopMirror: true,
+          thread: {
+            id: "t1",
+            status: { type: "active" },
+            todoList: {
+              explanation: "Live plan",
+              plan: [{ step: "Keep polling", status: "in_progress" }],
+            },
+            turns: [{
+              id: "turn-1",
+              status: "inProgress",
+              items: [{ id: "steer-1", type: "userMessage", text: "Visible steer" }],
+            }],
+          },
+        },
+      },
+    });
+
+    await waitFor(() => expect(result.current.selectedThread?.todoList).toEqual({
+      explanation: "Live plan",
+      items: [{ step: "Keep polling", status: "inProgress" }],
+    }));
+    expect(result.current.selectedThread?.turns["turn-1"].items["steer-1"].text).toBe("Visible steer");
+    expect(Object.values(result.current.selectedThread?.turns["turn-1"].items ?? {})
+      .filter((item) => item.type === "userMessage" && item.text === "Visible steer"))
+      .toHaveLength(1);
+  });
+
   it("captures the gateway default cwd used for direct conversations", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

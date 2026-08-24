@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -175,6 +175,31 @@ describe("gateway server", () => {
     const address = await gateway.start();
     expect(address.address).toBe("127.0.0.1");
     await gateway.stop();
+  });
+
+  it("serves a no-store app shell and a build fingerprint for open clients", async () => {
+    const staticDir = await mkdtemp(join(tmpdir(), "codex-remote-static-"));
+    await writeFile(join(staticDir, "index.html"), "<main>build-one</main>");
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      staticDir,
+      transport: new FakeTransport(),
+    });
+
+    const address = await gateway.start();
+    try {
+      const shell = await fetch(`http://127.0.0.1:${address.port}/`);
+      expect(shell.headers.get("cache-control")).toBe("no-store");
+      const version = await fetch(`http://127.0.0.1:${address.port}/app-version`);
+      expect(version.headers.get("cache-control")).toBe("no-store");
+      await expect(version.json()).resolves.toEqual({
+        version: expect.stringMatching(/^[0-9a-f]{16}$/),
+      });
+    } finally {
+      await gateway.stop();
+      await rm(staticDir, { recursive: true, force: true });
+    }
   });
 
   it("serves the same gateway on an additional bind host", async () => {

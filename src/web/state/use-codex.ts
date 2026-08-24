@@ -383,8 +383,7 @@ export function useCodex(socketOverride?: CodexSocket) {
     : false;
   useEffect(() => {
     if (
-      connection !== "ready" || !selectedThreadId || !selectedDesktopMirror ||
-      desktopControlAvailable
+      connection !== "ready" || !selectedThreadId || !selectedDesktopMirror
     ) return;
     const timer = window.setInterval(() => {
       void socket.request("desktopState/readThread", {
@@ -395,7 +394,7 @@ export function useCodex(socketOverride?: CodexSocket) {
         .catch(() => undefined);
     }, 2_000);
     return () => window.clearInterval(timer);
-  }, [connection, desktopControlAvailable, selectedDesktopMirror, selectedThreadId, socket]);
+  }, [connection, selectedDesktopMirror, selectedThreadId, socket]);
 
   const clearSelection = useCallback(() => setSelectedThreadId(undefined), []);
 
@@ -815,8 +814,15 @@ function hydrateThread(
       };
     }
     const items = { ...snapshotItems };
+    const retainedExistingOrder: string[] = [];
     for (const [itemId, existingItem] of Object.entries(existing?.items ?? {})) {
+      const duplicateUserMessage = itemId.startsWith("web-steer-") && !snapshotItems[itemId] &&
+        Object.values(snapshotItems).some(
+        (snapshotItem) => sameUserMessage(snapshotItem, existingItem),
+      );
+      if (duplicateUserMessage) continue;
       items[itemId] = mergeHydratedItem(snapshotItems[itemId], existingItem, snapshotTerminal);
+      retainedExistingOrder.push(itemId);
     }
     const existingTerminal = existing ? isTerminalTurnStatus(existing.status) : false;
     hydratedTurns[turnId] = {
@@ -828,7 +834,7 @@ function hydrateThread(
         : existing?.status === "inProgress"
           ? existing.status
           : snapshotStatus,
-      itemOrder: appendMissing(snapshotItemOrder, existing?.itemOrder ?? []),
+      itemOrder: appendMissing(snapshotItemOrder, retainedExistingOrder),
       items,
       startedAt: existing?.startedAt ?? numberValue(turnRecord.startedAt),
       completedAt: snapshotTerminal
@@ -879,6 +885,19 @@ function hydrateThread(
       },
     },
   };
+}
+
+function sameUserMessage(
+  left: CodexTurn["items"][string],
+  right: CodexTurn["items"][string],
+) {
+  if (left.type !== "userMessage" || right.type !== "userMessage" || left.text !== right.text) {
+    return false;
+  }
+  const leftImages = left.imageIds ?? [];
+  const rightImages = right.imageIds ?? [];
+  return leftImages.length === rightImages.length &&
+    leftImages.every((value, index) => value === rightImages[index]);
 }
 
 function historyState(value: unknown): ThreadHistoryState {

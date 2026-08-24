@@ -1,4 +1,5 @@
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { homedir } from "node:os";
@@ -62,6 +63,7 @@ export function createGateway(options: GatewayOptions) {
   const controllers = new Map<string, WebSocket>();
   let nextControllerId = 1;
   const sessionCredential = createSessionCredential(options.token);
+  const appVersion = staticAppVersion(options.staticDir);
   const imageStore = new ImageUploadStore(
     options.uploadDir ?? join(homedir(), ".codex", "codex-remote", "uploads"),
   );
@@ -75,6 +77,14 @@ export function createGateway(options: GatewayOptions) {
     if (pathname === "/health") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end('{"ok":true}');
+      return;
+    }
+    if (pathname === "/app-version") {
+      response.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      response.end(JSON.stringify({ version: appVersion }));
       return;
     }
     if (pathname === "/auth/session") {
@@ -559,8 +569,20 @@ function serveStatic(
     response.writeHead(404).end();
     return;
   }
-  response.writeHead(200, { "content-type": contentType(file) });
+  response.writeHead(200, {
+    "content-type": contentType(file),
+    "cache-control": extname(file) === ".html"
+      ? "no-store"
+      : "public, max-age=31536000, immutable",
+  });
   createReadStream(file).pipe(response);
+}
+
+function staticAppVersion(staticDir: string | undefined) {
+  if (!staticDir) return "0000000000000000";
+  const indexPath = resolve(staticDir, "index.html");
+  if (!existsSync(indexPath)) return "0000000000000000";
+  return createHash("sha256").update(readFileSync(indexPath)).digest("hex").slice(0, 16);
 }
 
 function contentType(path: string) {
