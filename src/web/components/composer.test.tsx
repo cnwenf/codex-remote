@@ -12,7 +12,7 @@ describe("Composer", () => {
     await userEvent.type(input, "Run the tests");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    expect(onSend).toHaveBeenCalledWith("Run the tests");
+    expect(onSend).toHaveBeenCalledWith("Run the tests", []);
     expect(input).toHaveValue("");
   });
 
@@ -33,6 +33,33 @@ describe("Composer", () => {
 
     expect(screen.getByRole("button", { name: "Steer" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  });
+
+  it("supports selecting and pasting multiple images and keeps them until send succeeds", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<Composer onSend={onSend} running={false} />);
+    const picker = screen.getByLabelText("添加图片");
+    const first = new File(["png"], "first.png", { type: "image/png" });
+    const second = new File(["jpg"], "second.jpg", { type: "image/jpeg" });
+
+    await userEvent.upload(picker, [first, second]);
+    expect(screen.getByText("first.png")).toBeVisible();
+    expect(screen.getByText("second.jpg")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(onSend).toHaveBeenCalledWith("", [first, second]);
+    expect(screen.queryByText("first.png")).not.toBeInTheDocument();
+  });
+
+  it("keeps selected images when sending fails", async () => {
+    const onSend = vi.fn().mockRejectedValue(new Error("upload failed"));
+    render(<Composer onSend={onSend} running={false} />);
+    const image = new File(["png"], "keep.png", { type: "image/png" });
+    await userEvent.upload(screen.getByLabelText("添加图片"), image);
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(screen.getByText("keep.png")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("upload failed");
   });
 
   it("shows and updates the current model reasoning effort and permission", async () => {

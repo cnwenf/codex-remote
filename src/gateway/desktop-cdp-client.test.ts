@@ -60,6 +60,33 @@ describe("DesktopCdpClient", () => {
     await client.stop();
   });
 
+  it("uses an auxiliary Desktop renderer to call the current thread owner", async () => {
+    server = new FakeCdpServer();
+    const endpoint = await server.start();
+    const client = new DesktopCdpClient({ endpoint });
+    await client.start(() => undefined, () => undefined);
+
+    const result = await client.requestThreadOwner(
+      "thread-follower-update-thread-settings",
+      { conversationId: "thread-1", threadSettings: { model: "gpt-test" } },
+    );
+
+    expect(result).toEqual({
+      method: "thread-follower-update-thread-settings",
+      result: { ok: true },
+    });
+    expect(server.ownerRequests.map((request) => request.method)).toEqual([
+      "Runtime.enable",
+      "Runtime.evaluate",
+      "Runtime.callFunctionOn",
+    ]);
+    expect(server.ownerRequests.at(-1)?.params?.arguments).toEqual([
+      { value: "thread-follower-update-thread-settings" },
+      { value: { conversationId: "thread-1", threadSettings: { model: "gpt-test" } } },
+    ]);
+    await client.stop();
+  });
+
   it("rejects a non-loopback DevTools endpoint", async () => {
     const client = new DesktopCdpClient({ endpoint: "http://192.0.2.8:9222" });
     await expect(client.start(() => undefined, () => undefined))

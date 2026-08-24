@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CodexSocket, type BrowserSocket } from "../api/socket";
 import { useCodex } from "./use-codex";
 
@@ -808,19 +808,31 @@ describe("useCodex", () => {
     });
     expect(result.current.desktopControlAvailable).toBe(true);
 
+    const image = new File(["image"], "screen.png", { type: "image/png" });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
     let steering: Promise<void>;
-    act(() => { steering = result.current.sendInstruction("Continue from the phone"); });
+    act(() => { steering = result.current.sendInstruction("Continue from the phone", [image]); });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(fake.sent.length).toBeGreaterThan(2));
     const steerRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     expect(steerRequest).toMatchObject({
       method: "turn/steer",
       params: {
         threadId: "t1",
         expectedTurnId: "turn-1",
-        input: [{ type: "text", text: "Continue from the phone" }],
+        input: [
+          { type: "text", text: "Continue from the phone" },
+          { type: "remoteImage", id: "upload-1" },
+        ],
       },
     });
     fake.serverSend({ type: "rpc", payload: { id: steerRequest.id, result: {} } });
     await act(() => steering);
+    vi.unstubAllGlobals();
   });
 
   it("captures the gateway default cwd used for direct conversations", async () => {

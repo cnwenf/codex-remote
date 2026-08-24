@@ -21,6 +21,7 @@ export interface DesktopBridgeClient {
     onDisconnect: () => void,
   ): Promise<void>;
   sendDesktopMessage(message: unknown): Promise<void>;
+  requestThreadOwner(method: string, params: unknown): Promise<unknown>;
   stop(): Promise<void>;
 }
 
@@ -115,13 +116,12 @@ export class DesktopBridgeTransport implements CodexTransport {
         this.sendHostRequest(message.id, hostRoute, message.params);
         return;
       }
-      this.dispatch({
-        type: "mcp-request",
-        request: message,
-        hostId: this.hostId,
-        priority: "interactive",
-        source: "remote_control",
-      });
+      const ownerRequest = createOwnerRequest(message);
+      if (ownerRequest) {
+        void this.sendThreadOwnerRequest(message, ownerRequest);
+        return;
+      }
+      this.dispatchRpcRequest(message);
       return;
     }
     if (isRpcResponse(message)) {
@@ -193,6 +193,41 @@ export class DesktopBridgeTransport implements CodexTransport {
       hostId: this.hostId,
       requestMethod,
       response,
+    });
+  }
+
+  private async sendThreadOwnerRequest(
+    original: Extract<RpcMessage, { id: string | number; method: string }>,
+    ownerRequest: { method: string; params: unknown },
+  ) {
+    try {
+      const response = await this.options.client.requestThreadOwner(
+        ownerRequest.method,
+        ownerRequest.params,
+      );
+      this.onMessage?.({ id: original.id, result: unwrapOwnerResponse(response) });
+    } catch (cause) {
+      if (isOwnerUnavailable(cause)) {
+        this.dispatchRpcRequest(original);
+        return;
+      }
+      this.onMessage?.({
+        id: original.id,
+        error: {
+          code: -32003,
+          message: cause instanceof Error ? cause.message : "Desktop thread owner request failed",
+        },
+      });
+    }
+  }
+
+  private dispatchRpcRequest(request: RpcMessage) {
+    this.dispatch({
+      type: "mcp-request",
+      request,
+      hostId: this.hostId,
+      priority: "interactive",
+      source: "remote_control",
     });
   }
 
@@ -324,6 +359,76 @@ export class DesktopBridgeTransport implements CodexTransport {
       this.markDisconnected(true);
     });
   }
+}
+
+function createOwnerRequest(message: RpcMessage) {
+  if (!isRpcRequest(message) || !message.params || typeof message.params !== "object") return undefined;
+  const params = message.params as Record<string, unknown>;
+  const conversationId = typeof params.threadId === "string" ? params.threadId : undefined;
+  if (!conversationId) return undefined;
+  if (message.method === "thread/settings/update") {
+    const { threadId: _threadId, ...threadSettings } = params;
+    return {
+      method: "thread-follower-update-thread-settings",
+      params: { conversationId, threadSettings },
+    };
+  }
+  if (message.method !== "turn/steer" || !Array.isArray(params.input)) return undefined;
+  const text = params.input
+    .map((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "text"
+      ? (item as Record<string, unknown>).text
+      : undefined)
+    .filter((value): value is string => typeof value === "string")
+    .join("\n");
+  const clientUserMessageId = randomUUID();
+  return {
+    method: "thread-follower-steer-turn",
+    params: {
+      conversationId,
+      input: params.input,
+      restoreMessage: {
+        id: randomUUID(),
+        text,
+        context: {
+          prompt: text,
+          addedFiles: [],
+          fileAttachments: [],
+          ideContext: null,
+          imageAttachments: [],
+          commentAttachments: [],
+          workspaceRoots: [],
+        },
+        cwd: null,
+        createdAt: Date.now(),
+      },
+      serviceTier: params.serviceTier,
+      attachments: [],
+      clientUserMessageId,
+      additionalContext: params.additionalContext,
+    },
+  };
+}
+
+function unwrapOwnerResponse(value: unknown) {
+  if (!value || typeof value !== "object") return value;
+  const response = value as Record<string, unknown>;
+  const result = response.result;
+  if (!result || typeof result !== "object") return result;
+  const resultRecord = result as Record<string, unknown>;
+  return Object.prototype.hasOwnProperty.call(resultRecord, "result")
+    ? resultRecord.result
+    : resultRecord;
+}
+
+function isOwnerUnavailable(cause: unknown) {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return message.includes("desktop-thread-owner-unavailable") ||
+    message.includes("desktop-owner-module-not-found") ||
+    message.includes("desktop-owner-rpc-factory-not-found") ||
+    message.includes("desktop-owner-coordination-unavailable") ||
+    message.includes("no-client-found") ||
+    message.includes("client-disconnected") ||
+    message.includes("webcontents-destroyed");
 }
 
 function isDesktopEnvelope(value: unknown): value is DesktopEnvelope {

@@ -1,7 +1,10 @@
 // @vitest-environment node
 
 import { once } from "node:events";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import WebSocket from "ws";
 import { describe, expect, it } from "vitest";
 import type {
@@ -238,6 +241,125 @@ describe("gateway server", () => {
     socket.close();
     await once(socket, "close");
     await gateway.stop();
+  });
+
+  it("accepts authenticated images, stores them privately, and resolves opaque ids before RPC", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-remote-images-"));
+    const transport = new FakeTransport();
+    const gateway = createGateway({
+      port: 0,
+      token,
+      allowedOrigins: [origin],
+      uploadDir,
+      transport,
+    });
+    const address = await gateway.start();
+    try {
+      const login = await fetch(`http://127.0.0.1:${address.port}/auth/session`, {
+        method: "POST",
+        headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
+      const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+      const upload = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: {
+          origin,
+          cookie: cookie as string,
+          "content-type": "image/png",
+          "x-file-name": "../../private.png",
+        },
+        body: png,
+      });
+      expect(upload.status).toBe(201);
+      const uploaded = await upload.json() as { id: string; name: string; mimeType: string };
+      expect(uploaded).toMatchObject({
+        id: expect.stringMatching(/^[0-9a-f-]+$/),
+        name: "private.png",
+        mimeType: "image/png",
+      });
+
+      const socket = await connect(address, undefined, origin, cookie);
+      await nextJson(socket);
+      socket.send(JSON.stringify({
+        type: "rpc",
+        payload: {
+          id: 91,
+          method: "turn/start",
+          params: {
+            threadId: "thread-1",
+            input: [
+              { type: "text", text: "Inspect this" },
+              { type: "remoteImage", id: uploaded.id },
+            ],
+          },
+        },
+      }));
+      const forwarded = await waitForSentMethod(transport, "turn/start");
+      const imageInput = (forwarded as { params: { input: Array<Record<string, unknown>> } })
+        .params.input[1];
+      expect(imageInput).toMatchObject({ type: "localImage" });
+      expect(imageInput?.path).toBe(join(uploadDir, `${uploaded.id}.png`));
+      expect(await readFile(imageInput?.path as string)).toEqual(png);
+      expect((await stat(imageInput?.path as string)).mode & 0o777).toBe(0o600);
+      socket.close();
+      await once(socket, "close");
+    } finally {
+      await gateway.stop();
+      await rm(uploadDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unauthenticated, oversized, and content-spoofed image uploads", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-remote-images-"));
+    const gateway = createGateway({
+      port: 0,
+      token,
+      allowedOrigins: [origin],
+      uploadDir,
+      transport: new FakeTransport(),
+    });
+    const address = await gateway.start();
+    try {
+      const unauthorized = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: { origin, "content-type": "image/png" },
+        body: Buffer.from("89504e470d0a1a0a", "hex"),
+      });
+      expect(unauthorized.status).toBe(401);
+
+      const login = await fetch(`http://127.0.0.1:${address.port}/auth/session`, {
+        method: "POST",
+        headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const cookie = login.headers.get("set-cookie")?.split(";", 1)[0] as string;
+      const spoofed = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: { origin, cookie, "content-type": "image/png" },
+        body: Buffer.from("not a png"),
+      });
+      expect(spoofed.status).toBe(415);
+
+      const oversized = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: {
+          origin,
+          cookie,
+          "content-type": "image/png",
+        },
+        body: Buffer.alloc(10 * 1024 * 1024 + 1),
+      });
+      expect(oversized.status).toBe(413);
+    } finally {
+      await gateway.stop();
+      await rm(uploadDir, { recursive: true, force: true });
+    }
   });
 
   it("does not create a browser session for a wrong token or foreign origin", async () => {

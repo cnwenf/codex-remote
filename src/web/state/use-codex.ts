@@ -18,7 +18,7 @@ import {
   permissionStateFromProtocol,
   type PermissionModeVisibility,
 } from "../../protocol/permissions";
-import { CodexSocket } from "../api/socket";
+import { CodexSocket, uploadImage } from "../api/socket";
 
 export type ConnectionState = "disconnected" | "connecting" | "ready";
 export type TransportMode = "desktop-live" | "desktop-cold" | "web-live";
@@ -412,7 +412,7 @@ export function useCodex(socketOverride?: CodexSocket) {
   );
 
   const sendInstruction = useCallback(
-    async (text: string) => {
+    async (text: string, images: File[] = []) => {
       if (!selectedThreadId) throw new Error("Select a task first");
       if (threadLoadError?.threadId === selectedThreadId) {
         throw new Error(threadLoadError.message);
@@ -421,7 +421,14 @@ export function useCodex(socketOverride?: CodexSocket) {
       if (thread?.desktopMirror && !desktopControlAvailable) {
         throw new Error("此对话正由 Codex Desktop 运行，Web 当前为同步查看模式");
       }
-      const input = [{ type: "text", text }];
+      const uploaded = images.length > 0
+        ? await Promise.all(images.map((image) => uploadImage(image)))
+        : [];
+      const input = [
+        ...(text ? [{ type: "text", text }] : []),
+        ...uploaded.map((image) => ({ type: "remoteImage", id: image.id })),
+      ];
+      if (input.length === 0) throw new Error("请输入消息或添加图片");
       if (thread?.status === "running") {
         await socket.request("turn/steer", {
           threadId: selectedThreadId,

@@ -4,6 +4,9 @@ import { DesktopBridgeTransport, type DesktopBridgeClient } from "./desktop-brid
 
 class FakeBridgeClient implements DesktopBridgeClient {
   sent: unknown[] = [];
+  ownerRequests: Array<{ method: string; params: unknown }> = [];
+  ownerRequestResult: unknown = { method: "thread-follower-update-thread-settings", result: { ok: true } };
+  ownerRequestError?: Error;
   startCalls = 0;
   onMessage?: (message: unknown) => void;
   onDisconnect?: () => void;
@@ -16,6 +19,12 @@ class FakeBridgeClient implements DesktopBridgeClient {
 
   async sendDesktopMessage(message: unknown) {
     this.sent.push(message);
+  }
+
+  async requestThreadOwner(method: string, params: unknown) {
+    this.ownerRequests.push({ method, params });
+    if (this.ownerRequestError) throw this.ownerRequestError;
+    return this.ownerRequestResult;
   }
 
   async stop() {}
@@ -155,6 +164,106 @@ describe("DesktopBridgeTransport", () => {
 
     client.onMessage?.({ type: "pinned-threads-updated" });
     expect(messages).toContainEqual({ method: "desktop/pins/updated", params: {} });
+    await transport.stop();
+  });
+
+  it("updates settings through the Desktop thread owner so the Desktop UI stays in sync", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    transport.send({
+      id: 21,
+      method: "thread/settings/update",
+      params: {
+        threadId: "thread-1",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "danger-full-access" },
+      },
+    });
+
+    await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(1));
+    expect(client.ownerRequests[0]).toEqual({
+      method: "thread-follower-update-thread-settings",
+      params: {
+        conversationId: "thread-1",
+        threadSettings: {
+          model: "gpt-5.6-sol",
+          effort: "high",
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "danger-full-access" },
+        },
+      },
+    });
+    expect(messages).toContainEqual({ id: 21, result: { ok: true } });
+    expect(client.sent).toEqual([]);
+    await transport.stop();
+  });
+
+  it("steers through the Desktop thread owner so the user message appears in Desktop", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    client.ownerRequestResult = {
+      method: "thread-follower-steer-turn",
+      result: { result: { turnId: "turn-1" } },
+    };
+    transport.send({
+      id: 22,
+      method: "turn/steer",
+      params: {
+        threadId: "thread-1",
+        expectedTurnId: "turn-1",
+        input: [
+          { type: "text", text: "Continue from the phone" },
+          { type: "localImage", path: "/safe/upload/image.png" },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(1));
+    const ownerRequest = client.ownerRequests[0];
+    expect(ownerRequest?.method).toBe("thread-follower-steer-turn");
+    expect(ownerRequest?.params).toMatchObject({
+      conversationId: "thread-1",
+      input: [
+        { type: "text", text: "Continue from the phone" },
+        { type: "localImage", path: "/safe/upload/image.png" },
+      ],
+      restoreMessage: {
+        text: "Continue from the phone",
+        context: {
+          prompt: "Continue from the phone",
+          addedFiles: [],
+          fileAttachments: [],
+          imageAttachments: [],
+        },
+      },
+    });
+    expect(ownerRequest?.params).toMatchObject({
+      clientUserMessageId: expect.any(String),
+      restoreMessage: { id: expect.any(String), createdAt: expect.any(Number) },
+    });
+    expect(messages).toContainEqual({ id: 22, result: { turnId: "turn-1" } });
+    expect(client.sent).toEqual([]);
+    await transport.stop();
+  });
+
+  it("falls back to App Server when the Desktop thread is not open", async () => {
+    const { client, transport } = await createStartedTransport();
+    client.ownerRequestError = new Error("desktop-thread-owner-unavailable");
+    transport.send({
+      id: 23,
+      method: "turn/steer",
+      params: { threadId: "thread-closed", input: [{ type: "text", text: "Continue" }] },
+    });
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    expect(client.sent[0]).toMatchObject({
+      type: "mcp-request",
+      request: {
+        id: 23,
+        method: "turn/steer",
+        params: { threadId: "thread-closed", input: [{ type: "text", text: "Continue" }] },
+      },
+    });
     await transport.stop();
   });
 

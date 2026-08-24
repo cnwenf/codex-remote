@@ -1,4 +1,13 @@
-import { useState, type FocusEvent, type FormEvent, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type FocusEvent,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import type { ModelOption, PermissionOption } from "../state/use-codex";
 
 export type ComposerSettings = {
@@ -8,7 +17,7 @@ export type ComposerSettings = {
 };
 
 type ComposerProps = {
-  onSend: (text: string) => Promise<void> | void;
+  onSend: (text: string, images: File[]) => Promise<void> | void;
   running: boolean;
   onStop?: () => Promise<void> | void;
   disabled?: boolean;
@@ -36,21 +45,62 @@ export function Composer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [images, setImages] = useState<File[]>([]);
+  const previews = useMemo(() => images.map((file) => ({
+    file,
+    url: typeof URL.createObjectURL === "function" ? URL.createObjectURL(file) : "",
+  })), [images]);
+
+  useEffect(() => () => {
+    for (const preview of previews) {
+      if (preview.url && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(preview.url);
+    }
+  }, [previews]);
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const instruction = text.trim();
-    if (!instruction || busy || disabled) return;
+    if ((!instruction && images.length === 0) || busy || disabled) return;
     setBusy(true);
     setError(undefined);
     try {
-      await onSend(instruction);
+      await onSend(instruction, images);
       setText("");
+      setImages([]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not send instruction");
     } finally {
       setBusy(false);
     }
+  }
+
+  function addImages(files: File[]) {
+    const accepted = files.filter((file) =>
+      ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)
+    );
+    if (accepted.length !== files.length) {
+      setError("仅支持 PNG、JPEG、GIF 和 WebP 图片");
+      return;
+    }
+    if (accepted.some((file) => file.size > 10 * 1024 * 1024)) {
+      setError("单张图片不能超过 10 MB");
+      return;
+    }
+    setError(undefined);
+    setImages((current) => [...current, ...accepted].slice(0, 4));
+  }
+
+  function handleImageChange(event: ChangeEvent<HTMLInputElement>) {
+    addImages(Array.from(event.target.files ?? []));
+    event.target.value = "";
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const pasted = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (pasted.length > 0) addImages(pasted);
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -89,10 +139,28 @@ export function Composer({
         value={text}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
         placeholder={running ? "Add guidance while Codex works" : "What should Codex do next?"}
         rows={2}
         disabled={disabled}
       />
+      {previews.length > 0 ? (
+        <div className="composer-images" aria-label="待发送图片">
+          {previews.map(({ file, url }, index) => (
+            <div className="composer-image" key={`${file.name}-${file.size}-${index}`}>
+              {url ? <img src={url} alt="" /> : null}
+              <span title={file.name}>{file.name}</span>
+              <button
+                type="button"
+                aria-label={`移除 ${file.name}`}
+                onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {(models.length > 0 || permissions.length > 0 || model || permission) ? (
         <div className="composer-settings" aria-label="对话设置">
           <div
@@ -174,13 +242,28 @@ export function Composer({
         </div>
       ) : null}
       <div className="composer-actions">
+        <label className="image-picker" title="添加图片">
+          <span aria-hidden="true">＋</span>
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            multiple
+            aria-label="添加图片"
+            onChange={handleImageChange}
+            disabled={disabled || busy || images.length >= 4}
+          />
+        </label>
         <span className="composer-hint">⌘↵ to send</span>
         {running && onStop ? (
           <button className="stop-button" type="button" onClick={stop} disabled={busy}>
             Stop
           </button>
         ) : null}
-        <button className="primary-button" type="submit" disabled={!text.trim() || busy || disabled}>
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={(!text.trim() && images.length === 0) || busy || disabled}
+        >
           {busy ? "Working…" : running ? "Steer" : "Send"}
         </button>
       </div>

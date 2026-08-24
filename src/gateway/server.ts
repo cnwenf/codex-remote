@@ -1,7 +1,8 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { extname, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { extname, join, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { RpcRouter } from "../protocol/rpc-router";
@@ -19,6 +20,11 @@ import {
   readCookie,
   SESSION_COOKIE_NAME,
 } from "./auth";
+import {
+  ImageUploadError,
+  ImageUploadStore,
+  MAX_IMAGE_BYTES,
+} from "./image-upload-store";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 4 * 1024;
@@ -38,6 +44,7 @@ type GatewayOptions = {
   token: string;
   allowedOrigins?: string[];
   staticDir?: string;
+  uploadDir?: string;
   defaultCwd?: string;
   transport: CodexTransport;
   desktopState?: {
@@ -55,6 +62,9 @@ export function createGateway(options: GatewayOptions) {
   const controllers = new Map<string, WebSocket>();
   let nextControllerId = 1;
   const sessionCredential = createSessionCredential(options.token);
+  const imageStore = new ImageUploadStore(
+    options.uploadDir ?? join(homedir(), ".codex", "codex-remote", "uploads"),
+  );
   let allowedOrigins = new Set(options.allowedOrigins ?? []);
   let initializeResolve: (() => void) | undefined;
   let initializeReject: ((error: Error) => void) | undefined;
@@ -69,6 +79,10 @@ export function createGateway(options: GatewayOptions) {
     }
     if (pathname === "/auth/session") {
       void handleSessionRequest(request, response);
+      return;
+    }
+    if (pathname === "/api/images") {
+      void handleImageUpload(request, response);
       return;
     }
     serveStatic(request, response, options.staticDir);
@@ -137,7 +151,26 @@ export function createGateway(options: GatewayOptions) {
           void handleDesktopStateRequest(socket, envelope.payload);
           return;
         }
-        const routed = router.fromBrowser(clientId, envelope.payload);
+        let browserMessage: RpcMessage;
+        try {
+          browserMessage = resolveRemoteImages(envelope.payload, imageStore);
+        } catch (cause) {
+          if (isRpcRequest(envelope.payload)) {
+            sendEnvelope(socket, {
+              type: "rpc",
+              payload: {
+                id: envelope.payload.id,
+                error: {
+                  code: -32602,
+                  message: cause instanceof Error ? cause.message : "Invalid image attachment",
+                },
+              },
+            });
+            return;
+          }
+          throw cause;
+        }
+        const routed = router.fromBrowser(clientId, browserMessage);
         if (!routed) return;
         try {
           options.transport.send(routed);
@@ -317,6 +350,43 @@ export function createGateway(options: GatewayOptions) {
     }
   }
 
+  async function handleImageUpload(request: IncomingMessage, response: ServerResponse) {
+    response.setHeader("Cache-Control", "no-store");
+    if (request.method !== "POST") {
+      response.writeHead(405, { Allow: "POST" }).end();
+      return;
+    }
+    if (!isAllowedOrigin(request.headers.origin, allowedOrigins)) {
+      response.writeHead(403).end();
+      return;
+    }
+    const providedSession = readCookie(request.headers.cookie, SESSION_COOKIE_NAME);
+    if (!providedSession || !isAuthorized(providedSession, sessionCredential)) {
+      response.writeHead(401).end();
+      return;
+    }
+    const mimeType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+    if (!mimeType?.startsWith("image/")) {
+      response.writeHead(415).end();
+      return;
+    }
+    try {
+      const body = await readRawBody(request, MAX_IMAGE_BYTES);
+      const originalName = singleHeader(request.headers["x-file-name"]);
+      const stored = await imageStore.save(body, mimeType, originalName);
+      response.writeHead(201, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({
+        id: stored.id,
+        name: stored.name,
+        mimeType: stored.mimeType,
+        size: stored.size,
+      }));
+    } catch (cause) {
+      const status = cause instanceof ImageUploadError ? cause.status : 400;
+      response.writeHead(status).end();
+    }
+  }
+
   function initializeTransport() {
     return new Promise<void>((resolveInitialize, rejectInitialize) => {
       const timeout = setTimeout(() => {
@@ -430,7 +500,7 @@ function rawDataToBuffer(data: RawData) {
 }
 
 function setSecurityHeaders(response: ServerResponse) {
-  response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
+  response.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'");
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
@@ -497,6 +567,56 @@ function readJsonBody(request: IncomingMessage) {
       }
     });
   });
+}
+
+function readRawBody(request: IncomingMessage, maxBytes: number) {
+  const declaredLength = Number.parseInt(request.headers["content-length"] ?? "0", 10);
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    request.resume();
+    return Promise.reject(new ImageUploadError("image-too-large", 413));
+  }
+  return new Promise<Buffer>((resolveBody, rejectBody) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let rejected = false;
+    request.on("data", (chunk: Buffer) => {
+      size += chunk.byteLength;
+      if (size > maxBytes) {
+        rejected = true;
+        rejectBody(new ImageUploadError("image-too-large", 413));
+        request.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.once("error", rejectBody);
+    request.once("end", () => {
+      if (!rejected) resolveBody(Buffer.concat(chunks));
+    });
+  });
+}
+
+function singleHeader(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function resolveRemoteImages(message: RpcMessage, store: ImageUploadStore): RpcMessage {
+  if (!isRpcRequest(message) || (message.method !== "turn/start" && message.method !== "turn/steer")) {
+    return message;
+  }
+  if (!message.params || typeof message.params !== "object") return message;
+  const params = message.params as Record<string, unknown>;
+  if (!Array.isArray(params.input)) return message;
+  const input = params.input.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const record = item as Record<string, unknown>;
+    if (record.type !== "remoteImage") return item;
+    if (typeof record.id !== "string" || Object.keys(record).some((key) => key !== "type" && key !== "id")) {
+      throw new ImageUploadError("image-attachment-invalid", 400);
+    }
+    return { type: "localImage", path: store.resolve(record.id) };
+  });
+  return { ...message, params: { ...params, input } };
 }
 
 function transportRpcError(cause: unknown) {

@@ -42,6 +42,25 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   ).toBe(true);
 });
 
+test("uploads an image and sends it with the conversation", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+
+  await page.getByLabel("添加图片").setInputFiles({
+    name: "screen.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
+  });
+  await expect(page.getByText("screen.png")).toBeVisible();
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.getByText("screen.png")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Checks complete", level: 2 })).toBeVisible();
+});
+
 test("new conversation selects project permission model and reasoning effort", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");

@@ -10,9 +10,15 @@ type CdpRequest = {
 
 export class FakeCdpServer {
   readonly requests: CdpRequest[] = [];
+  readonly ownerRequests: CdpRequest[] = [];
+  ownerResponse: unknown = {
+    method: "thread-follower-update-thread-settings",
+    result: { ok: true },
+  };
   private readonly httpServer: Server;
   private readonly websocketServer: WebSocketServer;
   private socket?: WebSocket;
+  private ownerSocket?: WebSocket;
 
   constructor() {
     this.httpServer = createServer((request, response) => {
@@ -44,25 +50,38 @@ export class FakeCdpServer {
           url: "file:///Applications/ChatGPT.app/Contents/Resources/app.asar/webview/index.html",
           webSocketDebuggerUrl: `ws://127.0.0.1:${address.port}/devtools/page/codex`,
         },
+        {
+          id: "codex-avatar-overlay",
+          type: "page",
+          title: "Codex",
+          url: "app://-/index.html?initialRoute=%2Favatar-overlay",
+          webSocketDebuggerUrl: `ws://127.0.0.1:${address.port}/devtools/page/codex-avatar-overlay`,
+        },
       ]));
     });
     this.websocketServer = new WebSocketServer({ noServer: true });
     this.httpServer.on("upgrade", (request, socket, head) => {
-      if (request.url !== "/devtools/page/codex") {
+      if (request.url !== "/devtools/page/codex" && request.url !== "/devtools/page/codex-avatar-overlay") {
         socket.destroy();
         return;
       }
       this.websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        (websocket as WebSocket & { fakeOwner?: boolean }).fakeOwner =
+          request.url === "/devtools/page/codex-avatar-overlay";
         this.websocketServer.emit("connection", websocket, request);
       });
     });
     this.websocketServer.on("connection", (socket) => {
-      this.socket = socket;
+      const owner = (socket as WebSocket & { fakeOwner?: boolean }).fakeOwner === true;
+      if (owner) this.ownerSocket = socket;
+      else this.socket = socket;
       socket.on("message", (raw) => {
         const request = JSON.parse(raw.toString()) as CdpRequest;
-        this.requests.push(request);
+        (owner ? this.ownerRequests : this.requests).push(request);
         const runtimeResult = request.method === "Runtime.evaluate"
-          ? { objectId: "window-1", type: "object" }
+          ? { objectId: owner ? "owner-window-1" : "window-1", type: "object" }
+          : owner && request.method === "Runtime.callFunctionOn"
+            ? { value: this.ownerResponse }
           : { value: true };
         socket.send(JSON.stringify({ id: request.id, result: { result: runtimeResult } }));
       });
@@ -91,6 +110,7 @@ export class FakeCdpServer {
 
   async stop() {
     this.socket?.terminate();
+    this.ownerSocket?.terminate();
     await new Promise<void>((resolve) => this.websocketServer.close(() => resolve()));
     await new Promise<void>((resolve, reject) => {
       this.httpServer.close((error) => error ? reject(error) : resolve());

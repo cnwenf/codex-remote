@@ -164,6 +164,41 @@ export async function createBrowserSession(
   if (!response.ok) throw new Error("codex-session-login-failed");
 }
 
+export type UploadedImage = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+export async function uploadImage(file: File, fetcher: typeof fetch = fetch): Promise<UploadedImage> {
+  const response = await fetcher("/api/images", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "content-type": file.type,
+      "x-file-name": encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!response.ok) {
+    if (response.status === 413) throw new Error("图片不能超过 10 MB");
+    if (response.status === 415) throw new Error("仅支持 PNG、JPEG、GIF 和 WebP 图片");
+    if (response.status === 401) throw new Error("登录已失效，请重新登录");
+    throw new Error("图片上传失败");
+  }
+  const value = await response.json() as unknown;
+  if (!value || typeof value !== "object") throw new Error("图片上传响应无效");
+  const image = value as Record<string, unknown>;
+  if (
+    typeof image.id !== "string" || typeof image.name !== "string" ||
+    typeof image.mimeType !== "string" || typeof image.size !== "number"
+  ) {
+    throw new Error("图片上传响应无效");
+  }
+  return image as UploadedImage;
+}
+
 function defaultSocketUrl() {
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${scheme}//${window.location.host}/rpc`;
