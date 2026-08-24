@@ -38,8 +38,8 @@ GitHub 地址：git@github.com:cnwenf/codex-remote.git
 3. 获得我的选择和 token 后，通过上述 SSH 地址把项目克隆到 `$HOME/code/codex-remote`。如果 GitHub SSH 鉴权失败，停下来告诉我，不要改用来源不明的仓库。如果目录已经存在，就在保留本地改动的前提下更新项目；遇到冲突时停下来说明，不要覆盖本地文件。
 4. 完整阅读项目 README，严格按照 README 中的持久化安装方式操作，不要自行设计其他启动或保活方式。
 5. 把我提供的鉴权 token 保存到项目的 `.runtime/token`，目录权限设置为 `700`，文件权限设置为 `600`。不要把 token 写入 URL、LaunchAgent plist、日志或 Git。
-6. 使用我选定的本地私网 IP、README 指定的端口和安装脚本完成配置。安装过程需要正常重启一次 Codex Desktop；执行重启前先明确提醒我一次。
-7. Desktop 重新启动后，检查 Desktop LaunchAgent、Gateway LaunchAgent、DevTools 回环监听和 Web 健康状态，并执行 README 中的 30 秒稳定性检查。
+6. 使用我选定的本地私网 IP、README 指定的端口和安装脚本完成持久化配置。必须让 Desktop LaunchAgent 和 Gateway LaunchAgent 在当前用户登录后自动启动，并在进程退出后自动拉起；不能只启动临时进程。安装过程需要正常重启一次 Codex Desktop；执行重启前先明确提醒我一次。
+7. Desktop 重新启动后，确认两个 LaunchAgent 均已加载，并验证它们的 plist 都是 `RunAtLoad=true`、`KeepAlive=true`；然后检查 DevTools 回环监听和 Web 健康状态，并执行 README 中的 30 秒稳定性检查。
 8. 安装和检查完成后，告诉我：
    - 手机或其他电脑应该访问的完整 URL。
    - Web 登录使用的鉴权 token。
