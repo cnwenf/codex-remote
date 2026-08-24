@@ -126,6 +126,13 @@ jobs:
       - run: pnpm mobile:sync
       - run: scripts/build-ios-simulator.sh
       - run: scripts/build-ios-unsigned.sh
+      - name: Upload iOS build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-diagnostics
+          path: artifacts/ios-simulator-build.log
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: ios-simulator
