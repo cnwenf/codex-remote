@@ -33,15 +33,14 @@ ifconfig | awk '/^[a-z0-9]+:/{iface=$1; sub(":$", "", iface)} /inet / && $2 != "
 GitHub 地址：git@github.com:cnwenf/codex-remote.git
 
 请按以下要求执行：
-1. 先询问我两个配置，不要自行猜测：
-   - Web 服务需要绑定的 Mac 本地私网 IPv4 地址。
-   - Web 登录使用的鉴权 token。
-2. 获得我的回复后，通过上述 SSH 地址把项目克隆到 `$HOME/code/codex-remote`。如果 GitHub SSH 鉴权失败，停下来告诉我，不要改用来源不明的仓库。如果目录已经存在，就在保留本地改动的前提下更新项目；遇到冲突时停下来说明，不要覆盖本地文件。
-3. 完整阅读项目 README，严格按照 README 中的持久化安装方式操作，不要自行设计其他启动或保活方式。
-4. 把我提供的鉴权 token 保存到项目的 `.runtime/token`，目录权限设置为 `700`，文件权限设置为 `600`。不要把 token 写入 URL、LaunchAgent plist、日志或 Git。
-5. 使用我提供的本地私网 IP、README 指定的端口和安装脚本完成配置。安装过程需要正常重启一次 Codex Desktop；执行重启前先明确提醒我一次。
-6. Desktop 重新启动后，检查 Desktop LaunchAgent、Gateway LaunchAgent、DevTools 回环监听和 Web 健康状态，并执行 README 中的 30 秒稳定性检查。
-7. 安装和检查完成后，告诉我：
+1. 先查看这台 Mac 当前所有非回环 IPv4 地址，保留网卡名称和 IP 地址。不要自行选择，也不要把 `127.0.0.1` 当作远程访问地址。
+2. 把候选地址列表展示给我，让我选择 Web 服务需要绑定的本地私网 IPv4；同时询问我 Web 登录使用的鉴权 token。不要自行猜测 IP 或 token。
+3. 获得我的选择和 token 后，通过上述 SSH 地址把项目克隆到 `$HOME/code/codex-remote`。如果 GitHub SSH 鉴权失败，停下来告诉我，不要改用来源不明的仓库。如果目录已经存在，就在保留本地改动的前提下更新项目；遇到冲突时停下来说明，不要覆盖本地文件。
+4. 完整阅读项目 README，严格按照 README 中的持久化安装方式操作，不要自行设计其他启动或保活方式。
+5. 把我提供的鉴权 token 保存到项目的 `.runtime/token`，目录权限设置为 `700`，文件权限设置为 `600`。不要把 token 写入 URL、LaunchAgent plist、日志或 Git。
+6. 使用我选定的本地私网 IP、README 指定的端口和安装脚本完成配置。安装过程需要正常重启一次 Codex Desktop；执行重启前先明确提醒我一次。
+7. Desktop 重新启动后，检查 Desktop LaunchAgent、Gateway LaunchAgent、DevTools 回环监听和 Web 健康状态，并执行 README 中的 30 秒稳定性检查。
+8. 安装和检查完成后，告诉我：
    - 手机或其他电脑应该访问的完整 URL。
    - Web 登录使用的鉴权 token。
    - Codex Desktop 已经完成一次重启。
