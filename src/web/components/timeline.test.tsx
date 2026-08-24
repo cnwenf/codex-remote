@@ -5,6 +5,32 @@ import type { CodexThread } from "../../protocol/thread-store";
 import { Timeline } from "./timeline";
 
 describe("Timeline", () => {
+  it("renders the latest Desktop todo list with pending running and completed states", () => {
+    const thread: CodexThread = {
+      id: "todo",
+      title: "Todo",
+      status: "running",
+      turnOrder: [],
+      turns: {},
+      todoList: {
+        explanation: "Keep this list current",
+        items: [
+          { step: "Inspect", status: "completed" },
+          { step: "Implement", status: "inProgress" },
+          { step: "Verify", status: "pending" },
+        ],
+      },
+    };
+
+    render(<Timeline thread={thread} />);
+
+    expect(screen.getByLabelText("任务进度，1/3 已完成")).toBeVisible();
+    expect(screen.getByText("Keep this list current")).toBeVisible();
+    expect(screen.getByText("Inspect").closest("li")).toHaveClass("todo-completed");
+    expect(screen.getByText("Implement").closest("li")).toHaveClass("todo-inProgress");
+    expect(screen.getByText("Verify").closest("li")).toHaveClass("todo-pending");
+  });
+
   it("groups execution events inside their conversation turn", async () => {
     const thread: CodexThread = {
       id: "t1",

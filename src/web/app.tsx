@@ -170,6 +170,7 @@ export function App() {
                 ) : null}
               </ConversationViewport>
               <Composer
+                draftKey={codex.selectedThread.id}
                 onSend={codex.sendInstruction}
                 running={codex.selectedThread.status === "running"}
                 onStop={codex.selectedThread.status === "running" ? codex.interrupt : undefined}

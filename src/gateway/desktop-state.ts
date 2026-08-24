@@ -16,6 +16,7 @@ const MAX_TITLE_TEXT = 80;
 const STATUS_TAIL_BYTES = 512 * 1024;
 const MAX_STATUS_APPEND_BYTES = 4 * 1024 * 1024;
 const RECENT_ROLLOUT_MS = 10 * 60 * 1_000;
+const TODO_TAIL_BYTES = 32 * 1024 * 1024;
 
 type ThreadRow = {
   id: string;
@@ -33,7 +34,21 @@ type ThreadRow = {
   recency_at_ms: number | null;
 };
 
-type ParsedItem = { id: string; type: string; text: string; status?: string; imageIds?: string[] };
+type DesktopProject = {
+  id: string;
+  name: string;
+  rootPaths: string[];
+};
+
+type ParsedItem = {
+  id: string;
+  type: string;
+  text: string;
+  status?: string;
+  imageIds?: string[];
+  explanation?: string;
+  plan?: Array<{ step: string; status: string }>;
+};
 type RolloutSettings = {
   model?: string;
   reasoningEffort?: string;
@@ -46,6 +61,10 @@ type ParsedTurn = {
   startedAt?: number;
   completedAt?: number;
   durationMs?: number;
+};
+type ParsedTodoList = {
+  explanation?: string;
+  plan: Array<{ step: string; status: string }>;
 };
 
 export class DesktopState {
@@ -76,6 +95,11 @@ export class DesktopState {
     mtimeMs: number;
     size: number;
     settings?: RolloutSettings;
+  }>();
+  private readonly todoCache = new Map<string, {
+    mtimeMs: number;
+    size: number;
+    todoList?: ParsedTodoList;
   }>();
 
   constructor(private readonly databasePath: string) {
@@ -134,9 +158,10 @@ export class DesktopState {
     const pinned = pinnedThreadIds === undefined ? undefined : new Set(pinnedThreadIds);
     const sessionNames = this.readSessionThreadNames();
     const atomState = this.readDesktopAtomState();
+    const projects = this.readDesktopProjects();
     const byId = new Map(rows.map((row) => [
       row.id,
-      this.threadMetadata(row, undefined, pinned?.has(row.id), sessionNames.get(row.id), atomState),
+      this.threadMetadata(row, undefined, pinned?.has(row.id), sessionNames.get(row.id), atomState, projects),
     ]));
     return threadIds.flatMap((id) => byId.get(id) ?? []);
   }
@@ -154,6 +179,7 @@ export class DesktopState {
     const pinned = pinnedThreadIds === undefined ? undefined : new Set(pinnedThreadIds);
     const sessionNames = this.readSessionThreadNames();
     const atomState = this.readDesktopAtomState();
+    const projects = this.readDesktopProjects();
     const orderedRows = pinnedThreadIds === undefined
       ? rows
       : [
@@ -166,6 +192,7 @@ export class DesktopState {
       pinned?.has(row.id),
       sessionNames.get(row.id),
       atomState,
+      projects,
     ));
   }
 
@@ -190,7 +217,16 @@ export class DesktopState {
       cached.permissionKey === permissionKey
     ) return cached.value;
     const turns = parseRollout(readFileSync(rolloutPath, "utf8"), this.imageStore);
-    const value = threadSnapshot(row, turns, isPinned, title, permissionProtocol, latestSettings);
+    const value = threadSnapshot(
+      row,
+      turns,
+      isPinned,
+      title,
+      permissionProtocol,
+      latestSettings,
+      matchDesktopProject(row.cwd, this.readDesktopProjects()),
+      this.readLatestTodoList(row.rollout_path),
+    );
     this.rolloutCache.set(threadId, {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
@@ -225,6 +261,8 @@ export class DesktopState {
         title,
         latestSettings?.permissionProtocol ?? this.readThreadPermissionProtocol(row),
         latestSettings,
+        matchDesktopProject(row.cwd, this.readDesktopProjects()),
+        this.readLatestTodoList(row.rollout_path),
       ),
       history: page.start > 0
         ? { hasMoreBefore: true, beforeCursor: String(page.start) }
@@ -264,6 +302,23 @@ export class DesktopState {
     }
   }
 
+  private readDesktopProjects(): DesktopProject[] {
+    try {
+      const value = asRecord(JSON.parse(readFileSync(this.globalStatePath, "utf8")));
+      return Object.entries(asRecord(value["local-projects"])).flatMap(([key, raw]) => {
+        const project = asRecord(raw);
+        const id = stringValue(project.id) ?? key;
+        const name = stringValue(project.name);
+        const rootPaths = Array.isArray(project.rootPaths)
+          ? [...new Set(project.rootPaths.filter((path): path is string => typeof path === "string" && path.length > 0))]
+          : [];
+        return name && rootPaths.length > 0 ? [{ id, name, rootPaths }] : [];
+      });
+    } catch {
+      return [];
+    }
+  }
+
   private readThreadPermissionProtocol(
     row: ThreadRow,
     atomState = this.readDesktopAtomState(),
@@ -298,6 +353,7 @@ export class DesktopState {
     pinnedOverride?: boolean,
     preferredTitle?: string,
     atomState = this.readDesktopAtomState(),
+    projects = this.readDesktopProjects(),
   ) {
     const settings = this.readRolloutSettings(row.rollout_path);
     return metadata(
@@ -307,6 +363,7 @@ export class DesktopState {
       preferredTitle,
       settings?.permissionProtocol ?? this.readThreadPermissionProtocol(row, atomState),
       settings,
+      matchDesktopProject(row.cwd, projects),
     );
   }
 
@@ -339,6 +396,36 @@ export class DesktopState {
       );
       this.settingsCache.set(rolloutPath, { mtimeMs: stat.mtimeMs, size: stat.size, settings });
       return settings;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readLatestTodoList(path: string) {
+    try {
+      const rolloutPath = this.validateRolloutPath(path);
+      const stat = statSync(rolloutPath);
+      const cached = this.todoCache.get(rolloutPath);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+        return cached.todoList;
+      }
+      if (cached && stat.size >= cached.size) {
+        const appendedBytes = stat.size - cached.size;
+        if (appendedBytes <= MAX_STATUS_APPEND_BYTES) {
+          const appendedTodoList = todoListFromRolloutText(
+            readFileRange(rolloutPath, cached.size, appendedBytes),
+          );
+          const todoList = appendedTodoList ?? cached.todoList;
+          this.todoCache.set(rolloutPath, { mtimeMs: stat.mtimeMs, size: stat.size, todoList });
+          return todoList;
+        }
+      }
+      const length = Math.min(stat.size, TODO_TAIL_BYTES);
+      const todoList = todoListFromRolloutText(
+        readFileRange(rolloutPath, stat.size - length, length),
+      );
+      this.todoCache.set(rolloutPath, { mtimeMs: stat.mtimeMs, size: stat.size, todoList });
+      return todoList;
     } catch {
       return undefined;
     }
@@ -499,6 +586,8 @@ function threadSnapshot(
   title = displayTitle(row),
   permissionProtocol: Record<string, unknown> = storedPermissionProtocol(row),
   settings?: RolloutSettings,
+  project?: DesktopProject,
+  todoList?: ParsedTodoList,
 ) {
   const active = turns.at(-1)?.status === "inProgress";
   return {
@@ -507,8 +596,12 @@ function threadSnapshot(
       id: row.id,
       name: title,
       cwd: row.cwd,
+      projectId: project?.id,
+      projectName: project?.name,
+      projectRootPaths: project?.rootPaths,
       status: { type: active ? "active" : "idle" },
       section: isPinned ? { id: "desktop-pinned", name: "Pinned" } : null,
+      todoList,
       turns,
     },
     model: settings?.model ?? row.model ?? undefined,
@@ -603,12 +696,16 @@ function metadata(
   preferredTitle?: string,
   permissionProtocol: Record<string, unknown> = storedPermissionProtocol(row),
   settings?: RolloutSettings,
+  project?: DesktopProject,
 ) {
   const permission = permissionStateFromProtocol(permissionProtocol);
   return {
     id: row.id,
     title: displayTitle(row, preferredTitle),
     cwd: row.cwd,
+    projectId: project?.id,
+    projectName: project?.name,
+    projectRootPaths: project?.rootPaths,
     isPinned: pinnedOverride ?? row.is_pinned === 1,
     model: settings?.model ?? row.model ?? undefined,
     reasoningEffort: settings?.reasoningEffort ?? row.reasoning_effort ?? undefined,
@@ -621,6 +718,19 @@ function metadata(
     recencyAt: row.recency_at_ms ?? undefined,
     status,
   };
+}
+
+function matchDesktopProject(cwd: string, projects: DesktopProject[]) {
+  const normalizedCwd = resolve(cwd);
+  let best: { project: DesktopProject; length: number } | undefined;
+  for (const project of projects) {
+    for (const rootPath of project.rootPaths) {
+      const normalizedRoot = resolve(rootPath);
+      if (normalizedCwd !== normalizedRoot && !normalizedCwd.startsWith(`${normalizedRoot}${sep}`)) continue;
+      if (!best || normalizedRoot.length > best.length) best = { project, length: normalizedRoot.length };
+    }
+  }
+  return best?.project;
 }
 
 function displayTitle(
@@ -696,6 +806,21 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
         turn.status = eventType === "task_complete" ? "completed" : "interrupted";
         turn.completedAt = timestampValue(payload.completed_at);
         turn.durationMs = numberValue(payload.duration_ms);
+      } else if (eventType === "plan_update" && turnId) {
+        const plan = rolloutPlan(payload.plan);
+        if (plan.length > 0) {
+          const turn = ensureTurn(turnId);
+          const item: ParsedItem = {
+            id: `${turnId}-todo-list`,
+            type: "todoList",
+            text: "",
+            explanation: stringValue(payload.explanation),
+            plan,
+          };
+          const index = turn.items.findIndex((candidate) => candidate.id === item.id);
+          if (index >= 0) turn.items[index] = item;
+          else turn.items.push(item);
+        }
       }
       continue;
     }
@@ -711,6 +836,16 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     else turn.items.push(item);
   }
   return order.map((id) => turns.get(id) as ParsedTurn).filter((turn) => turn.items.length > 0);
+}
+
+function rolloutPlan(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 100).flatMap((entry) => {
+    const record = asRecord(entry);
+    const step = stringValue(record.step)?.trim();
+    if (!step) return [];
+    return [{ step: truncate(step), status: stringValue(record.status) ?? "pending" }];
+  });
 }
 
 function rolloutItem(
@@ -741,6 +876,16 @@ function rolloutItem(
   if (type === "custom_tool_call" || type === "function_call") {
     const name = stringValue(payload.name) ?? "tool";
     const input = stringValue(payload.input);
+    const todoList = name === "exec" && input ? todoListFromExecInput(input) : undefined;
+    if (todoList) {
+      return {
+        id,
+        type: "todoList",
+        text: "",
+        explanation: todoList.explanation,
+        plan: todoList.plan,
+      };
+    }
     return {
       id,
       type: "toolCall",
@@ -749,6 +894,80 @@ function rolloutItem(
     };
   }
   return undefined;
+}
+
+function todoListFromExecInput(input: string) {
+  if (input.length > 1024 * 1024 || !/await\s+tools\.update_plan\s*\(/.test(input)) return undefined;
+  const callStart = input.search(/await\s+tools\.update_plan\s*\(/);
+  const prefix = input.slice(0, callStart).trim();
+  if (prefix && !/^const\s+[A-Za-z_$][\w$]*\s*=\s*$/.test(prefix)) return undefined;
+  const source = input.slice(callStart);
+  const planStart = /(?:\bplan|"plan")\s*:\s*\[/.exec(source);
+  if (!planStart) return undefined;
+  const arrayStart = planStart.index + planStart[0].length;
+  const arrayEnd = findClosingBracket(source, arrayStart);
+  if (arrayEnd < 0) return undefined;
+  const plan = [...source.slice(arrayStart, arrayEnd).matchAll(/\{[^{}]*\}/g)].flatMap((match) => {
+    const step = quotedField(match[0], "step")?.trim();
+    const status = quotedField(match[0], "status");
+    return step && status ? [{ step: truncate(step), status }] : [];
+  }).slice(0, 100);
+  if (plan.length === 0) return undefined;
+  const explanation = quotedField(source.slice(0, planStart.index), "explanation");
+  return { explanation, plan };
+}
+
+function todoListFromRolloutText(raw: string): ParsedTodoList | undefined {
+  const lines = raw.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let entry: Record<string, unknown>;
+    try { entry = asRecord(JSON.parse(lines[index])); } catch { continue; }
+    const payload = asRecord(entry.payload);
+    if (entry.type === "event_msg" && payload.type === "plan_update") {
+      const plan = rolloutPlan(payload.plan);
+      if (plan.length > 0) {
+        return { explanation: stringValue(payload.explanation), plan };
+      }
+    }
+    if (
+      entry.type === "response_item" &&
+      payload.type === "custom_tool_call" &&
+      payload.name === "exec"
+    ) {
+      const input = stringValue(payload.input);
+      const todoList = input ? todoListFromExecInput(input) : undefined;
+      if (todoList) return todoList;
+    }
+  }
+  return undefined;
+}
+
+function findClosingBracket(source: string, start: number) {
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "]") return index;
+  }
+  return -1;
+}
+
+function quotedField(source: string, field: string) {
+  const match = new RegExp(`(?:\\b${field}|"${field}")\\s*:\\s*("(?:\\\\.|[^"\\\\])*")`).exec(source);
+  if (!match) return undefined;
+  try {
+    const value = JSON.parse(match[1]);
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function textContent(value: unknown) {

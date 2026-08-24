@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type ClipboardEvent,
@@ -17,6 +18,7 @@ export type ComposerSettings = {
 };
 
 type ComposerProps = {
+  draftKey?: string;
   onSend: (text: string, images: File[]) => Promise<void> | void;
   running: boolean;
   onStop?: () => Promise<void> | void;
@@ -30,6 +32,7 @@ type ComposerProps = {
 };
 
 export function Composer({
+  draftKey,
   onSend,
   running,
   onStop,
@@ -41,7 +44,8 @@ export function Composer({
   permission,
   onSettingsChange,
 }: ComposerProps) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState(() => readDraft(draftKey));
+  const activeDraftKey = useRef(draftKey);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [permissionOpen, setPermissionOpen] = useState(false);
@@ -57,6 +61,14 @@ export function Composer({
     }
   }, [previews]);
 
+  useEffect(() => {
+    if (activeDraftKey.current === draftKey) return;
+    activeDraftKey.current = draftKey;
+    setText(readDraft(draftKey));
+    setImages([]);
+    setError(undefined);
+  }, [draftKey]);
+
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const instruction = text.trim();
@@ -66,6 +78,7 @@ export function Composer({
     try {
       await onSend(instruction, images);
       setText("");
+      writeDraft(draftKey, "");
       setImages([]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not send instruction");
@@ -137,7 +150,10 @@ export function Composer({
         id="instruction"
         aria-label="Instruction"
         value={text}
-        onChange={(event) => setText(event.target.value)}
+        onChange={(event) => {
+          setText(event.target.value);
+          writeDraft(draftKey, event.target.value);
+        }}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         placeholder={running ? "Add guidance while Codex works" : "What should Codex do next?"}
@@ -270,6 +286,29 @@ export function Composer({
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
     </form>
   );
+}
+
+const DRAFT_STORAGE_PREFIX = "codex-remote:draft:v1:";
+const MAX_DRAFT_LENGTH = 100_000;
+
+function readDraft(key?: string) {
+  if (!key || typeof localStorage === "undefined") return "";
+  try {
+    return (localStorage.getItem(`${DRAFT_STORAGE_PREFIX}${key}`) ?? "").slice(0, MAX_DRAFT_LENGTH);
+  } catch {
+    return "";
+  }
+}
+
+function writeDraft(key: string | undefined, value: string) {
+  if (!key || typeof localStorage === "undefined") return;
+  try {
+    const storageKey = `${DRAFT_STORAGE_PREFIX}${key}`;
+    if (value) localStorage.setItem(storageKey, value.slice(0, MAX_DRAFT_LENGTH));
+    else localStorage.removeItem(storageKey);
+  } catch {
+    // Draft persistence is best-effort when browser storage is unavailable.
+  }
 }
 
 function reasoningLabel(value: string) {

@@ -314,8 +314,16 @@ describe("useCodex", () => {
       method: "turn/start",
       params: { threadId: "t1", input: [{ type: "text", text: "Continue" }] },
     });
-    fake.serverSend({ type: "rpc", payload: { id: turnRequest.id, result: {} } });
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        method: "turn/started",
+        params: { threadId: "t1", turn: { id: "live-turn" } },
+      },
+    });
     await act(() => sending);
+    expect(result.current.selectedThread?.status).toBe("running");
+    fake.serverSend({ type: "rpc", payload: { id: turnRequest.id, result: {} } });
   });
 
   it("keeps a Desktop-backed thread blocked when its lightweight resume fails", async () => {
@@ -786,7 +794,15 @@ describe("useCodex", () => {
             turns: [{
               id: "turn-1",
               status: "inProgress",
-              items: [{ id: "agent-1", type: "agentMessage", text: "Live from Desktop" }],
+              items: [
+                { id: "agent-1", type: "agentMessage", text: "Live from Desktop" },
+                {
+                  id: "todo-1",
+                  type: "todoList",
+                  explanation: "Current plan",
+                  plan: [{ step: "Keep working", status: "inProgress" }],
+                },
+              ],
             }],
           },
         },
@@ -796,6 +812,11 @@ describe("useCodex", () => {
 
     expect(result.current.selectedThreadError).toBeUndefined();
     expect(result.current.selectedThread).toMatchObject({ desktopMirror: true, status: "running" });
+    expect(result.current.selectedThread?.todoList).toEqual({
+      turnId: "turn-1",
+      explanation: "Current plan",
+      items: [{ step: "Keep working", status: "inProgress" }],
+    });
     expect(result.current.selectedThread?.turns["turn-1"].items["agent-1"].text).toBe("Live from Desktop");
 
     act(() => {
@@ -830,6 +851,15 @@ describe("useCodex", () => {
         ],
       },
     });
+    expect(Object.values(result.current.selectedThread!.turns["turn-1"].items)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "userMessage",
+          text: "Continue from the phone",
+          imageIds: ["upload-1"],
+        }),
+      ]),
+    );
     fake.serverSend({ type: "rpc", payload: { id: steerRequest.id, result: {} } });
     await act(() => steering);
     vi.unstubAllGlobals();

@@ -128,6 +128,19 @@ lines.on("line", (line) => {
       },
     });
     send({
+      method: "turn/plan/updated",
+      params: {
+        threadId: "fixture-thread",
+        turnId: "fixture-live-turn",
+        explanation: "Keep the fixture checklist current",
+        plan: [
+          { step: "Inspect fixture", status: "completed" },
+          { step: "Run checks", status: "inProgress" },
+          { step: "Review result", status: "pending" },
+        ],
+      },
+    });
+    send({
       method: "item/completed",
       params: {
         threadId: "fixture-thread",

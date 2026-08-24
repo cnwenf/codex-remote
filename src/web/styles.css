@@ -196,6 +196,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .timeline-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; scrollbar-gutter: stable; padding: 24px clamp(18px, 4vw, 56px); }
 .history-sentinel { width: min(100%, 820px); min-height: 24px; margin: 0 auto 12px; color: var(--ink-muted); font-size: 0.68rem; text-align: center; }
 .timeline { width: min(100%, 820px); margin: 0 auto; padding: 0; list-style: none; }
+.todo-list-card { margin: 0 0 22px; padding: 15px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+.todo-list-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.todo-list-card > header span, .todo-list-card > p { color: var(--ink-muted); font-size: 0.76rem; }
+.todo-list-card > p { margin: 7px 0 0; }
+.todo-list-card > ol { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+.todo-item { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: start; gap: 7px; font-size: 0.86rem; line-height: 1.45; }
+.todo-status { color: var(--ink-muted); text-align: center; }
+.todo-completed { color: var(--ink-muted); text-decoration: line-through; }
+.todo-inProgress .todo-status { color: var(--green); }
 .conversation-turn { margin: 0 0 34px; padding: 0 0 30px; border-bottom: 1px solid var(--line); }
 .conversation-turn:last-child { border-bottom: 0; }
 .message { margin: 0 0 18px; }

@@ -3,6 +3,7 @@ import {
   initialCodexState,
   markCodexStateStale,
   reduceCodexState,
+  todoItems,
   type CodexState,
   type CodexThread,
   type CodexTurn,
@@ -80,12 +81,22 @@ export function useCodex(socketOverride?: CodexSocket) {
   const selectionRequestVersion = useRef(0);
   const historyLoads = useRef(new Set<string>());
   const desktopHistoryThreads = useRef(new Set<string>());
+  const optimisticItemSequence = useRef(0);
+  const turnStartedWaiters = useRef(new Map<string, Set<() => void>>());
 
   useEffect(() => {
     const unsubscribeRpc = socket.subscribe((message) => {
       if (isRpcRequest(message)) {
         setPendingRequests((current) => [...current, message]);
         return;
+      }
+      if ("method" in message && message.method === "turn/started") {
+        const startedThreadId = stringValue(asRecord(message.params).threadId);
+        if (startedThreadId) {
+          const waiters = turnStartedWaiters.current.get(startedThreadId);
+          turnStartedWaiters.current.delete(startedThreadId);
+          for (const resolve of waiters ?? []) resolve();
+        }
       }
       setState((current) => reduceCodexState(current, message));
     });
@@ -430,19 +441,65 @@ export function useCodex(socketOverride?: CodexSocket) {
       ];
       if (input.length === 0) throw new Error("请输入消息或添加图片");
       if (thread?.status === "running") {
-        await socket.request("turn/steer", {
-          threadId: selectedThreadId,
-          expectedTurnId: thread.activeTurnId,
-          input,
-        });
+        const turnId = thread.activeTurnId ?? thread.turnOrder.at(-1);
+        const itemId = `web-steer-${Date.now()}-${optimisticItemSequence.current++}`;
+        if (turnId) {
+          setState((current) => addOptimisticUserMessage(
+            current,
+            selectedThreadId,
+            turnId,
+            itemId,
+            text,
+            uploaded.map((image) => image.id),
+          ));
+        }
+        try {
+          await socket.request("turn/steer", {
+            threadId: selectedThreadId,
+            expectedTurnId: thread.activeTurnId,
+            input,
+          });
+        } catch (cause) {
+          if (turnId) {
+            setState((current) => removeOptimisticItem(current, selectedThreadId, turnId, itemId));
+          }
+          throw cause;
+        }
       } else {
-        await socket.request("turn/start", {
+        const params = {
           threadId: selectedThreadId,
           input,
           ...(thread?.model ? { model: thread.model } : {}),
           ...(thread?.reasoningEffort ? { effort: thread.reasoningEffort } : {}),
           ...permissionRpcParamsFromState(thread ?? {}),
-        });
+        };
+        if (!thread?.desktopMirror) {
+          await socket.request("turn/start", params);
+        } else {
+          let resolveStarted: () => void = () => {};
+          const started = new Promise<"started">((resolve) => {
+            resolveStarted = () => resolve("started");
+          });
+          const waiters = turnStartedWaiters.current.get(selectedThreadId) ?? new Set();
+          waiters.add(resolveStarted);
+          turnStartedWaiters.current.set(selectedThreadId, waiters);
+          const request = socket.request("turn/start", params);
+          try {
+            const outcome = await Promise.race([
+              request.then(() => "response" as const),
+              started,
+            ]);
+            if (outcome === "started") {
+              void request.catch((cause) => {
+                setError(cause instanceof Error ? cause.message : "Could not start task");
+              });
+            }
+          } finally {
+            const currentWaiters = turnStartedWaiters.current.get(selectedThreadId);
+            currentWaiters?.delete(resolveStarted);
+            if (currentWaiters?.size === 0) turnStartedWaiters.current.delete(selectedThreadId);
+          }
+        }
       }
     },
     [desktopControlAvailable, selectedThreadId, socket, state.threads, threadLoadError],
@@ -569,6 +626,75 @@ export function useCodex(socketOverride?: CodexSocket) {
   );
 }
 
+function addOptimisticUserMessage(
+  state: CodexState,
+  threadId: string,
+  turnId: string,
+  itemId: string,
+  text: string,
+  imageIds: string[],
+) {
+  const thread = state.threads[threadId];
+  const turn = thread?.turns[turnId];
+  if (!thread || !turn) return state;
+  return {
+    ...state,
+    threads: {
+      ...state.threads,
+      [threadId]: {
+        ...thread,
+        turns: {
+          ...thread.turns,
+          [turnId]: {
+            ...turn,
+            itemOrder: [...turn.itemOrder, itemId],
+            items: {
+              ...turn.items,
+              [itemId]: {
+                id: itemId,
+                type: "userMessage",
+                text,
+                imageIds: imageIds.length > 0 ? imageIds : undefined,
+                status: "completed",
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function removeOptimisticItem(
+  state: CodexState,
+  threadId: string,
+  turnId: string,
+  itemId: string,
+) {
+  const thread = state.threads[threadId];
+  const turn = thread?.turns[turnId];
+  if (!thread || !turn?.items[itemId]) return state;
+  const items = { ...turn.items };
+  delete items[itemId];
+  return {
+    ...state,
+    threads: {
+      ...state.threads,
+      [threadId]: {
+        ...thread,
+        turns: {
+          ...thread.turns,
+          [turnId]: {
+            ...turn,
+            itemOrder: turn.itemOrder.filter((id) => id !== itemId),
+            items,
+          },
+        },
+      },
+    },
+  };
+}
+
 function replaceThreadList(state: CodexState, value: unknown, metadataValue?: unknown): CodexState {
   const data = asRecord(value).data;
   if (!Array.isArray(data)) return { ...state, stale: false };
@@ -603,6 +729,9 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
         current?.title ??
         "Untitled task",
       cwd: stringValue(desktop?.cwd) ?? stringValue(record.cwd) ?? current?.cwd,
+      projectId: stringValue(desktop?.projectId) ?? current?.projectId,
+      projectName: stringValue(desktop?.projectName) ?? current?.projectName,
+      projectRootPaths: stringArray(desktop?.projectRootPaths) ?? current?.projectRootPaths,
       updatedAt:
         numberValue(desktop?.updatedAt) ??
         numberValue(record.updatedAt) ??
@@ -623,6 +752,7 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
         : stringValue(section.name),
       sectionEnteredAt: numberValue(record.sectionEnteredAt) ?? numberValue(record.section_entered_at),
       desktopMirror: current?.desktopMirror,
+      todoList: current?.todoList,
     };
   }
   return { threadOrder: order, threads, stale: false };
@@ -639,6 +769,15 @@ function hydrateThread(
   if (!id) return state;
   const current = state.threads[id] ?? emptyThread(id);
   const hydratedTurns: Record<string, CodexTurn> = { ...current.turns };
+  let latestTodoList = current.todoList;
+  const recordTodoList = asRecord(record.todoList);
+  const recordTodoItems = todoItems(recordTodoList.plan);
+  if (recordTodoItems.length > 0) {
+    latestTodoList = {
+      explanation: stringValue(recordTodoList.explanation),
+      items: recordTodoItems,
+    };
+  }
   const snapshotTurnOrder: string[] = [];
   const turnValues = Array.isArray(record.turns) ? record.turns : [];
   for (const turnValue of turnValues) {
@@ -655,10 +794,21 @@ function hydrateThread(
       const item = asRecord(itemValue);
       const itemId = stringValue(item.id);
       if (!itemId) continue;
+      const itemType = stringValue(item.type) ?? "item";
+      if (itemType === "todoList" || itemType === "todo-list") {
+        const items = todoItems(item.plan);
+        if (items.length > 0) {
+          latestTodoList = {
+            turnId,
+            explanation: stringValue(item.explanation),
+            items,
+          };
+        }
+      }
       snapshotItemOrder.push(itemId);
       snapshotItems[itemId] = {
         id: itemId,
-        type: stringValue(item.type) ?? "item",
+        type: itemType,
         text: extractItemText(item),
         status: stringValue(item.status),
         imageIds: stringArray(item.imageIds),
@@ -710,6 +860,10 @@ function hydrateThread(
         ...current,
         title: stringValue(record.name) ?? stringValue(record.title) ?? current.title,
         cwd: stringValue(record.cwd) ?? current.cwd,
+        projectId: stringValue(record.projectId) ?? stringValue(outer.projectId) ?? current.projectId,
+        projectName: stringValue(record.projectName) ?? stringValue(outer.projectName) ?? current.projectName,
+        projectRootPaths:
+          stringArray(record.projectRootPaths) ?? stringArray(outer.projectRootPaths) ?? current.projectRootPaths,
         status: activeTurnId ? "running" : normalizeStatus(record.status, current.status),
         turns: hydratedTurns,
         turnOrder,
@@ -721,6 +875,7 @@ function hydrateThread(
         sectionId: stringValue(asRecord(record.section).id) ?? current.sectionId,
         sectionName: stringValue(asRecord(record.section).name) ?? current.sectionName,
         desktopMirror: outer.desktopMirror === true,
+        todoList: latestTodoList,
       },
     },
   };

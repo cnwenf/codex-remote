@@ -79,6 +79,32 @@ describe("reduceCodexState", () => {
     expect(next.threads.t1.status).toBe("idle");
   });
 
+  it("keeps the latest Desktop todo list with normalized live statuses", () => {
+    const next = reduceCodexState(initialCodexState, {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        explanation: "Implementation plan",
+        plan: [
+          { step: "Inspect protocol", status: "completed" },
+          { step: "Build UI", status: "in_progress" },
+          { step: "Run tests", status: "pending" },
+        ],
+      },
+    });
+
+    expect(next.threads.t1.todoList).toEqual({
+      turnId: "turn-1",
+      explanation: "Implementation plan",
+      items: [
+        { step: "Inspect protocol", status: "completed" },
+        { step: "Build UI", status: "inProgress" },
+        { step: "Run tests", status: "pending" },
+      ],
+    });
+  });
+
   it("aggregates command, plan, tool, file, and terminal event streams in their turn", () => {
     const notifications = [
       {

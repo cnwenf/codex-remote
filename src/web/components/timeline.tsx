@@ -13,7 +13,7 @@ export function Timeline({ thread }: { thread?: CodexThread }) {
     );
   }
 
-  if (thread.turnOrder.length === 0) {
+  if (thread.turnOrder.length === 0 && !thread.todoList) {
     return (
       <div className="empty-thread">
         <span aria-hidden="true">↗</span>
@@ -25,6 +25,7 @@ export function Timeline({ thread }: { thread?: CodexThread }) {
 
   return (
     <ol className="timeline" aria-label="对话内容">
+      {thread.todoList ? <TodoListView todoList={thread.todoList} /> : null}
       {thread.turnOrder.map((turnId) => {
         const turn = thread.turns[turnId];
         return turn ? <TurnView key={turnId} turn={turn} /> : null;
@@ -37,7 +38,12 @@ function TurnView({ turn }: { turn: CodexTurn }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const userMessages = items.filter((item) => item.type.toLocaleLowerCase().includes("user"));
   const agentMessages = items.filter((item) => item.type.toLocaleLowerCase().includes("agentmessage"));
-  const activities = items.filter((item) => !userMessages.includes(item) && !agentMessages.includes(item));
+  const activities = items.filter((item) =>
+    !userMessages.includes(item) &&
+    !agentMessages.includes(item) &&
+    item.type !== "todoList" &&
+    item.type !== "todo-list"
+  );
 
   return (
     <li className="conversation-turn" data-turn-id={turn.id}>
@@ -91,6 +97,29 @@ function TurnView({ turn }: { turn: CodexTurn }) {
           <p>正在处理…</p>
         </article>
       ) : null}
+    </li>
+  );
+}
+
+function TodoListView({ todoList }: { todoList: NonNullable<CodexThread["todoList"]> }) {
+  const completed = todoList.items.filter((item) => item.status === "completed").length;
+  return (
+    <li className="todo-list-card" aria-label={`任务进度，${completed}/${todoList.items.length} 已完成`}>
+      <header>
+        <strong>任务进度</strong>
+        <span>{completed}/{todoList.items.length}</span>
+      </header>
+      {todoList.explanation ? <p>{todoList.explanation}</p> : null}
+      <ol>
+        {todoList.items.map((item, index) => (
+          <li className={`todo-item todo-${item.status}`} key={`${item.step}-${index}`}>
+            <span className="todo-status" aria-hidden="true">
+              {item.status === "completed" ? "✓" : item.status === "inProgress" ? "●" : "○"}
+            </span>
+            <span>{item.step}</span>
+          </li>
+        ))}
+      </ol>
     </li>
   );
 }

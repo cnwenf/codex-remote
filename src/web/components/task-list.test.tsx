@@ -52,6 +52,56 @@ describe("TaskList", () => {
     expect(screen.getByRole("button", { name: /Fix login race.*运行中/ })).toBeVisible();
   });
 
+  it("uses Desktop project names and groups all of a project's root paths together", async () => {
+    const desktopThreads = [
+      {
+        ...thread,
+        projectId: "project-work",
+        projectName: "日常干活",
+        projectRootPaths: ["/code/works", "/code/yaochi"],
+        cwd: "/code/works",
+      },
+      {
+        ...thread,
+        id: "t2",
+        title: "Review Yaochi",
+        projectId: "project-work",
+        projectName: "日常干活",
+        projectRootPaths: ["/code/works", "/code/yaochi"],
+        cwd: "/code/yaochi",
+      },
+    ];
+
+    render(<TaskList threads={desktopThreads} onSelect={vi.fn()} onNew={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /日常干活.*2 个对话/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /works.*1 个对话/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /yaochi.*1 个对话/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps Desktop threads outside its project catalog in recent instead of inventing a project", () => {
+    const looseThread = {
+      ...thread,
+      id: "loose",
+      title: "Loose task",
+      cwd: "/Users/example",
+    };
+    const desktopThread = {
+      ...thread,
+      projectId: "project-work",
+      projectName: "日常干活",
+      projectRootPaths: ["/code/works"],
+      cwd: "/code/works",
+    };
+
+    render(<TaskList threads={[desktopThread, looseThread]} onSelect={vi.fn()} onNew={vi.fn()} />);
+
+    expect(screen.getByRole("button", { name: /日常干活.*1 个对话/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /example.*1 个对话/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "最近" }))
+      .toContainElement(screen.getByRole("button", { name: /^Loose task，/ }));
+  });
+
   it("keeps all direct conversations accessible in the recent section", () => {
     const directThreads = Array.from({ length: 9 }, (_, index) => ({
       ...thread,

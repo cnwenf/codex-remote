@@ -4,6 +4,24 @@ import { describe, expect, it, vi } from "vitest";
 import { Composer } from "./composer";
 
 describe("Composer", () => {
+  it("restores an unsent draft per conversation after navigation and remount", async () => {
+    localStorage.clear();
+    const props = { onSend: vi.fn(), running: false };
+    const { rerender, unmount } = render(<Composer {...props} draftKey="thread-a" />);
+    const input = screen.getByRole("textbox", { name: "Instruction" });
+    await userEvent.type(input, "unfinished message");
+
+    rerender(<Composer {...props} draftKey="thread-b" />);
+    expect(input).toHaveValue("");
+    await userEvent.type(input, "another draft");
+    rerender(<Composer {...props} draftKey="thread-a" />);
+    expect(input).toHaveValue("unfinished message");
+
+    unmount();
+    render(<Composer {...props} draftKey="thread-a" />);
+    expect(screen.getByRole("textbox", { name: "Instruction" })).toHaveValue("unfinished message");
+  });
+
   it("sends composer text and clears only after success", async () => {
     const onSend = vi.fn().mockResolvedValue(undefined);
     render(<Composer onSend={onSend} running={false} />);

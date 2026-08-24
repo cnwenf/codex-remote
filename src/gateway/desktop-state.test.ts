@@ -43,6 +43,13 @@ function fixture() {
   database.close();
   writeFileSync(join(directory, ".codex-global-state.json"), JSON.stringify({
     "pinned-thread-ids": ["thread-1"],
+    "local-projects": {
+      "project-app": {
+        id: "project-app",
+        name: "Desktop App Project",
+        rootPaths: ["/code/app", "/code/tools"],
+      },
+    },
     "electron-persisted-atom-state": {
       "composer-permission-mode-visibility": {
         "guardian-approvals": true,
@@ -111,6 +118,130 @@ function completedTurn(index: number) {
 }
 
 describe("DesktopState", () => {
+  it("projects persisted Desktop plan updates as structured todo-list items", () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "plan_update",
+        turn_id: "turn-1",
+        explanation: "Keep the checklist current",
+        plan: [
+          { step: "Inspect", status: "completed" },
+          { step: "Implement", status: "in_progress" },
+        ],
+      },
+    }) + "\n");
+    const state = new DesktopState(databasePath);
+
+    expect((state.request("desktopState/readThread", { threadId: "thread-1" }) as any)
+      .thread.turns[0].items).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "todoList",
+          explanation: "Keep the checklist current",
+          plan: [
+            { step: "Inspect", status: "completed" },
+            { step: "Implement", status: "in_progress" },
+          ],
+        }),
+      ]));
+    state.close();
+  });
+
+  it("projects Codex Desktop update_plan tool calls as the current todo list", () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        id: "plan-call",
+        name: "exec",
+        input: 'const r = await tools.update_plan({explanation:"Current work",plan:[{step:"Inspect","status":"completed"},{step:"Implement","status":"in_progress"},{step:"Verify","status":"pending"}]}); text(r);',
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+    }) + "\n");
+    const state = new DesktopState(databasePath);
+
+    expect((state.request("desktopState/readThread", { threadId: "thread-1" }) as any)
+      .thread.turns[0].items).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: "plan-call",
+          type: "todoList",
+          explanation: "Current work",
+          plan: [
+            { step: "Inspect", status: "completed" },
+            { step: "Implement", status: "in_progress" },
+            { step: "Verify", status: "pending" },
+          ],
+        }),
+      ]));
+    state.close();
+  });
+
+  it("keeps the latest Desktop todo list when it predates the paged conversation tail", () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        id: "older-plan-call",
+        name: "exec",
+        input: 'const r = await tools.update_plan({plan:[{step:"Still current",status:"in_progress"}]}); text(r);',
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+    }) + "\n");
+    appendFileSync(rolloutPath, `${JSON.stringify({
+      type: "event_msg",
+      payload: { type: "agent_reasoning", text: "x".repeat(2_100_000) },
+    })}\n`);
+    const state = new DesktopState(databasePath);
+
+    expect((state.request("desktopState/readThread", {
+      threadId: "thread-1",
+      history: { limitTurns: 8, maxBytes: 64 * 1024 },
+    }) as any).thread.todoList).toEqual({
+      explanation: undefined,
+      plan: [{ step: "Still current", status: "in_progress" }],
+    });
+    state.close();
+  });
+
+  it("notices an appended Desktop todo update without reopening the rollout", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const state = new DesktopState(databasePath);
+    const request = () => state.request("desktopState/readThread", {
+      threadId: "thread-1",
+      history: { limitTurns: 8, maxBytes: 64 * 1024 },
+    }) as any;
+    expect(request().thread.todoList).toBeUndefined();
+
+    appendFileSync(rolloutPath, JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "plan_update",
+        turn_id: "turn-1",
+        plan: [{ step: "Live update", status: "in_progress" }],
+      },
+    }) + "\n");
+
+    expect(request().thread.todoList.plan).toEqual([
+      { step: "Live update", status: "in_progress" },
+    ]);
+    state.close();
+  });
+
+  it("projects Desktop's custom project identity and name onto matching threads", () => {
+    const { databasePath } = fixture();
+    const state = new DesktopState(databasePath);
+
+    expect((state.request("desktopState/listThreads", {}) as any).data[0]).toMatchObject({
+      projectId: "project-app",
+      projectName: "Desktop App Project",
+      projectRootPaths: ["/code/app", "/code/tools"],
+    });
+    state.close();
+  });
+
   it("keeps archived and subagent threads out of the Desktop top-level task projection", () => {
     const { databasePath, rolloutPath } = fixture();
     const database = new DatabaseSync(databasePath);

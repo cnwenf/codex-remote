@@ -32,14 +32,49 @@ test("controller opens a task, streams output, denies approval, and reviews diff
 
   await expect(page.getByRole("heading", { name: "Checks complete", level: 2 })).toBeVisible();
   await expect(page.locator(".markdown-body ul")).toContainText("All tests passed");
-  await page.getByRole("button", { name: "Deny" }).click();
+  await expect(page.getByLabel("任务进度，1/3 已完成")).toBeVisible();
+  await expect(page.getByText("Run checks", { exact: true }).last()).toBeVisible();
+  const approval = page.getByRole("dialog", { name: "Run a command?" });
+  await expect(approval).toBeVisible();
+  await expect(approval.getByText("pnpm test", { exact: true })).toBeVisible();
+  await expect(approval.getByText("/tmp/codex-fixture", { exact: true })).toBeVisible();
+  await expect(approval.getByRole("button", { name: "Approve once" })).toBeVisible();
+  await expect(approval.getByRole("button", { name: "Deny" })).toBeVisible();
+  const approvalBox = await approval.boundingBox();
+  expect(approvalBox).not.toBeNull();
+  expect(approvalBox!.x).toBeGreaterThanOrEqual(0);
+  expect(approvalBox!.y).toBeGreaterThanOrEqual(0);
+  expect(approvalBox!.x + approvalBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  expect(approvalBox!.y + approvalBox!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  await approval.getByRole("button", { name: "Deny" }).click();
+  await expect(approval).toHaveCount(0);
   await expect(page.locator(".decision-toast", { hasText: "Request denied" })).toBeVisible();
+  await page.getByRole("textbox", { name: "Instruction" }).fill("Steer follow-up from Web");
+  await page.getByRole("button", { name: "Steer" }).click();
+  await expect(page.locator(".message-user", { hasText: "Steer follow-up from Web" })).toBeVisible();
+  await expect(approval).toBeVisible();
+  await approval.getByRole("button", { name: "Deny" }).click();
   await page.getByText("查看代码变更").click();
   await expect(page.getByLabel("Unified diff")).toContainText("fixture.txt");
 
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
   ).toBe(true);
+});
+
+test("keeps an unsent draft for its conversation across reload", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("textbox", { name: "Instruction" }).fill("Unsent fixture draft");
+
+  await page.reload();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+
+  await expect(page.getByRole("textbox", { name: "Instruction" })).toHaveValue("Unsent fixture draft");
 });
 
 test("uploads an image and sends it with the conversation", async ({ page }) => {

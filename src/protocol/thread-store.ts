@@ -3,6 +3,13 @@ import { permissionStateFromProtocol, type PermissionState } from "./permissions
 
 export type ThreadStatus = "running" | "idle" | "error" | "unknown";
 export type TurnStatus = "inProgress" | "completed" | "interrupted" | "failed" | "unknown";
+export type TodoStatus = "pending" | "inProgress" | "completed";
+
+export type CodexTodoList = {
+  turnId?: string;
+  explanation?: string;
+  items: Array<{ step: string; status: TodoStatus }>;
+};
 
 export type CodexItem = {
   id: string;
@@ -26,6 +33,9 @@ export type CodexThread = PermissionState & {
   id: string;
   title: string;
   cwd?: string;
+  projectId?: string;
+  projectName?: string;
+  projectRootPaths?: string[];
   updatedAt?: number;
   status: ThreadStatus;
   turnOrder: string[];
@@ -38,6 +48,7 @@ export type CodexThread = PermissionState & {
   sectionName?: string;
   sectionEnteredAt?: number;
   desktopMirror?: boolean;
+  todoList?: CodexTodoList;
 };
 
 export type CodexState = {
@@ -230,6 +241,19 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     }));
   }
 
+  if (message.method === "turn/plan/updated" && threadId) {
+    const items = todoItems(params.plan);
+    if (items.length === 0) return state;
+    return updateThread(state, threadId, (thread) => ({
+      ...thread,
+      todoList: {
+        turnId: stringValue(params.turnId),
+        explanation: stringValue(params.explanation),
+        items,
+      },
+    }));
+  }
+
   const item = asRecord(params.item);
   if ((message.method === "item/started" || message.method === "item/completed") && threadId) {
     const itemId = stringValue(item.id);
@@ -322,6 +346,22 @@ function stringValue(value: unknown) {
 
 function numberValue(value: unknown) {
   return typeof value === "number" ? value : undefined;
+}
+
+export function todoItems(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const record = asRecord(entry);
+    const step = stringValue(record.step)?.trim();
+    if (!step) return [];
+    const rawStatus = stringValue(record.status);
+    const status: TodoStatus = rawStatus === "completed"
+      ? "completed"
+      : rawStatus === "inProgress" || rawStatus === "in_progress"
+        ? "inProgress"
+        : "pending";
+    return [{ step, status }];
+  });
 }
 
 function activityDelta(method: string, params: Record<string, unknown>) {

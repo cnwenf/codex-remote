@@ -11,6 +11,7 @@ type TaskListProps = {
 };
 
 type ProjectGroup = {
+  key: string;
   cwd: string;
   name: string;
   threads: CodexThread[];
@@ -31,13 +32,17 @@ export function TaskList({
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return threads;
     return threads.filter((thread) =>
-      `${thread.title} ${thread.cwd ?? ""}`.toLocaleLowerCase().includes(needle),
+      `${thread.title} ${thread.projectName ?? ""} ${thread.cwd ?? ""} ${(thread.projectRootPaths ?? []).join(" ")}`
+        .toLocaleLowerCase().includes(needle),
     );
   }, [query, threads]);
   const pinned = filtered.filter(isPinnedThread);
   const unpinned = filtered.filter((thread) => !isPinnedThread(thread));
+  const hasDesktopProjects = filtered.some((thread) => Boolean(thread.projectId));
   const projects = useMemo(() => groupProjects(unpinned, directCwd), [directCwd, unpinned]);
-  const recent = unpinned.filter((thread) => isDirectThread(thread, directCwd));
+  const recent = unpinned.filter((thread) =>
+    isDirectThread(thread, directCwd) || (hasDesktopProjects && !thread.projectId)
+  );
 
   function toggleProject(cwd: string) {
     setExpandedProjects((current) => {
@@ -87,6 +92,7 @@ export function TaskList({
                     onSelect={onSelect}
                     onTogglePin={onTogglePin}
                     directCwd={directCwd}
+                    desktopProjectsAvailable={hasDesktopProjects}
                   />
                 )) : <p className="empty-section">暂无置顶对话</p>}
               </div>
@@ -96,16 +102,16 @@ export function TaskList({
               <h3 id="project-heading">项目</h3>
               <div className="project-list">
                 {projects.map((project) => {
-                  const expanded = Boolean(query.trim()) || expandedProjects.has(project.cwd) ||
+                  const expanded = Boolean(query.trim()) || expandedProjects.has(project.key) ||
                     project.threads.some((thread) => thread.id === selectedId);
                   return (
-                    <div className="project-group" key={project.cwd}>
+                    <div className="project-group" key={project.key}>
                       <button
                         type="button"
                         className="project-row"
                         aria-expanded={expanded}
                         aria-label={`${project.name}，${project.threads.length} 个对话，${statusLabel(project.status)}`}
-                        onClick={() => toggleProject(project.cwd)}
+                        onClick={() => toggleProject(project.key)}
                       >
                         <span className="folder-icon" aria-hidden="true" />
                         <span className="project-name">{project.name}</span>
@@ -123,6 +129,7 @@ export function TaskList({
                               onSelect={onSelect}
                               onTogglePin={onTogglePin}
                               directCwd={directCwd}
+                              desktopProjectsAvailable={hasDesktopProjects}
                               compact
                             />
                           ))}
@@ -145,6 +152,7 @@ export function TaskList({
                     onSelect={onSelect}
                     onTogglePin={onTogglePin}
                     directCwd={directCwd}
+                    desktopProjectsAvailable={hasDesktopProjects}
                   />
                 )) : <p className="empty-section">暂无直接对话</p>}
               </div>
@@ -163,6 +171,7 @@ function ConversationRow({
   onTogglePin,
   compact = false,
   directCwd,
+  desktopProjectsAvailable = false,
 }: {
   thread: CodexThread;
   selected: boolean;
@@ -170,6 +179,7 @@ function ConversationRow({
   onTogglePin?: (id: string) => void;
   compact?: boolean;
   directCwd?: string;
+  desktopProjectsAvailable?: boolean;
 }) {
   const pinned = isPinnedThread(thread);
   return (
@@ -184,7 +194,11 @@ function ConversationRow({
       <span className="task-copy">
         <strong>{thread.title}</strong>
         {!compact ? (
-          <span>{isDirectThread(thread, directCwd) ? "直接对话" : projectName(thread.cwd)}</span>
+          <span>{
+            isDirectThread(thread, directCwd) || (desktopProjectsAvailable && !thread.projectId)
+              ? "直接对话"
+              : thread.projectName ?? projectName(thread.cwd)
+          }</span>
         ) : null}
       </span>
       <span className="task-time">{formatUpdatedAt(thread.updatedAt)}</span>
@@ -209,16 +223,20 @@ export function projectsFromThreads(threads: CodexThread[], directCwd?: string) 
 }
 
 function groupProjects(threads: CodexThread[], directCwd?: string): ProjectGroup[] {
+  const hasDesktopProjects = threads.some((thread) => Boolean(thread.projectId));
   const groups = new Map<string, CodexThread[]>();
   for (const thread of threads) {
     if (!thread.cwd || isDirectThread(thread, directCwd)) continue;
-    const group = groups.get(thread.cwd) ?? [];
+    if (hasDesktopProjects && !thread.projectId) continue;
+    const key = thread.projectId ?? thread.cwd;
+    const group = groups.get(key) ?? [];
     group.push(thread);
-    groups.set(thread.cwd, group);
+    groups.set(key, group);
   }
-  return [...groups.entries()].map(([cwd, projectThreads]) => ({
-    cwd,
-    name: projectName(cwd),
+  return [...groups.entries()].map(([key, projectThreads]) => ({
+    key,
+    cwd: projectThreads[0].projectRootPaths?.[0] ?? projectThreads[0].cwd ?? key,
+    name: projectThreads[0].projectName ?? projectName(projectThreads[0].cwd),
     threads: projectThreads,
     status: projectThreads.some((thread) => thread.status === "running")
       ? "running"
