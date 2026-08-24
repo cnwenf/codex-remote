@@ -1,0 +1,59 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm check
+
+      - name: Build ARM64 DMG
+        run: |
+          export CODEX_REMOTE_NODE_BIN="$(command -v node)"
+          export VERSION="${GITHUB_REF_NAME#v}"
+          scripts/package-macos-dmg.sh
+
+      - name: Verify package
+        run: |
+          (cd artifacts && shasum -a 256 -c Codex-Remote-arm64.dmg.sha256)
+          mount_dir="$(mktemp -d)"
+          hdiutil attach artifacts/Codex-Remote-arm64.dmg -nobrowse -readonly -mountpoint "$mount_dir" -quiet
+          codesign --verify --deep --strict "$mount_dir/Codex Remote.app"
+          file "$mount_dir/Codex Remote.app/Contents/MacOS/Codex Remote" | grep -q arm64
+          file "$mount_dir/Codex Remote.app/Contents/Resources/bin/node" | grep -q arm64
+          hdiutil detach "$mount_dir" -quiet
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            artifacts/Codex-Remote-arm64.dmg \
+            artifacts/Codex-Remote-arm64.dmg.sha256 \
+            --title "Codex Remote $GITHUB_REF_NAME" \
+            --generate-notes
