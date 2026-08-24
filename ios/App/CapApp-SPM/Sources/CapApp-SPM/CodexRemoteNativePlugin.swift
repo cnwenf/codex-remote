@@ -191,8 +191,7 @@ public enum CodexRemoteMonitor {
             let id = monitor["connectionId"] as? String,
             let base = monitor["baseUrl"] as? String,
             let url = URL(string: base + "/api/mobile/status"),
-            let optionalToken = try? CodexRemoteKeychain.read(id: id),
-            let token = optionalToken
+            let token = try? CodexRemoteKeychain.read(id: id)
         else { completion(false); return }
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
