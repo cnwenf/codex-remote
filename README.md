@@ -44,7 +44,7 @@ GitHub 仓库：git@github.com:cnwenf/codex-remote.git
 
 ## App 操作
 
-`Codex Remote.app` 同时显示在 Dock 和 macOS 右上角菜单栏，支持开启/关闭 Remote、修改绑定地址和 Web 登录密码、打开浏览器、查看版本与运行状态、检查 GitHub 最新版本。
+`Codex Remote.app` 同时显示在 Dock 和 macOS 右上角菜单栏；点击 Dock 图标会直接打开当前 Remote Web 页面。菜单栏支持开启/关闭 Remote、修改绑定地址和 Web 登录密码、打开浏览器、查看版本与运行状态、检查 GitHub 最新版本。
 
 密码保存在 `~/Library/Application Support/Codex Remote/token`，目录权限为 `700`，文件权限为 `600`；不会写入 plist、URL 或日志。
 

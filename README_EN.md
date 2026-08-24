@@ -44,7 +44,7 @@ GitHub repository: git@github.com:cnwenf/codex-remote.git
 
 ## App controls
 
-Codex Remote appears in both the Dock and macOS menu bar. It can enable or disable Remote, change the bind address and Web password, open the Web UI, show status and version, and check GitHub for updates.
+Codex Remote appears in both the Dock and macOS menu bar. Clicking its Dock icon opens the current Remote Web page. The menu-bar app can enable or disable Remote, change the bind address and Web password, open the Web UI, show status and version, and check GitHub for updates.
 
 The password is stored at `~/Library/Application Support/Codex Remote/token` with mode `0600`; its directory uses mode `0700`.
 

@@ -15,7 +15,9 @@ cd "$ROOT"
 mkdir -p "$OUTPUT"
 pnpm build
 pnpm exec esbuild src/gateway/index.ts \
-  --bundle --platform=node --format=esm --target=node24 --outfile="$OUTPUT/gateway.mjs"
+  --bundle --platform=node --format=esm --target=node24 \
+  --banner:js="import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" \
+  --outfile="$OUTPUT/gateway.mjs"
 swift build --package-path macos/CodexRemoteApp -c release --arch arm64
 SWIFT_BIN=$(swift build --package-path macos/CodexRemoteApp -c release --arch arm64 --show-bin-path)
 
@@ -37,7 +39,6 @@ for size in 16 32 128 256 512; do
   double=$((size * 2)); sips -z "$double" "$double" assets/app-icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$RES/AppIcon.icns"
-sips -z 36 36 assets/app-icon.png --out "$RES/MenuIcon.png" >/dev/null
 
 plutil -create xml1 "$APP/Contents/Info.plist"
 plutil -insert CFBundleIdentifier -string com.cnwenf.codex-remote "$APP/Contents/Info.plist"

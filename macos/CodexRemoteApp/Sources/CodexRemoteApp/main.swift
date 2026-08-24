@@ -23,9 +23,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   func applicationWillTerminate(_ notification: Notification) { stopGateway() }
 
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    openBrowser()
+    return false
+  }
+
   private func configureMenu() {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    let menuIcon = NSImage(contentsOf: Bundle.main.resourceURL!.appendingPathComponent("MenuIcon.png")) ?? NSImage(systemSymbolName: "dot.radiowaves.right", accessibilityDescription: "Codex Remote")
+    let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+    let menuIcon = NSImage(systemSymbolName: "dot.radiowaves.right", accessibilityDescription: "Codex Remote")?
+      .withSymbolConfiguration(symbolConfiguration)
     menuIcon?.isTemplate = true
     statusItem.button?.image = menuIcon
     let menu = NSMenu()
