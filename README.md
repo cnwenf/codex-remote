@@ -1,3 +1,5 @@
+[简体中文](README.md) | [English](README_EN.md)
+
 # Codex Remote
 
 通过浏览器访问并操作这台 Mac 上的 Codex Desktop。手机或其他电脑只要能访问 Mac 的本地私网 IP，就可以查看同一批项目、任务和实时输出。
