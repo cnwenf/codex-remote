@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, type PointerEvent } from "react";
 import type { CodexThread, ThreadStatus } from "../../protocol/thread-store";
 
 type TaskListProps = {
@@ -8,6 +8,7 @@ type TaskListProps = {
   onSelect: (id: string) => void;
   onNew: () => void;
   onTogglePin?: (id: string) => void;
+  onArchive?: (id: string) => void;
 };
 
 type ProjectGroup = {
@@ -25,9 +26,11 @@ export function TaskList({
   onSelect,
   onNew,
   onTogglePin,
+  onArchive,
 }: TaskListProps) {
   const [query, setQuery] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
+  const [revealedThreadId, setRevealedThreadId] = useState<string>();
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return threads;
@@ -91,6 +94,9 @@ export function TaskList({
                     selected={thread.id === selectedId}
                     onSelect={onSelect}
                     onTogglePin={onTogglePin}
+                    onArchive={onArchive}
+                    actionsRevealed={revealedThreadId === thread.id}
+                    onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
                     directCwd={directCwd}
                     desktopProjectsAvailable={hasDesktopProjects}
                   />
@@ -128,6 +134,9 @@ export function TaskList({
                               selected={thread.id === selectedId}
                               onSelect={onSelect}
                               onTogglePin={onTogglePin}
+                              onArchive={onArchive}
+                              actionsRevealed={revealedThreadId === thread.id}
+                              onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
                               directCwd={directCwd}
                               desktopProjectsAvailable={hasDesktopProjects}
                               compact
@@ -151,6 +160,9 @@ export function TaskList({
                     selected={thread.id === selectedId}
                     onSelect={onSelect}
                     onTogglePin={onTogglePin}
+                    onArchive={onArchive}
+                    actionsRevealed={revealedThreadId === thread.id}
+                    onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
                     directCwd={directCwd}
                     desktopProjectsAvailable={hasDesktopProjects}
                   />
@@ -169,6 +181,9 @@ function ConversationRow({
   selected,
   onSelect,
   onTogglePin,
+  onArchive,
+  actionsRevealed,
+  onRevealActions,
   compact = false,
   directCwd,
   desktopProjectsAvailable = false,
@@ -177,43 +192,112 @@ function ConversationRow({
   selected: boolean;
   onSelect: (id: string) => void;
   onTogglePin?: (id: string) => void;
+  onArchive?: (id: string) => void;
+  actionsRevealed: boolean;
+  onRevealActions: (revealed: boolean) => void;
   compact?: boolean;
   directCwd?: string;
   desktopProjectsAvailable?: boolean;
 }) {
   const pinned = isPinnedThread(thread);
+  const pointerStart = useRef<{ x: number; y: number } | undefined>(undefined);
+  const consumedSwipe = useRef(false);
+  const hasActions = Boolean(onTogglePin || onArchive);
+
+  function beginSwipe(event: PointerEvent<HTMLDivElement>) {
+    if (!hasActions) return;
+    pointerStart.current = { x: event.clientX, y: event.clientY };
+    consumedSwipe.current = false;
+  }
+
+  function finishSwipe(event: PointerEvent<HTMLDivElement>) {
+    const start = pointerStart.current;
+    pointerStart.current = undefined;
+    if (!start) return;
+    const horizontal = event.clientX - start.x;
+    const vertical = event.clientY - start.y;
+    if (Math.abs(horizontal) < 42 || Math.abs(horizontal) <= Math.abs(vertical)) return;
+    consumedSwipe.current = true;
+    onRevealActions(horizontal < 0);
+  }
+
+  function selectConversation() {
+    if (consumedSwipe.current) {
+      consumedSwipe.current = false;
+      return;
+    }
+    if (actionsRevealed) {
+      onRevealActions(false);
+      return;
+    }
+    onSelect(thread.id);
+  }
+
+  function runAction(action: ((id: string) => void) | undefined) {
+    onRevealActions(false);
+    action?.(thread.id);
+  }
+
   return (
-    <div className={`task-row-shell ${compact ? "task-row-shell-compact" : ""}`} data-selected={selected}>
-    <button
-      type="button"
-      className={`task-row-main ${compact ? "task-row-compact" : ""}`}
-      onClick={() => onSelect(thread.id)}
-      aria-label={`${thread.title}，${statusLabel(thread.status)}`}
+    <div
+      className={`task-row-shell ${compact ? "task-row-shell-compact" : ""}`}
+      data-selected={selected}
+      data-actions-open={actionsRevealed}
+      onPointerDown={beginSwipe}
+      onPointerUp={finishSwipe}
+      onPointerCancel={() => { pointerStart.current = undefined; }}
     >
-      <span className={`status-dot status-${thread.status}`} aria-hidden="true" />
-      <span className="task-copy">
-        <strong>{thread.title}</strong>
-        {!compact ? (
-          <span>{
-            isDirectThread(thread, directCwd) || (desktopProjectsAvailable && !thread.projectId)
-              ? "直接对话"
-              : thread.projectName ?? projectName(thread.cwd)
-          }</span>
+      {hasActions ? (
+        <div className="task-row-actions" aria-hidden={!actionsRevealed}>
+          {onTogglePin ? (
+            <button
+              type="button"
+              tabIndex={actionsRevealed ? 0 : -1}
+              aria-label={`${pinned ? "取消置顶" : "置顶"} ${thread.title}`}
+              onClick={() => runAction(onTogglePin)}
+            >{pinned ? "取消置顶" : "置顶"}</button>
+          ) : null}
+          {onArchive ? (
+            <button
+              type="button"
+              className="archive-action"
+              tabIndex={actionsRevealed ? 0 : -1}
+              aria-label={`归档 ${thread.title}`}
+              onClick={() => runAction(onArchive)}
+            >归档</button>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="task-row-content">
+        <button
+          type="button"
+          className={`task-row-main ${compact ? "task-row-compact" : ""}`}
+          onClick={selectConversation}
+          aria-label={`${thread.title}，${statusLabel(thread.status)}`}
+        >
+          <span className={`status-dot status-${thread.status}`} aria-hidden="true" />
+          <span className="task-copy">
+            <strong>{thread.title}</strong>
+            {!compact ? (
+              <span>{
+                isDirectThread(thread, directCwd) || (desktopProjectsAvailable && !thread.projectId)
+                  ? "直接对话"
+                  : thread.projectName ?? projectName(thread.cwd)
+              }</span>
+            ) : null}
+          </span>
+          <span className="task-time">{formatUpdatedAt(thread.updatedAt)}</span>
+        </button>
+        {hasActions ? (
+          <button
+            type="button"
+            className="task-row-more"
+            aria-label={`对话操作 ${thread.title}`}
+            aria-expanded={actionsRevealed}
+            onClick={() => onRevealActions(!actionsRevealed)}
+          >•••</button>
         ) : null}
-      </span>
-      <span className="task-time">{formatUpdatedAt(thread.updatedAt)}</span>
-    </button>
-    {onTogglePin ? (
-      <button
-        type="button"
-        className="pin-button"
-        aria-label={`${pinned ? "取消置顶" : "置顶"} ${thread.title}`}
-        aria-pressed={pinned}
-        onClick={() => onTogglePin(thread.id)}
-      >
-        <span aria-hidden="true">{pinned ? "●" : "○"}</span>
-      </button>
-    ) : null}
+      </div>
     </div>
   );
 }

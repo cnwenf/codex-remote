@@ -208,6 +208,22 @@ describe("gateway server", () => {
     await gateway.stop();
   });
 
+  it("allows only HTTPS TryCloudflare origins when public mode is explicitly enabled", async () => {
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      allowTryCloudflareOrigin: true,
+      transport: new AlreadyInitializedTransport(),
+    });
+    const address = await gateway.start();
+    const socket = await connect(address, "test-token", "https://random-name.trycloudflare.com");
+    await expect(nextJson(socket)).resolves.toMatchObject({ type: "session", state: "ready" });
+    socket.close(); await once(socket, "close");
+    await expect(connect(address, "test-token", "https://example.com")).rejects.toThrow(/403/);
+    await expect(connect(address, "test-token", "http://random-name.trycloudflare.com")).rejects.toThrow(/403/);
+    await gateway.stop();
+  });
+
   it("defaults to loopback", async () => {
     const gateway = createGateway({
       port: 0,
@@ -330,6 +346,50 @@ describe("gateway server", () => {
       expect(response.headers.get("access-control-allow-origin")).toBe("capacitor://localhost");
       expect(response.headers.get("access-control-allow-methods")).toContain("GET");
       expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it("creates a short-lived token-free QR payload and exchanges it once", async () => {
+    const token = "test-token";
+    const gateway = createGateway({
+      port: 0,
+      token,
+      transport: new AlreadyInitializedTransport(),
+    });
+    const address = await gateway.start();
+    try {
+      const unauthorized = await fetch(`http://127.0.0.1:${address.port}/api/mobile/pairing`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseUrl: "http://192.168.1.20:4321" }),
+      });
+      expect(unauthorized.status).toBe(401);
+
+      const created = await fetch(`http://127.0.0.1:${address.port}/api/mobile/pairing`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ baseUrl: "http://192.168.1.20:4321" }),
+      });
+      expect(created.status).toBe(201);
+      const pairing = await created.json() as { payload: string; expiresAt: number };
+      expect(pairing.payload).toMatch(/^codex-remote:\/\/pair\?/);
+      expect(pairing.payload).not.toContain(token);
+      const code = new URL(pairing.payload).searchParams.get("code");
+
+      const exchange = () => fetch(`http://127.0.0.1:${address.port}/api/mobile/pair`, {
+        method: "POST",
+        headers: { origin: "capacitor://localhost", "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const first = await exchange();
+      expect(first.status).toBe(200);
+      await expect(first.json()).resolves.toEqual({
+        baseUrl: "http://192.168.1.20:4321",
+        token,
+      });
+      expect((await exchange()).status).toBe(404);
     } finally {
       await gateway.stop();
     }

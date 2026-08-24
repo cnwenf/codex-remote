@@ -1,7 +1,9 @@
 import BackgroundTasks
+import AVFoundation
 import Capacitor
 import Foundation
 import Security
+import UIKit
 import UserNotifications
 
 private let monitorTaskIdentifier = "com.cnwenf.codexremote.refresh"
@@ -21,6 +23,7 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "startMonitoring", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopMonitoring", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getLaunchTarget", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "scanConnection", returnType: CAPPluginReturnPromise),
     ]
 
     public override func load() {
@@ -87,10 +90,80 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve(target)
     }
 
+    @objc public func scanConnection(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { [weak self] in
+            guard let presenter = self?.bridge?.viewController else {
+                call.reject("pairing-scanner-unavailable"); return
+            }
+            let scanner = CodexRemoteQRScannerViewController()
+            scanner.onResult = { value in
+                scanner.dismiss(animated: true) {
+                    if let value { call.resolve(["value": value]) }
+                    else { call.reject("pairing-scan-cancelled") }
+                }
+            }
+            presenter.present(scanner, animated: true)
+        }
+    }
+
     @objc private func openThread(_ notification: Notification) {
         guard let target = notification.userInfo as? [String: String] else { return }
         notifyListeners("openThread", data: target)
     }
+}
+
+private final class CodexRemoteQRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+    var onResult: ((String?) -> Void)?
+    private let session = AVCaptureSession()
+    private var preview: AVCaptureVideoPreviewLayer?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        let cancel = UIButton(type: .system)
+        cancel.setTitle("Cancel", for: .normal)
+        cancel.tintColor = .white
+        cancel.translatesAutoresizingMaskIntoConstraints = false
+        cancel.addTarget(self, action: #selector(cancelScan), for: .touchUpInside)
+        view.addSubview(cancel)
+        NSLayoutConstraint.activate([
+            cancel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
+            cancel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+        ])
+        configureCamera()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        preview?.frame = view.bounds
+    }
+
+    private func configureCamera() {
+        guard let camera = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: camera),
+              session.canAddInput(input) else { onResult?(nil); return }
+        session.addInput(input)
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else { onResult?(nil); return }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = [.qr]
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        view.layer.insertSublayer(layer, at: 0)
+        preview = layer
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.session.startRunning() }
+    }
+
+    func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
+        guard let code = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+              let value = code.stringValue else { return }
+        session.stopRunning()
+        onResult?(value)
+        onResult = nil
+    }
+
+    @objc private func cancelScan() { session.stopRunning(); onResult?(nil); onResult = nil }
 }
 
 public enum CodexRemoteMonitor {

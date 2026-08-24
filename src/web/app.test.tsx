@@ -22,6 +22,7 @@ function codexState(overrides: Record<string, unknown> = {}) {
     refreshThreadSections: vi.fn().mockResolvedValue(undefined),
     refreshCreationOptions: vi.fn().mockResolvedValue(undefined),
     togglePin: vi.fn().mockResolvedValue(undefined),
+    archiveThread: vi.fn().mockResolvedValue(undefined),
     selectThread: vi.fn().mockResolvedValue(undefined),
     loadEarlierThreadHistory: vi.fn().mockResolvedValue(undefined),
     clearSelection: vi.fn(),

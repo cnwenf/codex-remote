@@ -8,6 +8,9 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning;
+import com.google.mlkit.vision.barcode.common.Barcode;
 
 @CapacitorPlugin(name = "CodexRemoteNative")
 public class CodexRemoteNativePlugin extends Plugin {
@@ -83,5 +86,23 @@ public class CodexRemoteNativePlugin extends Plugin {
         JSObject result = CodexRemoteMonitorService.deepLinkTarget(data);
         getActivity().getIntent().setData(null);
         call.resolve(result == null ? new JSObject() : result);
+    }
+
+    @PluginMethod
+    public void scanConnection(PluginCall call) {
+        GmsBarcodeScannerOptions options = new GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAutoZoom()
+            .build();
+        GmsBarcodeScanning.getClient(getActivity(), options).startScan()
+            .addOnSuccessListener(barcode -> {
+                String value = barcode.getRawValue();
+                if (value == null || value.isEmpty()) { call.reject("pairing-payload-empty"); return; }
+                JSObject result = new JSObject();
+                result.put("value", value);
+                call.resolve(result);
+            })
+            .addOnCanceledListener(() -> call.reject("pairing-scan-cancelled"))
+            .addOnFailureListener(error -> call.reject("pairing-scan-failed", error));
     }
 }

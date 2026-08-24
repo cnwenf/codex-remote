@@ -70,7 +70,7 @@ describe("reduceCodexState", () => {
     expect(second.threads.t1.turns["turn-2"].items["user-2"].text).toBe("Second");
   });
 
-  it("replaces one optimistic steer with the authoritative live user message", () => {
+  it("replaces an optimistic steer when Desktop confirms it in another turn and type spelling", () => {
     const state = {
       ...initialCodexState,
       threadOrder: ["t1"],
@@ -110,21 +110,23 @@ describe("reduceCodexState", () => {
       method: "item/started",
       params: {
         threadId: "t1",
-        turnId: "turn-1",
+        turnId: "turn-2",
         item: {
           id: "desktop-user-1",
-          type: "userMessage",
+          type: "user_message",
           content: [{ type: "text", text: "Check this image" }],
         },
       },
     });
-    const turn = next.threads.t1.turns["turn-1"];
+    const originalTurn = next.threads.t1.turns["turn-1"];
+    const authoritativeTurn = next.threads.t1.turns["turn-2"];
 
-    expect(turn.itemOrder).toEqual(["agent-before", "desktop-user-1"]);
-    expect(turn.items["web-steer-1"]).toBeUndefined();
-    expect(turn.items["desktop-user-1"]).toMatchObject({
+    expect(originalTurn.itemOrder).toEqual(["agent-before"]);
+    expect(originalTurn.items["web-steer-1"]).toBeUndefined();
+    expect(authoritativeTurn.itemOrder).toEqual(["desktop-user-1"]);
+    expect(authoritativeTurn.items["desktop-user-1"]).toMatchObject({
       id: "desktop-user-1",
-      type: "userMessage",
+      type: "user_message",
       text: "Check this image",
       imageIds: ["uploaded-image"],
     });

@@ -5,6 +5,7 @@ let createdThread;
 let approvalDeclines = 0;
 const loadedThreads = new Set();
 const pinnedThreads = new Set();
+const archivedThreads = new Set();
 const pinnedSection = { id: "fixture-pinned-section", name: "Pinned", appearance: null };
 
 lines.on("line", (line) => {
@@ -34,6 +35,12 @@ lines.on("line", (line) => {
   if (message.method === "thread/section/move") {
     if (message.params?.sectionId === pinnedSection.id) pinnedThreads.add(message.params.threadId);
     else pinnedThreads.delete(message.params?.threadId);
+    send({ id: message.id, result: {} });
+    return;
+  }
+  if (message.method === "thread/archive") {
+    archivedThreads.add(message.params?.threadId);
+    pinnedThreads.delete(message.params?.threadId);
     send({ id: message.id, result: {} });
     return;
   }
@@ -123,14 +130,15 @@ lines.on("line", (line) => {
     {
       const text = message.params?.input?.find?.((item) => item.type === "text")?.text;
       if (text) {
+        const isSteer = message.method === "turn/steer";
         send({
           method: "item/started",
           params: {
             threadId: "fixture-thread",
-            turnId: "fixture-live-turn",
+            turnId: isSteer ? "fixture-steer-confirmation" : "fixture-live-turn",
             item: {
-              id: message.method === "turn/steer" ? "fixture-official-steer" : "fixture-live-user",
-              type: "userMessage",
+              id: isSteer ? "fixture-official-steer" : "fixture-live-user",
+              type: isSteer ? "user_message" : "userMessage",
               content: [{ type: "text", text }],
             },
           },
@@ -243,7 +251,9 @@ function listThreads() {
     status: { type: index === 2 ? "active" : "idle", activeFlags: [] },
     updatedAt: 1_787_199_999 - index,
   }));
-  return [createdThread, fixture, ...extras].filter(Boolean).map((thread) => ({
+  return [createdThread, fixture, ...extras].filter(Boolean)
+    .filter((thread) => !archivedThreads.has(thread.id))
+    .map((thread) => ({
     ...thread,
     section: pinnedThreads.has(thread.id) ? pinnedSection : null,
     sectionEnteredAt: pinnedThreads.has(thread.id) ? 1_787_200_200 : null,

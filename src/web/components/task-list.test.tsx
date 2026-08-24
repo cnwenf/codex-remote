@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CodexThread } from "../../protocol/thread-store";
@@ -181,6 +181,7 @@ describe("TaskList", () => {
     );
 
     await userEvent.click(screen.getByRole("button", { name: /app.*1 个对话/ }));
+    await userEvent.click(screen.getByRole("button", { name: "对话操作 Fix login race" }));
     await userEvent.click(screen.getByRole("button", { name: "置顶 Fix login race" }));
     expect(onTogglePin).toHaveBeenCalledWith("t1");
 
@@ -192,7 +193,32 @@ describe("TaskList", () => {
         onTogglePin={onTogglePin}
       />,
     );
+    await userEvent.click(screen.getByRole("button", { name: "对话操作 Fix login race" }));
     await userEvent.click(screen.getByRole("button", { name: "取消置顶 Fix login race" }));
     expect(onTogglePin).toHaveBeenCalledTimes(2);
+  });
+
+  it("reveals synchronized pin and archive actions after a left swipe", async () => {
+    const onTogglePin = vi.fn();
+    const onArchive = vi.fn();
+    render(
+      <TaskList
+        threads={[{ ...thread, cwd: undefined }]}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+        onTogglePin={onTogglePin}
+        onArchive={onArchive}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /Fix login race，运行中/ }).closest(".task-row-shell");
+    expect(row).toHaveAttribute("data-actions-open", "false");
+    fireEvent(row as Element, new MouseEvent("pointerdown", { bubbles: true, clientX: 260, clientY: 40 }));
+    fireEvent(row as Element, new MouseEvent("pointerup", { bubbles: true, clientX: 120, clientY: 45 }));
+    expect(row).toHaveAttribute("data-actions-open", "true");
+
+    await userEvent.click(screen.getByRole("button", { name: "归档 Fix login race" }));
+    expect(onArchive).toHaveBeenCalledWith("t1");
+    expect(row).toHaveAttribute("data-actions-open", "false");
   });
 });

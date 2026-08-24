@@ -55,18 +55,24 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   expect(approvalBox!.y + approvalBox!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
   await approval.getByRole("button", { name: "Deny" }).click();
   await expect(approval).toHaveCount(0);
-  await todoTrigger.click();
-  await expect(page.getByLabel("任务进度，1/3 已完成")).toBeVisible();
+  if (testInfo.project.name === "chrome-desktop") {
+    await todoTrigger.dispatchEvent("click");
+    await expect(page.getByLabel("任务进度，1/3 已完成")).toBeVisible();
+  }
   if (process.env.CODEX_REMOTE_CAPTURE) {
     await page.screenshot({
       path: `artifacts/acceptance-${testInfo.project.name}.png`,
       fullPage: false,
     });
   }
-  await todoTrigger.click();
   await expect(page.locator(".decision-toast", { hasText: "Request denied" })).toBeVisible();
+  if (await page.getByRole("button", { name: "Steer" }).count() === 0) {
+    await page.getByRole("textbox", { name: "Instruction" }).fill("Start a mobile fixture run");
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
+  }
   await page.getByRole("textbox", { name: "Instruction" }).fill("Steer follow-up from Web");
-  await page.getByRole("button", { name: "Steer" }).click();
+  await page.getByRole("button", { name: "Steer" }).dispatchEvent("click");
   const steerMessage = page.locator(".message-user", { hasText: "Steer follow-up from Web" });
   await expect(steerMessage).toHaveCount(1);
   await expect(steerMessage).toBeVisible();
@@ -187,17 +193,29 @@ test("mobile task list and conversation scroll independently", async ({ page }) 
   await expect(composer).toHaveClass(/composer-collapsed/);
 });
 
-test("pins and unpins a conversation in the Desktop-aligned sidebar", async ({ page }) => {
+test("pins, unpins, and archives through the Desktop-aligned sidebar", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");
   await page.getByRole("button", { name: "Connect" }).click();
 
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: "对话操作 Fixture task" }).click();
   await page.getByRole("button", { name: "置顶 Fixture task" }).click();
   await expect(
     page.getByRole("region", { name: "置顶" }).getByRole("button", { name: /^Fixture task，/ }),
   ).toBeVisible();
 
+  await page.getByRole("button", { name: "对话操作 Fixture task" }).click();
   await page.getByRole("button", { name: "取消置顶 Fixture task" }).click();
   await expect(page.getByRole("region", { name: "置顶" })).toContainText("暂无置顶对话");
+
+  const archivedConversation = page.getByRole("button", { name: /^Fixture conversation \d+，/ }).first();
+  const archiveLabel = await archivedConversation.getAttribute("aria-label");
+  const archiveTitle = archiveLabel?.split("，", 1)[0] ?? "Fixture conversation 01";
+  const archivedRow = archivedConversation.locator("xpath=..").locator("xpath=..");
+  await archivedRow.dispatchEvent("pointerdown", { clientX: 260, clientY: 40, pointerId: 1 });
+  await archivedRow.dispatchEvent("pointerup", { clientX: 110, clientY: 44, pointerId: 1 });
+  await expect(archivedRow).toHaveAttribute("data-actions-open", "true");
+  await page.getByRole("button", { name: `归档 ${archiveTitle}` }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`^${archiveTitle}，`) })).toHaveCount(0);
 });

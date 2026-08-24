@@ -26,6 +26,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Codex Remote connects to the Mac address you configure on your private network.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan a one-time Codex Remote pairing code shown on your Mac.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>

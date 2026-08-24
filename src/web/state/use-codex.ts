@@ -236,6 +236,15 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     await refreshThreads();
   }, [desktopControlAvailable, pinnedSectionId, refreshThreads, socket, state.threadOrder, state.threads]);
 
+  const archiveThread = useCallback(async (threadId: string) => {
+    await socket.request("thread/archive", { threadId });
+    if (selectedThreadId === threadId) {
+      setSelectedThreadId(undefined);
+      setThreadLoadError(undefined);
+    }
+    await refreshThreads();
+  }, [refreshThreads, selectedThreadId, socket]);
+
   const refreshCreationOptions = useCallback(async (cwd?: string) => {
     const version = ++catalogRequestVersion.current;
     setCreationOptions((current) => ({ ...current, loading: true, error: undefined }));
@@ -587,6 +596,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       refreshThreads,
       refreshThreadSections,
       togglePin,
+      archiveThread,
       refreshCreationOptions,
       selectThread,
       loadEarlierThreadHistory,
@@ -625,6 +635,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       transportReadOnly,
       threadLoadError,
       togglePin,
+      archiveThread,
       updateSelectedThreadSettings,
     ],
   );
@@ -861,6 +872,7 @@ function hydrateThread(
     ? current.activeTurnId
     : undefined;
   const activeTurnId = currentActiveTurnId ?? snapshotActiveTurnId;
+  const deduplicatedTurns = dedupeOptimisticUserMessages(hydratedTurns, turnOrder);
   return {
     ...state,
     stale: false,
@@ -876,7 +888,7 @@ function hydrateThread(
         projectRootPaths:
           stringArray(record.projectRootPaths) ?? stringArray(outer.projectRootPaths) ?? current.projectRootPaths,
         status: activeTurnId ? "running" : normalizeStatus(record.status, current.status),
-        turns: hydratedTurns,
+        turns: deduplicatedTurns,
         turnOrder,
         activeTurnId,
         model: stringValue(outer.model) ?? current.model,
@@ -896,13 +908,74 @@ function sameUserMessage(
   left: CodexTurn["items"][string],
   right: CodexTurn["items"][string],
 ) {
-  if (left.type !== "userMessage" || right.type !== "userMessage" || left.text !== right.text) {
+  if (!isUserMessage(left) || !isUserMessage(right) || normalizeMessageText(left.text) !== normalizeMessageText(right.text)) {
     return false;
   }
   const leftImages = left.imageIds ?? [];
   const rightImages = right.imageIds ?? [];
-  return leftImages.length === rightImages.length &&
-    leftImages.every((value, index) => value === rightImages[index]);
+  return leftImages.length === 0 || rightImages.length === 0 || (
+    leftImages.length === rightImages.length &&
+    leftImages.every((value, index) => value === rightImages[index])
+  );
+}
+
+function dedupeOptimisticUserMessages(
+  turns: Record<string, CodexTurn>,
+  turnOrder: string[],
+) {
+  let next = turns;
+  const authoritative = turnOrder.flatMap((turnId) => {
+    const turn = turns[turnId];
+    return (turn?.itemOrder ?? []).flatMap((itemId) => {
+      const item = turn.items[itemId];
+      return item && !itemId.startsWith("web-steer-") && isUserMessage(item)
+        ? [{ turnId, itemId, item }]
+        : [];
+    });
+  });
+  for (const turnId of turnOrder) {
+    const turn = next[turnId];
+    if (!turn) continue;
+    for (const itemId of [...turn.itemOrder]) {
+      const optimistic = turn.items[itemId];
+      if (!itemId.startsWith("web-steer-") || !optimistic) continue;
+      const match = authoritative.find(({ item }) => sameUserMessage(item, optimistic));
+      if (!match) continue;
+      const sourceTurn = next[turnId];
+      const sourceItems = { ...sourceTurn.items };
+      delete sourceItems[itemId];
+      next = {
+        ...next,
+        [turnId]: {
+          ...sourceTurn,
+          itemOrder: sourceTurn.itemOrder.filter((id) => id !== itemId),
+          items: sourceItems,
+        },
+      };
+      if (optimistic.imageIds?.length && !match.item.imageIds?.length) {
+        const targetTurn = next[match.turnId];
+        next = {
+          ...next,
+          [match.turnId]: {
+            ...targetTurn,
+            items: {
+              ...targetTurn.items,
+              [match.itemId]: { ...targetTurn.items[match.itemId], imageIds: optimistic.imageIds },
+            },
+          },
+        };
+      }
+    }
+  }
+  return next;
+}
+
+function isUserMessage(item: CodexTurn["items"][string]) {
+  return item.type.toLocaleLowerCase().includes("user");
+}
+
+function normalizeMessageText(value: string) {
+  return value.trim().replace(/\s+/g, " ");
 }
 
 function historyState(value: unknown): ThreadHistoryState {

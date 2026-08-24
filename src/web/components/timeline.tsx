@@ -50,7 +50,7 @@ function TurnView({ turn, imageRequest }: { turn: CodexTurn; imageRequest?: Imag
             explicitlyRunning || segment.items.some((item) => item.status === undefined)
           );
           return (
-            <details key={segment.key} className="activity-group" open={activityRunning || undefined}>
+            <details key={segment.key} className="activity-group">
               <summary>
                 <span className={`run-indicator run-${activityRunning ? "inProgress" : "completed"}`} aria-hidden="true" />
                 <span>执行过程（{segment.items.length} 项）</span>

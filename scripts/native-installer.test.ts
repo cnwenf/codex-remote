@@ -15,6 +15,23 @@ describe("native installer contract", () => {
     expect(installer).toContain('"$BASE_URL/$ASSET.sha256"');
     expect(installer).toContain("shasum -a 256 -c");
     expect(installer).toContain("uname -m");
+    expect(installer).toContain('arm64|x86_64) ASSET="Codex-Remote-$machine_arch.dmg"');
+    expect(installer).toContain("Select the connection method");
+    expect(installer).toContain("ConnectionMode");
+  });
+
+  it("packages a verified tunnel helper without enabling public mode by default", () => {
+    const fetchTunnel = readFileSync(join(root, "scripts/fetch-cloudflared.sh"), "utf8");
+    expect(fetchTunnel).toContain("api.github.com/repos/cloudflare/cloudflared/releases/latest");
+    expect(fetchTunnel).toContain("digest");
+    expect(fetchTunnel).toContain("shasum -a 256");
+    expect(appSource).toContain('"ConnectionMode"] as? String) == "public"');
+    expect(appSource).toContain("trycloudflare\\.com");
+  });
+
+  it("creates one-time pairing QR codes without embedding the password", () => {
+    expect(appSource).toContain("/api/mobile/pairing");
+    expect(appSource).toContain("CIQRCodeGenerator");
   });
 
   it("never puts the password in launch agents or command arguments", () => {

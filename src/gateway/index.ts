@@ -47,6 +47,7 @@ const gateway = createGateway({
   port,
   token,
   allowedOrigins: process.env.ALLOWED_ORIGINS?.split(",").map((value) => value.trim()),
+  allowTryCloudflareOrigin: process.env.CODEX_REMOTE_PUBLIC_TUNNEL === "1",
   staticDir: resolve(process.env.STATIC_DIR ?? "dist"),
   defaultCwd: process.cwd(),
   desktopState: new DesktopState(join(codexHome, "state_5.sqlite")),

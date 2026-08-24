@@ -2,7 +2,6 @@
 set -eu
 
 REPOSITORY="cnwenf/codex-remote"
-ASSET="Codex-Remote-arm64.dmg"
 BASE_URL="https://github.com/$REPOSITORY/releases/latest/download"
 work_dir=""
 mount_point=""
@@ -15,18 +14,38 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 [ "$(uname -s)" = "Darwin" ] || { echo "Codex Remote only supports macOS." >&2; exit 1; }
-[ "$(uname -m)" = "arm64" ] || { echo "This installer requires an Apple Silicon Mac." >&2; exit 1; }
+machine_arch=$(uname -m)
+case "$machine_arch" in
+  arm64|x86_64) ASSET="Codex-Remote-$machine_arch.dmg" ;;
+  *) echo "Unsupported Mac architecture: $machine_arch" >&2; exit 1 ;;
+esac
 [ -r /dev/tty ] || { echo "An interactive terminal is required." >&2; exit 1; }
 
-addresses=$(ifconfig | awk '/^[a-z0-9]+:/{iface=$1; sub(":$", "", iface)} /inet / && $2 != "127.0.0.1" && $2 !~ /^169\.254\./ {print iface " " $2}')
-[ -n "$addresses" ] || { echo "No usable private IPv4 address found." >&2; exit 1; }
+echo "Select the connection method:" >/dev/tty
+echo "  1) Private network (recommended)" >/dev/tty
+echo "  2) Public HTTPS (experimental, Cloudflare Quick Tunnel)" >/dev/tty
+printf "Choice [1]: " >/dev/tty
+IFS= read -r connection_choice </dev/tty
+connection_choice=${connection_choice:-1}
+case "$connection_choice" in
+  1) connection_mode=private ;;
+  2) connection_mode=public ;;
+  *) echo "Invalid connection method." >&2; exit 1 ;;
+esac
 
-echo "Select the Mac private IPv4 address Codex Remote should use:" >/dev/tty
-index=1
-echo "$addresses" | while IFS= read -r address; do echo "  $index) $address" >/dev/tty; index=$((index + 1)); done
-printf "Choice: " >/dev/tty
-IFS= read -r choice </dev/tty
-bind_host=$(echo "$addresses" | sed -n "${choice}p" | awk '{print $2}')
+addresses=$(ifconfig | awk '/^[a-z0-9]+:/{iface=$1; sub(":$", "", iface)} /inet / && $2 != "127.0.0.1" && $2 !~ /^169\.254\./ {print iface " " $2}')
+
+if [ "$connection_mode" = private ]; then
+  [ -n "$addresses" ] || { echo "No usable private IPv4 address found." >&2; exit 1; }
+  echo "Select the Mac private IPv4 address Codex Remote should use:" >/dev/tty
+  index=1
+  echo "$addresses" | while IFS= read -r address; do echo "  $index) $address" >/dev/tty; index=$((index + 1)); done
+  printf "Choice: " >/dev/tty
+  IFS= read -r choice </dev/tty
+  bind_host=$(echo "$addresses" | sed -n "${choice}p" | awk '{print $2}')
+else
+  bind_host=127.0.0.1
+fi
 [ -n "$bind_host" ] || { echo "Invalid address selection." >&2; exit 1; }
 
 printf "Web login password: " >/dev/tty
@@ -48,7 +67,7 @@ curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$ASSET.sha256" -o "$work_dir/$ASS
 mkdir -p "$mount_point"
 hdiutil attach "$work_dir/$ASSET" -nobrowse -readonly -mountpoint "$mount_point" -quiet
 codesign --verify --deep --strict "$mount_point/Codex Remote.app"
-file "$mount_point/Codex Remote.app/Contents/MacOS/Codex Remote" | grep -q arm64
+file "$mount_point/Codex Remote.app/Contents/MacOS/Codex Remote" | grep -q "$machine_arch"
 install_root="/Applications"
 [ -w "$install_root" ] || install_root="$HOME/Applications"
 mkdir -p "$install_root"
@@ -66,11 +85,16 @@ chmod 600 "$support/token"
 defaults write "$support/config" BindHost -string "$bind_host"
 defaults write "$support/config" Port -int 4321
 defaults write "$support/config" RemoteEnabled -bool true
+defaults write "$support/config" ConnectionMode -string "$connection_mode"
 
 "$install_root/Codex Remote.app/Contents/Resources/install-launch-agents.sh" "$install_root/Codex Remote.app"
 open "$install_root/Codex Remote.app"
 
 echo "Codex Remote installed."
-echo "Open: http://$bind_host:4321"
+if [ "$connection_mode" = private ]; then
+  echo "Open: http://$bind_host:4321"
+else
+  echo "Public HTTPS is starting. Open Codex Remote from the menu bar to view the generated URL and pairing QR."
+fi
 echo "Login password: $token"
 echo "Quit and reopen Codex Desktop once to enable its local bridge."

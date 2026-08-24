@@ -142,6 +142,9 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               onTogglePin={codex.desktopStateAvailable && !codex.desktopControlAvailable
                 ? undefined
                 : (id) => void codex.togglePin(id).catch(() => undefined)}
+              onArchive={codex.desktopStateAvailable && !codex.desktopControlAvailable
+                ? undefined
+                : (id) => void codex.archiveThread(id).catch(() => undefined)}
             />
           </aside>
 

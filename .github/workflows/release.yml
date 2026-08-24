@@ -11,7 +11,8 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # The existing release gate includes macOS LaunchAgent/runtime integration tests.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -26,7 +27,14 @@ jobs:
 
   macos:
     needs: verify
-    runs-on: macos-15
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -37,9 +45,13 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Build ARM64 DMG
+      - name: Fetch verified public HTTPS helper
+        run: scripts/fetch-cloudflared.sh "${{ matrix.arch }}" "$RUNNER_TEMP/cloudflared"
+      - name: Build architecture-specific DMG
         run: |
           export CODEX_REMOTE_NODE_BIN="$(command -v node)"
+          export CODEX_REMOTE_CLOUDFLARED_BIN="$RUNNER_TEMP/cloudflared"
+          export MACOS_ARCH="${{ matrix.arch }}"
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           else
@@ -48,19 +60,20 @@ jobs:
           scripts/package-macos-dmg.sh
       - name: Verify package
         run: |
-          (cd artifacts && shasum -a 256 -c Codex-Remote-arm64.dmg.sha256)
+          (cd artifacts && shasum -a 256 -c "Codex-Remote-${{ matrix.arch }}.dmg.sha256")
           mount_dir="$(mktemp -d)"
-          hdiutil attach artifacts/Codex-Remote-arm64.dmg -nobrowse -readonly -mountpoint "$mount_dir" -quiet
+          hdiutil attach "artifacts/Codex-Remote-${{ matrix.arch }}.dmg" -nobrowse -readonly -mountpoint "$mount_dir" -quiet
           codesign --verify --deep --strict "$mount_dir/Codex Remote.app"
-          file "$mount_dir/Codex Remote.app/Contents/MacOS/Codex Remote" | grep -q arm64
-          file "$mount_dir/Codex Remote.app/Contents/Resources/bin/node" | grep -q arm64
+          file "$mount_dir/Codex Remote.app/Contents/MacOS/Codex Remote" | grep -q "${{ matrix.arch }}"
+          file "$mount_dir/Codex Remote.app/Contents/Resources/bin/node" | grep -q "${{ matrix.arch }}"
+          file "$mount_dir/Codex Remote.app/Contents/Resources/bin/cloudflared" | grep -q "${{ matrix.arch }}"
           hdiutil detach "$mount_dir" -quiet
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
+          name: macos-${{ matrix.arch }}
           path: |
-            artifacts/Codex-Remote-arm64.dmg
-            artifacts/Codex-Remote-arm64.dmg.sha256
+            artifacts/Codex-Remote-${{ matrix.arch }}.dmg
+            artifacts/Codex-Remote-${{ matrix.arch }}.dmg.sha256
 
   android:
     needs: verify

@@ -260,22 +260,24 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     if (!itemId) return state;
     return updateThread(state, threadId, (thread) => {
       const turnId = resolveTurnId(thread, params);
-      return updateTurn(thread, turnId, (turn) => {
+      const itemType = stringValue(item.type) ?? thread.turns[turnId]?.items[itemId]?.type ?? "item";
+      const text = itemText(item);
+      const optimisticMatch = isUserMessageType(itemType)
+        ? findMatchingOptimisticUserMessage(thread, text, itemId)
+        : undefined;
+      const baseThread = optimisticMatch
+        ? removeItemFromTurn(thread, optimisticMatch.turnId, optimisticMatch.item.id)
+        : thread;
+      return updateTurn(baseThread, turnId, (turn) => {
         const previous = turn.items[itemId];
-        const text = itemText(item) || previous?.text || "";
-        const itemType = stringValue(item.type) ?? previous?.type ?? "item";
-        const optimisticId = itemType === "userMessage"
-          ? findMatchingOptimisticUserMessage(turn, text, itemId)
-          : undefined;
-        const optimistic = optimisticId ? turn.items[optimisticId] : undefined;
+        const resolvedText = text || previous?.text || "";
         const nextItems = { ...turn.items };
-        if (optimisticId) delete nextItems[optimisticId];
         nextItems[itemId] = {
           id: itemId,
           type: itemType,
-          text,
-          ...(previous?.imageIds || optimistic?.imageIds
-            ? { imageIds: previous?.imageIds ?? optimistic?.imageIds }
+          text: resolvedText,
+          ...(previous?.imageIds || optimisticMatch?.item.imageIds
+            ? { imageIds: previous?.imageIds ?? optimisticMatch?.item.imageIds }
             : {}),
           status: message.method === "item/completed"
             ? stringValue(item.status) ?? "completed"
@@ -284,7 +286,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
         return {
           ...turn,
           status: message.method === "item/completed" ? turn.status : "inProgress",
-          itemOrder: replaceOrAppendItemId(turn.itemOrder, optimisticId, itemId),
+          itemOrder: appendUnique(turn.itemOrder, itemId),
           items: nextItems,
         };
       }, "inProgress", message.method === "item/started");
@@ -345,28 +347,49 @@ function appendUnique(values: string[], value: string) {
 }
 
 function findMatchingOptimisticUserMessage(
-  turn: CodexTurn,
+  thread: CodexThread,
   text: string,
   authoritativeId: string,
 ) {
-  if (turn.items[authoritativeId]) return undefined;
+  if (thread.turnOrder.some((turnId) => thread.turns[turnId]?.items[authoritativeId])) return undefined;
   const expected = normalizeUserMessageText(text);
-  return turn.itemOrder.find((id) => {
-    const candidate = turn.items[id];
-    return id.startsWith("web-steer-") &&
-      candidate?.type === "userMessage" &&
-      normalizeUserMessageText(candidate.text) === expected;
-  });
+  for (const turnId of thread.turnOrder) {
+    const turn = thread.turns[turnId];
+    const itemId = turn?.itemOrder.find((id) => {
+      const candidate = turn.items[id];
+      return Boolean(candidate) && id.startsWith("web-steer-") &&
+        isUserMessageType(candidate?.type) &&
+        normalizeUserMessageText(candidate?.text ?? "") === expected;
+    });
+    if (itemId) return { turnId, item: turn.items[itemId] };
+  }
+  return undefined;
 }
 
-function replaceOrAppendItemId(values: string[], replacedId: string | undefined, value: string) {
-  if (!replacedId) return appendUnique(values, value);
-  const next = values.filter((id) => id !== value);
-  return next.map((id) => id === replacedId ? value : id);
+function removeItemFromTurn(thread: CodexThread, turnId: string, itemId: string): CodexThread {
+  const turn = thread.turns[turnId];
+  if (!turn?.items[itemId]) return thread;
+  const items = { ...turn.items };
+  delete items[itemId];
+  return {
+    ...thread,
+    turns: {
+      ...thread.turns,
+      [turnId]: {
+        ...turn,
+        itemOrder: turn.itemOrder.filter((id) => id !== itemId),
+        items,
+      },
+    },
+  };
 }
 
 function normalizeUserMessageText(value: string) {
   return value.trim().replace(/\s+/g, " ");
+}
+
+function isUserMessageType(value: string | undefined) {
+  return value?.toLocaleLowerCase().includes("user") === true;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

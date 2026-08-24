@@ -116,8 +116,73 @@ describe("Timeline", () => {
     const agent = screen.getByText("先输出文字").closest("article");
     const activity = screen.getByText("执行过程（1 项）").closest("details");
     expect((agent?.compareDocumentPosition(activity as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(activity).not.toHaveAttribute("open");
     expect(screen.getByLabelText("Codex 仍在输出")).toBeVisible();
     expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
+  });
+
+  it("marks an earlier activity group complete once later assistant output arrives", () => {
+    const thread: CodexThread = {
+      id: "later-output",
+      title: "Later output",
+      status: "running",
+      activeTurnId: "turn-1",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "inProgress",
+          itemOrder: ["tool", "agent"],
+          items: {
+            tool: { id: "tool", type: "commandExecution", text: "done" },
+            agent: { id: "agent", type: "agentMessage", text: "新的文本" },
+          },
+        },
+      },
+    };
+
+    const { container } = render(<Timeline thread={thread} />);
+    expect(screen.getByText("执行过程（1 项）").closest("details")).not.toHaveAttribute("open");
+    expect(container.querySelector(".activity-group .run-completed")).toBeInTheDocument();
+    expect(container.querySelector(".activity-group .run-inProgress")).not.toBeInTheDocument();
+  });
+
+  it("only expands a running activity group after the user opens it", async () => {
+    const thread: CodexThread = {
+      id: "manual-activity",
+      title: "Manual activity",
+      status: "running",
+      activeTurnId: "turn-1",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "inProgress",
+          itemOrder: ["tool"],
+          items: {
+            tool: { id: "tool", type: "commandExecution", text: "running", status: "running" },
+          },
+        },
+      },
+    };
+    const { rerender } = render(<Timeline thread={thread} />);
+    const summary = screen.getByText("执行过程（1 项）");
+    const activity = summary.closest("details");
+    expect(activity).not.toHaveAttribute("open");
+
+    await userEvent.click(summary);
+    expect(activity).toHaveAttribute("open");
+
+    const updated = structuredClone(thread);
+    updated.turns["turn-1"].itemOrder.push("tool-2");
+    updated.turns["turn-1"].items["tool-2"] = {
+      id: "tool-2",
+      type: "commandExecution",
+      text: "next",
+      status: "running",
+    };
+    rerender(<Timeline thread={updated} />);
+    expect(screen.getByText("执行过程（2 项）").closest("details")).toHaveAttribute("open");
   });
 
   it("collapses an earlier completed activity segment after newer assistant output", () => {

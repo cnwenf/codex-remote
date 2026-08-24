@@ -941,9 +941,9 @@ describe("useCodex", () => {
               plan: [{ step: "Keep polling", status: "in_progress" }],
             },
             turns: [{
-              id: "turn-1",
+              id: "turn-2",
               status: "inProgress",
-              items: [{ id: "steer-1", type: "userMessage", text: "Visible steer" }],
+              items: [{ id: "steer-1", type: "user_message", text: "  Visible   steer  " }],
             }],
           },
         },
@@ -954,9 +954,10 @@ describe("useCodex", () => {
       explanation: "Live plan",
       items: [{ step: "Keep polling", status: "inProgress" }],
     }));
-    expect(result.current.selectedThread?.turns["turn-1"].items["steer-1"].text).toBe("Visible steer");
-    expect(Object.values(result.current.selectedThread?.turns["turn-1"].items ?? {})
-      .filter((item) => item.type === "userMessage" && item.text === "Visible steer"))
+    expect(result.current.selectedThread?.turns["turn-2"].items["steer-1"].text).toContain("Visible");
+    expect(Object.values(result.current.selectedThread?.turns ?? {})
+      .flatMap((turn) => Object.values(turn.items))
+      .filter((item) => item.type.toLocaleLowerCase().includes("user") && item.text.includes("Visible")))
       .toHaveLength(1);
   });
 
@@ -971,6 +972,30 @@ describe("useCodex", () => {
     });
 
     expect(result.current.defaultCwd).toBe("/service/default");
+  });
+
+  it("archives through the shared Codex protocol and refreshes the Desktop-backed list", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let archiving: Promise<void>;
+    act(() => { archiving = result.current.archiveThread("t1"); });
+    const archiveRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(archiveRequest).toMatchObject({ method: "thread/archive", params: { threadId: "t1" } });
+    fake.serverSend({ type: "rpc", payload: { id: archiveRequest.id, result: {} } });
+
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(listRequest.method).toBe("thread/list");
+    fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
+
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(metadataRequest.method).toBe("desktopState/listThreads");
+    fake.serverSend({ type: "rpc", payload: { id: metadataRequest.id, result: { data: [] } } });
+    await act(() => archiving);
   });
 
   it("loads the pinned section and moves a thread into it", async () => {

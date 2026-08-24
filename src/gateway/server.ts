@@ -27,6 +27,7 @@ import {
   MAX_IMAGE_BYTES,
 } from "./image-upload-store";
 import { projectMobileStatus } from "./mobile-status";
+import { PairingStore } from "./pairing-store";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 4 * 1024;
@@ -52,6 +53,7 @@ type GatewayOptions = {
   port?: number;
   token: string;
   allowedOrigins?: string[];
+  allowTryCloudflareOrigin?: boolean;
   staticDir?: string;
   uploadDir?: string;
   defaultCwd?: string;
@@ -77,6 +79,7 @@ export function createGateway(options: GatewayOptions) {
     options.uploadDir ?? join(homedir(), ".codex", "codex-remote", "uploads"),
   );
   const mobileStatusRate = new Map<string, { startedAt: number; count: number }>();
+  const pairingStore = new PairingStore();
   let allowedOrigins = new Set([
     ...(options.allowedOrigins ?? []),
     ...NATIVE_WEBVIEW_ORIGINS,
@@ -107,6 +110,14 @@ export function createGateway(options: GatewayOptions) {
     }
     if (pathname === "/api/mobile/status") {
       void handleMobileStatus(request, response);
+      return;
+    }
+    if (pathname === "/api/mobile/pairing") {
+      void handlePairingCreate(request, response);
+      return;
+    }
+    if (pathname === "/api/mobile/pair") {
+      void handlePairingExchange(request, response);
       return;
     }
     if (pathname === "/api/images") {
@@ -177,7 +188,7 @@ export function createGateway(options: GatewayOptions) {
       rejectUpgrade(socket, 401, "Unauthorized");
       return;
     }
-    if (!isAllowedOrigin(request.headers.origin, allowedOrigins)) {
+    if (!isConfiguredOrigin(request.headers.origin)) {
       rejectUpgrade(socket, 403, "Forbidden");
       return;
     }
@@ -384,7 +395,7 @@ export function createGateway(options: GatewayOptions) {
       response.writeHead(405, { Allow: "POST" }).end();
       return;
     }
-    if (!isAllowedOrigin(request.headers.origin, allowedOrigins)) {
+    if (!isConfiguredOrigin(request.headers.origin)) {
       response.writeHead(403).end();
       return;
     }
@@ -418,7 +429,7 @@ export function createGateway(options: GatewayOptions) {
       response.writeHead(405, { Allow: "POST" }).end();
       return;
     }
-    if (request.headers.origin && !isAllowedOrigin(request.headers.origin, allowedOrigins)) {
+    if (request.headers.origin && !isConfiguredOrigin(request.headers.origin)) {
       response.writeHead(403).end();
       return;
     }
@@ -453,6 +464,18 @@ export function createGateway(options: GatewayOptions) {
     }
   }
 
+  function isConfiguredOrigin(origin: string | undefined) {
+    if (isAllowedOrigin(origin, allowedOrigins)) return true;
+    if (!options.allowTryCloudflareOrigin || !origin) return false;
+    try {
+      const url = new URL(origin);
+      return url.protocol === "https:" && url.port === "" &&
+        /^[a-z0-9-]+\.trycloudflare\.com$/.test(url.hostname);
+    } catch {
+      return false;
+    }
+  }
+
   async function handleMobileStatus(request: IncomingMessage, response: ServerResponse) {
     response.setHeader("Cache-Control", "no-store");
     if (request.method !== "GET") {
@@ -484,6 +507,53 @@ export function createGateway(options: GatewayOptions) {
       response.end(JSON.stringify(projectMobileStatus(value)));
     } catch {
       response.writeHead(503).end();
+    }
+  }
+
+  async function handlePairingCreate(request: IncomingMessage, response: ServerResponse) {
+    response.setHeader("Cache-Control", "no-store");
+    if (request.method !== "POST") {
+      response.writeHead(405, { Allow: "POST" }).end();
+      return;
+    }
+    if (!isRequestAuthorized(request, options.token, sessionCredential)) {
+      response.writeHead(401).end();
+      return;
+    }
+    try {
+      const body = await readJsonBody(request);
+      const baseUrl = normalizePairingBaseUrl(body.baseUrl);
+      const pairing = pairingStore.create(baseUrl, options.token);
+      response.writeHead(201, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(pairing));
+    } catch {
+      response.writeHead(400).end();
+    }
+  }
+
+  async function handlePairingExchange(request: IncomingMessage, response: ServerResponse) {
+    response.setHeader("Cache-Control", "no-store");
+    if (request.method !== "POST") {
+      response.writeHead(405, { Allow: "POST" }).end();
+      return;
+    }
+    const remoteAddress = request.socket.remoteAddress ?? "unknown";
+    if (!consumeMobileStatusRate(`pair:${remoteAddress}`)) {
+      response.writeHead(429, { "Retry-After": "60" }).end();
+      return;
+    }
+    try {
+      const body = await readJsonBody(request);
+      const code = typeof body.code === "string" ? body.code : "";
+      const pairing = code.length <= 256 ? pairingStore.consume(code) : undefined;
+      if (!pairing) {
+        response.writeHead(404).end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(pairing));
+    } catch {
+      response.writeHead(400).end();
     }
   }
 
@@ -651,8 +721,36 @@ function setSecurityHeaders(response: ServerResponse) {
 
 function isMobileApiPath(pathname: string) {
   return pathname === "/api/mobile/status" ||
+    pathname === "/api/mobile/pairing" ||
+    pathname === "/api/mobile/pair" ||
     pathname === "/api/images" ||
     /^\/api\/images\/[0-9a-f-]+$/i.test(pathname);
+}
+
+function isRequestAuthorized(request: IncomingMessage, token: string, sessionCredential: string) {
+  const bearer = singleHeader(request.headers.authorization)?.match(/^Bearer ([^\s]+)$/i)?.[1];
+  const session = readCookie(request.headers.cookie, SESSION_COOKIE_NAME);
+  return (bearer !== undefined && isAuthorized(bearer, token)) ||
+    (session !== undefined && isAuthorized(session, sessionCredential));
+}
+
+function normalizePairingBaseUrl(value: unknown) {
+  if (typeof value !== "string") throw new Error("pairing-base-url-required");
+  const url = new URL(value.trim());
+  if (url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+    throw new Error("pairing-base-url-invalid");
+  }
+  if (url.protocol === "https:") return url.origin;
+  if (url.protocol !== "http:" || !isPrivatePairingHost(url.hostname)) {
+    throw new Error("pairing-base-url-insecure");
+  }
+  return url.origin;
+}
+
+function isPrivatePairingHost(hostname: string) {
+  const host = hostname.toLowerCase();
+  return host === "localhost" || host.endsWith(".local") ||
+    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(host) || host === "[::1]";
 }
 
 function serveStatic(
