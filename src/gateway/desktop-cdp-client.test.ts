@@ -30,6 +30,8 @@ describe("DesktopCdpClient", () => {
       .toContain("__codexLocalDesktopNotificationListenerInstalled");
     expect(String(server.requests[2]?.params?.expression)).toContain("fetch-response");
     expect(String(server.requests[2]?.params?.expression)).toContain("pinned-threads-updated");
+    expect(String(server.requests[2]?.params?.expression))
+      .toContain("__codexRemoteVisibleSettingsHelperVersion");
     await client.stop();
   });
 
@@ -84,6 +86,35 @@ describe("DesktopCdpClient", () => {
       { value: "thread-follower-update-thread-settings" },
       { value: { conversationId: "thread-1", threadSettings: { model: "gpt-test" } } },
     ]);
+    const visibleSync = server.requests.at(-1);
+    expect(visibleSync?.method).toBe("Runtime.callFunctionOn");
+    expect(String(visibleSync?.params?.functionDeclaration))
+      .toContain("__codexRemoteSyncVisibleThreadSettings");
+    expect(visibleSync?.params?.arguments).toEqual([{
+      value: { conversationId: "thread-1", threadSettings: { model: "gpt-test" } },
+    }]);
+    await client.stop();
+  });
+
+  it("serializes visible Desktop setting updates", async () => {
+    server = new FakeCdpServer();
+    server.visibleSettingsSyncDelayMs = 40;
+    const endpoint = await server.start();
+    const client = new DesktopCdpClient({ endpoint });
+    await client.start(() => undefined, () => undefined);
+
+    await Promise.all([
+      client.requestThreadOwner(
+        "thread-follower-update-thread-settings",
+        { conversationId: "thread-1", threadSettings: { model: "gpt-test" } },
+      ),
+      client.requestThreadOwner(
+        "thread-follower-update-thread-settings",
+        { conversationId: "thread-1", threadSettings: { effort: "high" } },
+      ),
+    ]);
+
+    expect(server.maxConcurrentVisibleSettingsSyncRequests).toBe(1);
     await client.stop();
   });
 

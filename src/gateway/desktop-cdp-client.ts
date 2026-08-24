@@ -56,6 +56,7 @@ export class DesktopCdpClient {
   private endpoint?: URL;
   private stopping = false;
   private disconnectNotified = false;
+  private threadOwnerRequestTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: DesktopCdpClientOptions) {}
 
@@ -118,7 +119,15 @@ export class DesktopCdpClient {
     });
   }
 
-  async requestThreadOwner(method: string, params: unknown): Promise<unknown> {
+  requestThreadOwner(method: string, params: unknown): Promise<unknown> {
+    const request = this.threadOwnerRequestTail.then(
+      () => this.performThreadOwnerRequest(method, params),
+    );
+    this.threadOwnerRequestTail = request.then(() => undefined, () => undefined);
+    return request;
+  }
+
+  private async performThreadOwnerRequest(method: string, params: unknown): Promise<unknown> {
     await this.ensureOwnerConnection();
     if (!this.ownerWindowObjectId) throw new Error("desktop-thread-owner-unavailable");
     const response = await this.callOwner("Runtime.callFunctionOn", {
@@ -137,7 +146,38 @@ export class DesktopCdpClient {
     }
     const record = remoteResult as Record<string, unknown>;
     if (record.subtype === "error") throw new Error("desktop-thread-owner-request-failed");
+    if (method === "thread-follower-update-thread-settings") {
+      await this.syncVisibleThreadSettings(params);
+    }
     return record.value;
+  }
+
+  private async syncVisibleThreadSettings(params: unknown): Promise<void> {
+    if (!this.windowObjectId) throw new Error("desktop-cdp-not-ready");
+    const response = await this.call("Runtime.callFunctionOn", {
+      objectId: this.windowObjectId,
+      functionDeclaration: `async function(params) {
+        return this.__codexRemoteSyncVisibleThreadSettings(params);
+      }`,
+      arguments: [{ value: params }],
+      awaitPromise: true,
+      returnByValue: true,
+    }, 15_000);
+    throwRuntimeException(response, "desktop-visible-settings-sync-failed");
+    const remoteResult = response.result;
+    const value = remoteResult && typeof remoteResult === "object"
+      ? (remoteResult as Record<string, unknown>).value
+      : undefined;
+    if (!value || typeof value !== "object") {
+      throw new Error("desktop-visible-settings-sync-invalid");
+    }
+    const result = value as Record<string, unknown>;
+    if (result.visible === true && result.synced !== true) {
+      const failures = Array.isArray(result.failures)
+        ? result.failures.filter((failure): failure is string => typeof failure === "string")
+        : [];
+      throw new Error(`desktop-visible-settings-sync-failed${failures.length ? `:${failures.join(",")}` : ""}`);
+    }
   }
 
   async stop(): Promise<void> {
@@ -225,7 +265,11 @@ export class DesktopCdpClient {
     }
   }
 
-  private call(method: string, params?: Record<string, unknown>) {
+  private call(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  ) {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("desktop-cdp-not-connected"));
@@ -235,7 +279,7 @@ export class DesktopCdpClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error("desktop-cdp-call-timeout"));
-      }, this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout });
       socket.send(JSON.stringify({ id, method, ...(params ? { params } : {}) }));
     });
@@ -390,6 +434,7 @@ function parseLoopbackUrl(
 function listenerExpression(): string {
   const types = JSON.stringify(FORWARDED_MESSAGE_TYPES);
   const notificationType = JSON.stringify(NOTIFICATION_MESSAGE_TYPE);
+  const settingsHelper = visibleThreadSettingsHelperExpression();
   return `(() => {
     if (!window.__codexLocalDesktopListenerInstalled) {
       window.__codexLocalDesktopListenerInstalled = true;
@@ -410,8 +455,256 @@ function listenerExpression(): string {
         }
       });
     }
+    ${settingsHelper}
     return window;
   })()`;
+}
+
+function visibleThreadSettingsHelperExpression(): string {
+  return `
+    if (window.__codexRemoteVisibleSettingsHelperVersion !== 2) {
+      window.__codexRemoteVisibleSettingsHelperVersion = 2;
+      window.__codexRemoteVisibleSettingsObserver?.disconnect();
+      if (window.__codexRemoteVisibleSettingsFocusHandler) {
+        window.removeEventListener('focus', window.__codexRemoteVisibleSettingsFocusHandler);
+      }
+      const pendingSettings = window.__codexRemotePendingThreadSettings instanceof Map
+        ? window.__codexRemotePendingThreadSettings
+        : new Map();
+      window.__codexRemotePendingThreadSettings = pendingSettings;
+      const syncingThreads = new Set();
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (read, timeoutMs = 2500) => {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < timeoutMs) {
+          const value = read();
+          if (value) return value;
+          await pause(40);
+        }
+        return null;
+      };
+      const pointerDown = (element) => {
+        element.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 1,
+          pointerId: Math.floor(Math.random() * 100000) + 1,
+          isPrimary: true,
+          pointerType: 'mouse',
+        }));
+      };
+      const pointerMove = (element) => {
+        element.focus();
+        element.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: Math.floor(Math.random() * 100000) + 1,
+          isPrimary: true,
+          pointerType: 'mouse',
+          clientX: 500,
+          clientY: 500,
+        }));
+      };
+      const closeMenus = async () => {
+        for (let index = 0; index < 3; index += 1) {
+          if (!document.querySelector('[role="menu"][data-state="open"]')) return;
+          document.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape',
+            code: 'Escape',
+            bubbles: true,
+          }));
+          await pause(80);
+        }
+      };
+      const reactConversationId = (element) => {
+        if (!element) return null;
+        const fiberKey = Object.keys(element).find((key) => key.startsWith('__reactFiber$'));
+        let fiber = fiberKey ? element[fiberKey] : null;
+        for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
+          const conversationId = fiber.memoizedProps?.conversationId;
+          if (typeof conversationId === 'string') return conversationId;
+        }
+        return null;
+      };
+      const permissionTrigger = () => document.querySelector(
+        'button[data-composer-navigation-target="permissions"]',
+      );
+      const intelligenceTrigger = () => document.querySelector(
+        'button[data-codex-intelligence-trigger="true"]',
+      );
+      const visibleConversationId = () => reactConversationId(
+        permissionTrigger() || intelligenceTrigger() || document.querySelector('[data-codex-composer-root]'),
+      );
+      const menuForTrigger = (trigger) => {
+        if (!trigger?.id) return null;
+        return Array.from(document.querySelectorAll('[role="menu"][data-state="open"]'))
+          .find((menu) => menu.getAttribute('aria-labelledby') === trigger.id) || null;
+      };
+      const openMenu = async (trigger) => {
+        await closeMenus();
+        pointerDown(trigger);
+        return waitFor(() => menuForTrigger(trigger));
+      };
+      const openSubmenu = async (item) => {
+        pointerMove(item);
+        return waitFor(() => {
+          const controls = item.getAttribute('aria-controls');
+          const menu = controls ? document.getElementById(controls) : null;
+          return menu?.getAttribute('data-state') === 'open' ? menu : null;
+        });
+      };
+      const firstLine = (element) => (element?.innerText || '').trim().split(/\\r?\\n/, 1)[0] || '';
+      const normalizeLabel = (value) => String(value || '')
+        .toLowerCase()
+        .replace(/[^\\p{L}\\p{N}]+/gu, '');
+      const permissionLabelsMatch = (left, right) => {
+        const a = normalizeLabel(left);
+        const b = normalizeLabel(right);
+        return a.length > 0 && b.length > 0 && (a.startsWith(b) || b.startsWith(a));
+      };
+      const normalizeModel = (value) => String(value || '')
+        .toLowerCase()
+        .replace(/^gpt[-_ ]*/, '')
+        .replace(/[^a-z0-9]+/g, '');
+      const permissionMode = (settings) => {
+        const profile = settings.permissions;
+        const reviewer = settings.approvalsReviewer;
+        if (profile === ':danger-full-access' && settings.approvalPolicy === 'never') return 'full-access';
+        if (reviewer === 'guardian_subagent' || reviewer === 'auto_review') return 'guardian-approvals';
+        if (profile === ':workspace' || profile === ':read-only') return 'auto';
+        return typeof profile === 'string' ? profile : null;
+      };
+      const syncPermission = async (settings) => {
+        const mode = permissionMode(settings);
+        if (!mode) return true;
+        const trigger = permissionTrigger();
+        if (!trigger) return false;
+        const menu = await openMenu(trigger);
+        if (!menu) return false;
+        const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+        const baseIndex = mode === 'auto' ? 0 : mode === 'guardian-approvals' ? 1 : mode === 'full-access' ? 2 : -1;
+        const normalizedProfile = normalizeModel(String(mode).replace(/^:/, ''));
+        const item = baseIndex >= 0
+          ? items[baseIndex]
+          : items.find((candidate) => normalizeModel(firstLine(candidate)) === normalizedProfile);
+        if (!item) {
+          await closeMenus();
+          return false;
+        }
+        const expectedLabel = firstLine(item);
+        if (permissionLabelsMatch(firstLine(trigger), expectedLabel)) {
+          await closeMenus();
+          return true;
+        }
+        item.click();
+        const dialog = mode === 'full-access'
+          ? await waitFor(() => document.querySelector('[role="dialog"]'), 800)
+          : null;
+        if (dialog) {
+          const buttons = Array.from(dialog.querySelectorAll('button:not([disabled])'));
+          buttons.at(-1)?.click();
+        }
+        return Boolean(await waitFor(
+          () => permissionLabelsMatch(firstLine(trigger), expectedLabel),
+        ));
+      };
+      const syncModel = async (settings) => {
+        if (typeof settings.model !== 'string') return true;
+        const trigger = intelligenceTrigger();
+        if (!trigger) return false;
+        const target = normalizeModel(settings.model);
+        if (normalizeModel(firstLine(trigger)) === target) return true;
+        const menu = await openMenu(trigger);
+        if (!menu) return false;
+        const categories = Array.from(menu.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]'));
+        const submenu = categories[0] ? await openSubmenu(categories[0]) : null;
+        if (!submenu) return false;
+        const item = Array.from(submenu.querySelectorAll('[role="menuitem"]'))
+          .find((candidate) => normalizeModel(firstLine(candidate)) === target);
+        if (!item) {
+          await closeMenus();
+          return false;
+        }
+        item.click();
+        return Boolean(await waitFor(() => normalizeModel(firstLine(trigger)) === target));
+      };
+      const effortValuesForCount = (count) => {
+        const common = ['low', 'medium', 'high', 'xhigh', 'max'];
+        if (count <= common.length) return common.slice(0, count);
+        if (count === common.length + 1) return ['minimal', ...common];
+        return ['minimal', ...common, 'ultra'].slice(0, count);
+      };
+      const syncEffort = async (settings) => {
+        if (typeof settings.effort !== 'string') return true;
+        const trigger = intelligenceTrigger();
+        if (!trigger) return false;
+        if (trigger.getAttribute('data-selected-reasoning-effort') === settings.effort) return true;
+        const menu = await openMenu(trigger);
+        if (!menu) return false;
+        const categories = Array.from(menu.querySelectorAll('[role="menuitem"][aria-haspopup="menu"]'));
+        const submenu = categories[1] ? await openSubmenu(categories[1]) : null;
+        if (!submenu) return false;
+        const items = Array.from(submenu.querySelectorAll('[role="menuitem"]'));
+        const effortValues = effortValuesForCount(items.length);
+        const targetIndex = effortValues.indexOf(settings.effort);
+        const item = targetIndex >= 0 ? items[targetIndex] : null;
+        if (!item) {
+          await closeMenus();
+          return false;
+        }
+        item.click();
+        return Boolean(await waitFor(
+          () => trigger.getAttribute('data-selected-reasoning-effort') === settings.effort,
+        ));
+      };
+      const syncVisible = async (params, queueWhenHidden = true) => {
+        const conversationId = params?.conversationId;
+        const settings = params?.threadSettings;
+        if (typeof conversationId !== 'string' || !settings || typeof settings !== 'object') {
+          throw new Error('desktop-visible-settings-invalid');
+        }
+        if (visibleConversationId() !== conversationId) {
+          if (queueWhenHidden) pendingSettings.set(conversationId, params);
+          return { visible: false, queued: queueWhenHidden, synced: false, failures: [] };
+        }
+        if (syncingThreads.has(conversationId)) {
+          if (queueWhenHidden) pendingSettings.set(conversationId, params);
+          return { visible: true, queued: queueWhenHidden, synced: false, failures: ['busy'] };
+        }
+        syncingThreads.add(conversationId);
+        const failures = [];
+        try {
+          if (!await syncModel(settings)) failures.push('model');
+          if (!await syncEffort(settings)) failures.push('effort');
+          if (!await syncPermission(settings)) failures.push('permission');
+          if (failures.length === 0) pendingSettings.delete(conversationId);
+          return { visible: true, queued: false, synced: failures.length === 0, failures };
+        } finally {
+          syncingThreads.delete(conversationId);
+        }
+      };
+      window.__codexRemoteSyncVisibleThreadSettings = (params) => syncVisible(params, true);
+      let observerTimer = null;
+      const flushPending = () => {
+        if (pendingSettings.size === 0 || observerTimer != null) return;
+        observerTimer = setTimeout(() => {
+          observerTimer = null;
+          const conversationId = visibleConversationId();
+          const params = conversationId ? pendingSettings.get(conversationId) : null;
+          if (params) void syncVisible(params, false);
+        }, 120);
+      };
+      const observer = new MutationObserver(flushPending);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+      window.__codexRemoteVisibleSettingsObserver = observer;
+      window.__codexRemoteVisibleSettingsFocusHandler = flushPending;
+      window.addEventListener('focus', flushPending);
+    }
+  `;
 }
 
 function ownerHelperExpression(): string {

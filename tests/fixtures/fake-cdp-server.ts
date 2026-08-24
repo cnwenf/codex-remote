@@ -11,6 +11,8 @@ type CdpRequest = {
 export class FakeCdpServer {
   readonly requests: CdpRequest[] = [];
   readonly ownerRequests: CdpRequest[] = [];
+  visibleSettingsSyncDelayMs = 0;
+  maxConcurrentVisibleSettingsSyncRequests = 0;
   ownerResponse: unknown = {
     method: "thread-follower-update-thread-settings",
     result: { ok: true },
@@ -19,6 +21,7 @@ export class FakeCdpServer {
   private readonly websocketServer: WebSocketServer;
   private socket?: WebSocket;
   private ownerSocket?: WebSocket;
+  private activeVisibleSettingsSyncRequests = 0;
 
   constructor() {
     this.httpServer = createServer((request, response) => {
@@ -78,10 +81,30 @@ export class FakeCdpServer {
       socket.on("message", (raw) => {
         const request = JSON.parse(raw.toString()) as CdpRequest;
         (owner ? this.ownerRequests : this.requests).push(request);
+        const visibleSettingsSync = !owner &&
+          request.method === "Runtime.callFunctionOn" &&
+          String(request.params?.functionDeclaration).includes("__codexRemoteSyncVisibleThreadSettings");
+        if (visibleSettingsSync && this.visibleSettingsSyncDelayMs > 0) {
+          this.activeVisibleSettingsSyncRequests += 1;
+          this.maxConcurrentVisibleSettingsSyncRequests = Math.max(
+            this.maxConcurrentVisibleSettingsSyncRequests,
+            this.activeVisibleSettingsSyncRequests,
+          );
+          setTimeout(() => {
+            this.activeVisibleSettingsSyncRequests -= 1;
+            socket.send(JSON.stringify({
+              id: request.id,
+              result: { result: { value: { visible: true, synced: true, failures: [] } } },
+            }));
+          }, this.visibleSettingsSyncDelayMs);
+          return;
+        }
         const runtimeResult = request.method === "Runtime.evaluate"
           ? { objectId: owner ? "owner-window-1" : "window-1", type: "object" }
           : owner && request.method === "Runtime.callFunctionOn"
             ? { value: this.ownerResponse }
+          : visibleSettingsSync
+            ? { value: { visible: true, synced: true, failures: [] } }
           : { value: true };
         socket.send(JSON.stringify({ id: request.id, result: { result: runtimeResult } }));
       });
