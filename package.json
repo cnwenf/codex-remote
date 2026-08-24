@@ -1,6 +1,6 @@
 {
   "name": "codex-remote",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -33,6 +33,7 @@
     "@types/react-dom": "19.1.7",
     "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "5.0.2",
+    "esbuild": "0.28.1",
     "jsdom": "26.1.0",
     "tsx": "4.20.5",
     "typescript": "5.9.2",

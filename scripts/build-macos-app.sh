@@ -12,14 +12,16 @@ NODE_SOURCE=${CODEX_REMOTE_NODE_BIN:-/Applications/ChatGPT.app/Contents/Resource
 file "$NODE_SOURCE" | grep -q arm64 || { print -u2 "Node runtime is not ARM64"; exit 1; }
 
 cd "$ROOT"
+mkdir -p "$OUTPUT"
 pnpm build
-node_modules/.pnpm/esbuild@0.28.1/node_modules/esbuild/bin/esbuild src/gateway/index.ts \
+pnpm exec esbuild src/gateway/index.ts \
   --bundle --platform=node --format=esm --target=node24 --outfile="$OUTPUT/gateway.mjs"
 swift build --package-path macos/CodexRemoteApp -c release --arch arm64
+SWIFT_BIN=$(swift build --package-path macos/CodexRemoteApp -c release --arch arm64 --show-bin-path)
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RES/bin" "$RES/gateway" "$RES/web"
-cp "macos/CodexRemoteApp/.build/arm64-apple-macosx/release/CodexRemoteApp" "$APP/Contents/MacOS/Codex Remote"
+cp "$SWIFT_BIN/CodexRemoteApp" "$APP/Contents/MacOS/Codex Remote"
 cp "$NODE_SOURCE" "$RES/bin/node"
 cp "$OUTPUT/gateway.mjs" "$RES/gateway/index.mjs"
 cp -R dist/. "$RES/web/"

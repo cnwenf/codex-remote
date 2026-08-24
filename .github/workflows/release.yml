@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -34,9 +34,18 @@ jobs:
 
       - name: Build ARM64 DMG
         run: |
+          set +e
           export CODEX_REMOTE_NODE_BIN="$(command -v node)"
           export VERSION="${GITHUB_REF_NAME#v}"
-          scripts/package-macos-dmg.sh
+          scripts/package-macos-dmg.sh 2>&1 | tee build.log
+          build_result=${PIPESTATUS[0]}
+          {
+            echo '## macOS package build'
+            echo '```text'
+            tail -100 build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$build_result"
 
       - name: Verify package
         run: |
