@@ -28,7 +28,7 @@ export type RpcMessage = RpcRequest | RpcNotification | RpcResponse;
 export type GatewayEnvelope =
   | {
       type: "session";
-      state: "ready" | "disconnected";
+      state: "ready" | "reconnecting" | "disconnected";
       message?: string;
       defaultCwd?: string;
       transport?: "desktop-live" | "desktop-cold" | "web-live";

@@ -29,6 +29,8 @@ type ComposerProps = {
   reasoningEffort?: string;
   permission?: string;
   onSettingsChange?: (settings: ComposerSettings) => void;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 };
 
 export function Composer({
@@ -43,12 +45,15 @@ export function Composer({
   reasoningEffort,
   permission,
   onSettingsChange,
+  expanded,
+  onExpandedChange,
 }: ComposerProps) {
   const [text, setText] = useState(() => readDraft(draftKey));
   const activeDraftKey = useRef(draftKey);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [internalExpanded, setInternalExpanded] = useState(false);
   const [images, setImages] = useState<File[]>([]);
   const previews = useMemo(() => images.map((file) => ({
     file,
@@ -142,9 +147,15 @@ export function Composer({
     reasoningEffort ? [reasoningEffort] : []
   );
   const settingsDisabled = disabled || !onSettingsChange;
+  const isExpanded = expanded ?? internalExpanded;
+
+  function setExpanded(next: boolean) {
+    if (expanded === undefined) setInternalExpanded(next);
+    onExpandedChange?.(next);
+  }
 
   return (
-    <form className="composer" onSubmit={submit}>
+    <form className={`composer ${isExpanded ? "composer-expanded" : "composer-collapsed"}`} onSubmit={submit}>
       <label htmlFor="instruction" className="visually-hidden">Instruction</label>
       <textarea
         id="instruction"
@@ -156,11 +167,12 @@ export function Composer({
         }}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
+        onFocus={() => setExpanded(true)}
         placeholder={running ? "Add guidance while Codex works" : "What should Codex do next?"}
-        rows={2}
+        rows={isExpanded ? 3 : 1}
         disabled={disabled}
       />
-      {previews.length > 0 ? (
+      {isExpanded && previews.length > 0 ? (
         <div className="composer-images" aria-label="待发送图片">
           {previews.map(({ file, url }, index) => (
             <div className="composer-image" key={`${file.name}-${file.size}-${index}`}>
@@ -177,7 +189,7 @@ export function Composer({
           ))}
         </div>
       ) : null}
-      {(models.length > 0 || permissions.length > 0 || model || permission) ? (
+      {isExpanded && (models.length > 0 || permissions.length > 0 || model || permission) ? (
         <div className="composer-settings" aria-label="对话设置">
           <div
             className="permission-picker"
@@ -258,7 +270,7 @@ export function Composer({
         </div>
       ) : null}
       <div className="composer-actions">
-        <label className="image-picker" title="添加图片">
+        {isExpanded ? <label className="image-picker" title="添加图片">
           <span aria-hidden="true">＋</span>
           <input
             type="file"
@@ -268,9 +280,9 @@ export function Composer({
             onChange={handleImageChange}
             disabled={disabled || busy || images.length >= 4}
           />
-        </label>
-        <span className="composer-hint">⌘↵ to send</span>
-        {running && onStop ? (
+        </label> : null}
+        {isExpanded ? <span className="composer-hint">⌘↵ to send</span> : <span className="composer-hint" />}
+        {isExpanded && running && onStop ? (
           <button className="stop-button" type="button" onClick={stop} disabled={busy}>
             Stop
           </button>
@@ -283,7 +295,7 @@ export function Composer({
           {busy ? "Working…" : running ? "Steer" : "Send"}
         </button>
       </div>
-      {error ? <p className="inline-error" role="alert">{error}</p> : null}
+      {isExpanded && error ? <p className="inline-error" role="alert">{error}</p> : null}
     </form>
   );
 }

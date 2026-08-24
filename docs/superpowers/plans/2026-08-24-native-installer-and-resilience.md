@@ -181,4 +181,4 @@ Ship Codex Remote as a self-contained macOS ARM64 application and DMG, provide a
 3. Add migration notes only where required for correct use; do not include incident narratives.
 4. Run `pnpm check`, `pnpm build`, `pnpm e2e`, `swift test`, packaging tests, shell syntax checks, DMG verification, and a repository secrets/privacy scan.
 5. Install the locally built DMG into a temporary application directory, launch against a temporary config, verify health and Remote toggling, and observe launchd PIDs/run counts for at least 30 seconds without restarting Codex Desktop.
-6. Commit with `cnwenf@outlook.com`, push `main`, create a GitHub Release with the DMG and checksum, then verify the documented `curl | sh` flow resolves the published assets.
+6. Commit using the repository-configured author, push `main`, create a GitHub Release with the DMG and checksum, then verify the documented `curl | sh` flow resolves the published assets.

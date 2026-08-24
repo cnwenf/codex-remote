@@ -1,3 +1,4 @@
+import { useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-store";
@@ -13,7 +14,7 @@ export function Timeline({ thread }: { thread?: CodexThread }) {
     );
   }
 
-  if (thread.turnOrder.length === 0 && !thread.todoList) {
+  if (thread.turnOrder.length === 0) {
     return (
       <div className="empty-thread">
         <span aria-hidden="true">↗</span>
@@ -25,7 +26,6 @@ export function Timeline({ thread }: { thread?: CodexThread }) {
 
   return (
     <ol className="timeline" aria-label="对话内容">
-      {thread.todoList ? <TodoListView todoList={thread.todoList} /> : null}
       {thread.turnOrder.map((turnId) => {
         const turn = thread.turns[turnId];
         return turn ? <TurnView key={turnId} turn={turn} /> : null;
@@ -36,91 +36,134 @@ export function Timeline({ thread }: { thread?: CodexThread }) {
 
 function TurnView({ turn }: { turn: CodexTurn }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
-  const userMessages = items.filter((item) => item.type.toLocaleLowerCase().includes("user"));
-  const agentMessages = items.filter((item) => item.type.toLocaleLowerCase().includes("agentmessage"));
-  const activities = items.filter((item) =>
-    !userMessages.includes(item) &&
-    !agentMessages.includes(item) &&
-    item.type !== "todoList" &&
-    item.type !== "todo-list"
-  );
+  const segments = segmentItems(items);
 
   return (
     <li className="conversation-turn" data-turn-id={turn.id}>
-      {userMessages.map((item) => (
-        <article key={item.id} className="message message-user">
-          <span className="message-author">你</span>
-          <MarkdownContent text={item.text || "等待输入…"} />
-          {item.imageIds?.length ? (
-            <div className="message-images">
-              {item.imageIds.map((imageId, index) => (
-                <img
-                  key={`${imageId}-${index}`}
-                  src={`/api/images/${encodeURIComponent(imageId)}`}
-                  alt={`用户上传的图片 ${index + 1}`}
-                  loading="lazy"
-                />
-              ))}
-            </div>
-          ) : null}
-        </article>
-      ))}
+      {segments.map((segment, segmentIndex) => {
+        if (segment.kind === "activity") {
+          const hasLaterOutput = segments.slice(segmentIndex + 1).some((candidate) => candidate.kind !== "activity");
+          const explicitlyRunning = segment.items.some((item) => item.status === "running" || item.status === "inProgress");
+          const activityRunning = !hasLaterOutput && turn.status === "inProgress" && (
+            explicitlyRunning || segment.items.some((item) => item.status === undefined)
+          );
+          return (
+            <details key={segment.key} className="activity-group" open={activityRunning || undefined}>
+              <summary>
+                <span className={`run-indicator run-${activityRunning ? "inProgress" : "completed"}`} aria-hidden="true" />
+                <span>执行过程（{segment.items.length} 项）</span>
+                <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
+              </summary>
+              <ol className="activity-list">
+                {segment.items.map((item) => <ActivityItem key={item.id} item={item} />)}
+              </ol>
+            </details>
+          );
+        }
+        const item = segment.item;
+        if (segment.kind === "user") {
+          return (
+            <article key={item.id} className="message message-user">
+              <span className="message-author">你</span>
+              <MarkdownContent text={item.text || "等待输入…"} />
+              {item.imageIds?.length ? (
+                <div className="message-images">
+                  {item.imageIds.map((imageId, index) => (
+                    <img
+                      key={`${imageId}-${index}`}
+                      src={`/api/images/${encodeURIComponent(imageId)}`}
+                      alt={`用户上传的图片 ${index + 1}`}
+                      loading="lazy"
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </article>
+          );
+        }
+        return (
+          <article key={item.id} className="message message-agent">
+            <span className="message-author">Codex</span>
+            <MarkdownContent text={item.text || "等待输出…"} />
+          </article>
+        );
+      })}
 
-      {activities.length > 0 ? (
-        <details className="activity-group" open={turn.status === "inProgress" || undefined}>
-          <summary>
-            <span className={`run-indicator run-${turn.status}`} aria-hidden="true" />
-            <span>执行过程（{activities.length} 项）</span>
-            <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
-          </summary>
-          <ol className="activity-list">
-            {activities.map((item) => <ActivityItem key={item.id} item={item} />)}
-          </ol>
-        </details>
-      ) : turn.status === "inProgress" ? (
-        <div className="turn-running" role="status">
-          <span className="run-indicator run-inProgress" aria-hidden="true" />
-          Codex 正在运行
+      {turn.status === "inProgress" ? (
+        <div className="typing-indicator" role="status" aria-label="Codex 仍在输出">
+          <span className="typing-dot" aria-hidden="true" />
+          <span className="typing-dot" aria-hidden="true" />
+          <span className="typing-dot" aria-hidden="true" />
         </div>
-      ) : null}
-
-      {agentMessages.map((item) => (
-        <article key={item.id} className="message message-agent">
-          <span className="message-author">Codex</span>
-          <MarkdownContent text={item.text || "等待输出…"} />
-        </article>
-      ))}
-
-      {agentMessages.length === 0 && turn.status === "inProgress" ? (
-        <article className="message message-agent message-pending" aria-label="Codex 正在回复">
-          <span className="message-author">Codex</span>
-          <p>正在处理…</p>
-        </article>
       ) : null}
     </li>
   );
 }
 
-function TodoListView({ todoList }: { todoList: NonNullable<CodexThread["todoList"]> }) {
+type TurnSegment =
+  | { kind: "user" | "agent"; item: CodexItem }
+  | { kind: "activity"; key: string; items: CodexItem[] };
+
+function segmentItems(items: CodexItem[]): TurnSegment[] {
+  const segments: TurnSegment[] = [];
+  for (const item of items) {
+    if (item.type === "todoList" || item.type === "todo-list") continue;
+    const value = item.type.toLocaleLowerCase();
+    if (value.includes("user")) {
+      segments.push({ kind: "user", item });
+      continue;
+    }
+    if (value.includes("agentmessage")) {
+      segments.push({ kind: "agent", item });
+      continue;
+    }
+    const previous = segments.at(-1);
+    if (previous?.kind === "activity") previous.items.push(item);
+    else segments.push({ kind: "activity", key: `activity-${item.id}`, items: [item] });
+  }
+  return segments;
+}
+
+export function TodoListDock({ todoList }: { todoList?: CodexThread["todoList"] }) {
+  const [open, setOpen] = useState(false);
+  if (!todoList || todoList.items.length === 0) return null;
+
   const completed = todoList.items.filter((item) => item.status === "completed").length;
+  const activeIndex = todoList.items.findIndex((item) => item.status !== "completed");
+  const current = activeIndex === -1 ? todoList.items.length : activeIndex + 1;
+
   return (
-    <li className="todo-list-card" aria-label={`任务进度，${completed}/${todoList.items.length} 已完成`}>
-      <header>
-        <strong>任务进度</strong>
-        <span>{completed}/{todoList.items.length}</span>
-      </header>
-      {todoList.explanation ? <p>{todoList.explanation}</p> : null}
-      <ol>
-        {todoList.items.map((item, index) => (
-          <li className={`todo-item todo-${item.status}`} key={`${item.step}-${index}`}>
-            <span className="todo-status" aria-hidden="true">
-              {item.status === "completed" ? "✓" : item.status === "inProgress" ? "●" : "○"}
-            </span>
-            <span>{item.step}</span>
-          </li>
-        ))}
-      </ol>
-    </li>
+    <div className="todo-list-dock">
+      <button
+        type="button"
+        className="todo-list-trigger"
+        aria-label={`任务进度，第 ${current}/${todoList.items.length} 步`}
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className={`run-indicator ${completed === todoList.items.length ? "" : "run-inProgress"}`} aria-hidden="true" />
+        第 {current}/{todoList.items.length} 步
+      </button>
+      {open ? (
+        <section className="todo-list-popover" aria-label={`任务进度，${completed}/${todoList.items.length} 已完成`}>
+          <header>
+            <strong>任务进度</strong>
+            <span>{completed}/{todoList.items.length}</span>
+          </header>
+          {todoList.explanation ? <p>{todoList.explanation}</p> : null}
+          <ol>
+            {todoList.items.map((item, index) => (
+              <li className={`todo-item todo-${item.status}`} key={`${item.step}-${index}`}>
+                <span className="todo-status" aria-hidden="true">
+                  {item.status === "completed" ? "✓" : item.status === "inProgress" ? "●" : "○"}
+                </span>
+                <span>{item.step}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null}
+    </div>
   );
 }
 

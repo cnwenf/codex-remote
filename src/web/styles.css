@@ -196,11 +196,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .timeline-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; scrollbar-gutter: stable; padding: 24px clamp(18px, 4vw, 56px); }
 .history-sentinel { width: min(100%, 820px); min-height: 24px; margin: 0 auto 12px; color: var(--ink-muted); font-size: 0.68rem; text-align: center; }
 .timeline { width: min(100%, 820px); margin: 0 auto; padding: 0; list-style: none; }
-.todo-list-card { margin: 0 0 22px; padding: 15px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
-.todo-list-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.todo-list-card > header span, .todo-list-card > p { color: var(--ink-muted); font-size: 0.76rem; }
-.todo-list-card > p { margin: 7px 0 0; }
-.todo-list-card > ol { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
+.todo-list-dock { position: relative; z-index: 7; flex: 0 0 auto; width: min(calc(100% - 36px), 780px); height: 38px; margin: -8px auto 4px; display: grid; place-items: center; }
+.todo-list-trigger { min-height: 34px; display: inline-flex; align-items: center; gap: 8px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-muted); background: var(--surface); box-shadow: var(--shadow); font-size: 0.72rem; font-weight: 680; cursor: pointer; }
+.todo-list-popover { position: absolute; bottom: calc(100% + 8px); left: 50%; width: min(560px, 100%); max-height: min(52dvh, 520px); overflow-y: auto; transform: translateX(-50%); padding: 15px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 16px 44px rgb(0 0 0 / 18%); }
+.todo-list-popover > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.todo-list-popover > header span, .todo-list-popover > p { color: var(--ink-muted); font-size: 0.76rem; }
+.todo-list-popover > p { margin: 7px 0 0; }
+.todo-list-popover > ol { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }
 .todo-item { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: start; gap: 7px; font-size: 0.86rem; line-height: 1.45; }
 .todo-status { color: var(--ink-muted); text-align: center; }
 .todo-completed { color: var(--ink-muted); text-decoration: line-through; }
@@ -256,6 +258,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .activity-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-muted); font-size: 0.72rem; }
 .activity-status { color: var(--ink-muted); font-size: 0.66rem; }
 .turn-running { min-height: 44px; display: flex; align-items: center; gap: 9px; margin-bottom: 16px; color: var(--ink-muted); font-size: 0.78rem; }
+.typing-indicator { width: fit-content; min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 2px; }
+.typing-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--ink-muted); animation: typing-bounce 1.2s ease-in-out infinite; }
+.typing-dot:nth-child(2) { animation-delay: 0.16s; }
+.typing-dot:nth-child(3) { animation-delay: 0.32s; }
 .run-indicator { width: 9px; height: 9px; border-radius: 999px; background: var(--ink-muted); }
 .run-indicator.run-inProgress { border: 2px solid var(--accent); border-top-color: transparent; background: transparent; animation: status-spin 0.9s linear infinite; }
 .run-indicator.run-failed { background: var(--danger); }
@@ -264,8 +270,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .empty-thread h2 { margin: 0; color: var(--ink); font-size: 1.1rem; }
 .empty-thread p { max-width: 34ch; margin: 8px 0 0; font-size: 0.82rem; line-height: 1.5; }
 
-.composer { width: min(calc(100% - 36px), 780px); margin: 0 auto max(16px, env(safe-area-inset-bottom)); padding: 9px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); }
-.composer textarea { width: 100%; min-height: 66px; max-height: 180px; resize: vertical; padding: 9px 10px; border: 0; outline: 0; line-height: 1.45; background: transparent; }
+.conversation-controls { flex: 0 0 auto; }
+.composer { width: min(calc(100% - 36px), 780px); margin: 0 auto max(16px, env(safe-area-inset-bottom)); padding: 9px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); transition: box-shadow 160ms ease; }
+.composer textarea { width: 100%; max-height: 180px; padding: 9px 10px; border: 0; outline: 0; line-height: 1.45; background: transparent; }
+.composer-collapsed { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.composer-collapsed textarea { min-height: 42px; height: 42px; resize: none; overflow: hidden; white-space: nowrap; }
+.composer-collapsed .composer-actions { min-width: 48px; }
+.composer-expanded textarea { min-height: 86px; resize: vertical; }
 .composer-images { display: flex; gap: 7px; overflow-x: auto; padding: 0 5px 8px; }
 .composer-image { position: relative; display: grid; grid-template-columns: 34px minmax(50px, 110px) 24px; align-items: center; gap: 6px; min-width: 0; padding: 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-muted); }
 .composer-image img { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; }
@@ -402,6 +413,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 @keyframes status-spin { to { transform: rotate(360deg); } }
+@keyframes typing-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.45; } 30% { transform: translateY(-4px); opacity: 1; } }
 
 @media (max-width: 759px) {
   .app-root { grid-template-rows: calc(54px + env(safe-area-inset-top)) minmax(0, 1fr); }
@@ -419,7 +431,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .new-conversation form { grid-template-columns: 1fr; }
   .new-conversation .inline-error, .catalog-error, .create-conversation-button { grid-column: 1; }
   .choice-field small { min-height: 0; }
-  .composer { position: fixed; z-index: 2; right: max(10px, env(safe-area-inset-right)); bottom: 0; left: max(10px, env(safe-area-inset-left)); width: auto; margin-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .conversation-controls { position: fixed; z-index: 8; right: max(10px, env(safe-area-inset-right)); bottom: max(10px, env(safe-area-inset-bottom)); left: max(10px, env(safe-area-inset-left)); display: flex; flex-direction: column; align-items: stretch; }
+  .conversation-controls .todo-list-dock { order: 0; width: 100%; margin: 0 0 4px; }
+  .conversation-controls .composer { order: 1; position: static; width: 100%; margin: 0; }
+  .conversation-controls .todo-list-popover { width: min(560px, calc(100vw - 20px)); }
   .composer-hint { display: none; }
   .connect-panel h2 { font-size: 1.75rem; }
   .approval-sheet { right: 0; bottom: 0; left: 0; width: 100%; max-height: 82dvh; padding-bottom: max(20px, env(safe-area-inset-bottom)); border-radius: 20px 20px 0 0; }
@@ -445,5 +460,5 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
-  .status-dot.status-running, .run-indicator.run-inProgress { animation: none; }
+  .status-dot.status-running, .run-indicator.run-inProgress, .typing-dot { animation: none; }
 }

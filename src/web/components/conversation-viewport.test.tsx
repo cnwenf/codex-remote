@@ -126,4 +126,21 @@ describe("ConversationViewport", () => {
     );
     expect(viewport.scrollTop).toBe(1_300);
   });
+
+  it("notifies the thread view when the conversation content is tapped", () => {
+    const onInteract = vi.fn();
+    render(
+      <ConversationViewport
+        threadId="thread-1"
+        history={{ hasMoreBefore: false, loading: false }}
+        onLoadEarlier={vi.fn()}
+        onInteract={onInteract}
+      >
+        <button type="button">Conversation content</button>
+      </ConversationViewport>,
+    );
+
+    fireEvent.pointerDown(screen.getByTestId("timeline-scroll"));
+    expect(onInteract).toHaveBeenCalledTimes(1);
+  });
 });

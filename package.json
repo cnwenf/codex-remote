@@ -12,7 +12,9 @@
     "e2e": "playwright test",
     "check": "tsc --noEmit && vitest run",
     "test:stack": "pnpm build && tsx scripts/start-test-stack.ts",
-    "smoke:app-server": "node scripts/smoke-app-server.mjs"
+    "smoke:app-server": "node scripts/smoke-app-server.mjs",
+    "build:mac": "scripts/build-macos-app.sh",
+    "package:dmg": "scripts/package-macos-dmg.sh"
   },
   "dependencies": {
     "react": "19.1.1",

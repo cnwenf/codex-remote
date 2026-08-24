@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { AppServerTransport } from "./app-server-transport";
@@ -9,7 +9,9 @@ import { DesktopCdpClient } from "./desktop-cdp-client";
 import { DesktopState } from "./desktop-state";
 import { createGateway } from "./server";
 
-const token = process.env.CODEX_WEB_TOKEN;
+const token = process.env.CODEX_WEB_TOKEN ?? (
+  process.env.ACCESS_TOKEN_FILE ? readFileSync(process.env.ACCESS_TOKEN_FILE, "utf8").trim() : undefined
+);
 if (!token) throw new Error("CODEX_WEB_TOKEN is required");
 
 const host = process.env.BIND_HOST ?? "127.0.0.1";
@@ -45,7 +47,7 @@ const gateway = createGateway({
   port,
   token,
   allowedOrigins: process.env.ALLOWED_ORIGINS?.split(",").map((value) => value.trim()),
-  staticDir: resolve("dist"),
+  staticDir: resolve(process.env.STATIC_DIR ?? "dist"),
   defaultCwd: process.cwd(),
   desktopState: new DesktopState(join(codexHome, "state_5.sqlite")),
   transport,

@@ -119,6 +119,19 @@ lines.on("line", (line) => {
       method: "turn/started",
       params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn" } },
     });
+    if (message.method === "turn/start") {
+      const text = message.params?.input?.find?.((item) => item.type === "text")?.text;
+      if (text) {
+        send({
+          method: "item/started",
+          params: {
+            threadId: "fixture-thread",
+            turnId: "fixture-live-turn",
+            item: { id: "fixture-live-user", type: "userMessage", content: [{ type: "text", text }] },
+          },
+        });
+      }
+    }
     send({
       method: "item/started",
       params: {

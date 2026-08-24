@@ -19,6 +19,7 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
   await expect(page.getByText("执行过程（2 项）")).toBeVisible();
+  await page.getByRole("textbox", { name: "Instruction" }).click();
   await expect(page.getByRole("combobox", { name: "模型" })).toHaveValue("gpt-fixture");
   await expect(page.getByRole("combobox", { name: "思考强度" })).toHaveValue("medium");
   await expect(page.getByRole("button", { name: "权限：请求批准" })).toBeVisible();
@@ -32,7 +33,13 @@ test("controller opens a task, streams output, denies approval, and reviews diff
 
   await expect(page.getByRole("heading", { name: "Checks complete", level: 2 })).toBeVisible();
   await expect(page.locator(".markdown-body ul")).toContainText("All tests passed");
-  await expect(page.getByLabel("任务进度，1/3 已完成")).toBeVisible();
+  const todoTrigger = page.getByRole("button", { name: "任务进度，第 2/3 步" });
+  await expect(todoTrigger).toBeVisible();
+  const todoBox = await todoTrigger.boundingBox();
+  const composerBox = await page.locator(".composer").boundingBox();
+  expect(todoBox).not.toBeNull();
+  expect(composerBox).not.toBeNull();
+  expect(todoBox!.y + todoBox!.height).toBeLessThanOrEqual(composerBox!.y);
   await expect(page.getByText("Run checks", { exact: true }).last()).toBeVisible();
   const approval = page.getByRole("dialog", { name: "Run a command?" });
   await expect(approval).toBeVisible();
@@ -48,12 +55,16 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   expect(approvalBox!.y + approvalBox!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
   await approval.getByRole("button", { name: "Deny" }).click();
   await expect(approval).toHaveCount(0);
+  await todoTrigger.click();
+  await expect(page.getByLabel("任务进度，1/3 已完成")).toBeVisible();
+  await todoTrigger.click();
   await expect(page.locator(".decision-toast", { hasText: "Request denied" })).toBeVisible();
   await page.getByRole("textbox", { name: "Instruction" }).fill("Steer follow-up from Web");
   await page.getByRole("button", { name: "Steer" }).click();
   await expect(page.locator(".message-user", { hasText: "Steer follow-up from Web" })).toBeVisible();
   await expect(approval).toBeVisible();
   await approval.getByRole("button", { name: "Deny" }).click();
+  await page.getByTestId("timeline-scroll").dispatchEvent("pointerdown");
   await page.getByText("查看代码变更").click();
   await expect(page.getByLabel("Unified diff")).toContainText("fixture.txt");
 
@@ -68,11 +79,13 @@ test("keeps an unsent draft for its conversation across reload", async ({ page }
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("textbox", { name: "Instruction" }).focus();
   await page.getByRole("textbox", { name: "Instruction" }).fill("Unsent fixture draft");
 
   await page.reload();
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("textbox", { name: "Instruction" }).focus();
 
   await expect(page.getByRole("textbox", { name: "Instruction" })).toHaveValue("Unsent fixture draft");
 });
@@ -83,6 +96,7 @@ test("uploads an image and sends it with the conversation", async ({ page }) => 
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("textbox", { name: "Instruction" }).click();
 
   await page.getByLabel("添加图片").setInputFiles({
     name: "screen.png",
@@ -155,6 +169,13 @@ test("mobile task list and conversation scroll independently", async ({ page }) 
   });
   expect(conversationScroll.overflow).toBe(true);
   expect(conversationScroll.top).toBeGreaterThan(0);
+
+  const composer = page.locator(".composer");
+  await expect(composer).toHaveClass(/composer-collapsed/);
+  await page.getByRole("textbox", { name: "Instruction" }).focus();
+  await expect(composer).toHaveClass(/composer-expanded/);
+  await timeline.dispatchEvent("pointerdown");
+  await expect(composer).toHaveClass(/composer-collapsed/);
 });
 
 test("pins and unpins a conversation in the Desktop-aligned sidebar", async ({ page }) => {

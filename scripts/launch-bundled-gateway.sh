@@ -1,0 +1,29 @@
+#!/bin/zsh
+set -euo pipefail
+RESOURCES=${0:A:h}
+BIND_HOST=${1:-127.0.0.1}
+PORT=${2:-4321}
+APP_PATH=${CODEX_DESKTOP_APP_PATH:-/Applications/ChatGPT.app}
+CDP_ENDPOINT=http://127.0.0.1:9229
+TOKEN_FILE=${ACCESS_TOKEN_FILE:-$HOME/Library/Application Support/Codex Remote/token}
+
+for _ in {1..120}; do
+  /usr/bin/curl -fsS "$CDP_ENDPOINT/json/list" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+/usr/bin/curl -fsS "$CDP_ENDPOINT/json/list" >/dev/null
+CODEX_VERSION=$("$APP_PATH/Contents/Resources/codex" --version | /usr/bin/sed -E 's/^codex-cli[[:space:]]+//')
+ADDITIONAL_HOSTS=""
+ORIGINS="http://$BIND_HOST:$PORT"
+if [[ "$BIND_HOST" != 127.0.0.1 ]]; then
+  ADDITIONAL_HOSTS=127.0.0.1
+  ORIGINS="$ORIGINS,http://127.0.0.1:$PORT"
+fi
+exec env \
+  ACCESS_TOKEN_FILE="$TOKEN_FILE" \
+  BIND_HOST="$BIND_HOST" PORT="$PORT" \
+  ADDITIONAL_BIND_HOSTS="$ADDITIONAL_HOSTS" ALLOWED_ORIGINS="$ORIGINS" \
+  CODEX_DESKTOP_CDP_ENDPOINT="$CDP_ENDPOINT" \
+  CODEX_DESKTOP_APP_SERVER_VERSION="$CODEX_VERSION" \
+  STATIC_DIR="$RESOURCES/web" \
+  "$RESOURCES/bin/node" "$RESOURCES/gateway/index.mjs"

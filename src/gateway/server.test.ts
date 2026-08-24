@@ -71,12 +71,19 @@ function protocols(token: string) {
 
 const messageQueues = new WeakMap<WebSocket, Buffer[]>();
 
-async function connect(address: AddressInfo, token: string | undefined, origin: string, cookie?: string) {
+async function connect(
+  address: AddressInfo,
+  token: string | undefined,
+  origin: string,
+  cookie?: string,
+  autoPong = true,
+) {
   const socket = new WebSocket(
     `ws://127.0.0.1:${address.port}/rpc`,
     token === undefined ? ["codex-local"] : protocols(token),
     {
-    origin,
+      origin,
+      autoPong,
       ...(cookie ? { headers: { cookie } } : {}),
     },
   );
@@ -134,6 +141,28 @@ async function waitForSentResponse(transport: FakeTransport, id: string | number
 }
 
 describe("gateway server", () => {
+  it("terminates a controller that stops answering heartbeat pings", async () => {
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      transport: new AlreadyInitializedTransport(),
+      heartbeatIntervalMs: 10,
+    });
+    const address = await gateway.start();
+    const socket = await connect(
+      address,
+      "test-token",
+      `http://127.0.0.1:${address.port}`,
+      undefined,
+      false,
+    );
+    await nextJson(socket);
+
+    await once(socket, "close");
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+    await gateway.stop();
+  });
+
   it("initializes App Server before accepting browser work", async () => {
     const transport = new FakeTransport();
     const gateway = createGateway({ port: 0, token: "test-token", transport });

@@ -47,6 +47,7 @@ type GatewayOptions = {
   staticDir?: string;
   uploadDir?: string;
   defaultCwd?: string;
+  heartbeatIntervalMs?: number;
   transport: CodexTransport;
   desktopState?: {
     request(method: string, params: unknown): unknown;
@@ -112,6 +113,19 @@ export function createGateway(options: GatewayOptions) {
       return protocols.has("codex-local") ? "codex-local" : false;
     },
   });
+  const controllerAlive = new WeakMap<WebSocket, boolean>();
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 20_000;
+  const heartbeatTimer = setInterval(() => {
+    for (const controller of controllers.values()) {
+      if (controllerAlive.get(controller) === false) {
+        controller.terminate();
+        continue;
+      }
+      controllerAlive.set(controller, false);
+      controller.ping();
+    }
+  }, heartbeatIntervalMs);
+  heartbeatTimer.unref();
 
   const handleUpgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (new URL(request.url ?? "/", "http://gateway.local").pathname !== "/rpc") {
@@ -147,6 +161,8 @@ export function createGateway(options: GatewayOptions) {
   websocketServer.on("connection", (socket) => {
     const clientId = `controller-${nextControllerId++}`;
     controllers.set(clientId, socket);
+    controllerAlive.set(socket, true);
+    socket.on("pong", () => controllerAlive.set(socket, true));
     setImmediate(() => sendEnvelope(socket, {
       type: "session",
       state: "ready",
@@ -281,6 +297,7 @@ export function createGateway(options: GatewayOptions) {
     },
 
     async stop() {
+      clearInterval(heartbeatTimer);
       for (const controller of controllers.values()) {
         controller.close(1001, "gateway-stopping");
       }

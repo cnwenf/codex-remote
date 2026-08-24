@@ -21,7 +21,7 @@ import {
 } from "../../protocol/permissions";
 import { CodexSocket, uploadImage } from "../api/socket";
 
-export type ConnectionState = "disconnected" | "connecting" | "ready";
+export type ConnectionState = "disconnected" | "connecting" | "reconnecting" | "ready";
 export type TransportMode = "desktop-live" | "desktop-cold" | "web-live";
 
 export type ModelOption = {
@@ -104,9 +104,14 @@ export function useCodex(socketOverride?: CodexSocket) {
       if (envelope.type !== "session") return;
       if (envelope.state === "ready") {
         setConnection("ready");
+        setState((current) => ({ ...current, stale: false }));
         if (envelope.defaultCwd) setDefaultCwd(envelope.defaultCwd);
         if (envelope.transport) setTransportMode(envelope.transport);
         setTransportReadOnly(envelope.readOnly === true);
+      }
+      if (envelope.state === "reconnecting") {
+        setConnection("reconnecting");
+        setState(markCodexStateStale);
       }
       if (envelope.state === "disconnected") {
         setConnection("disconnected");

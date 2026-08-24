@@ -17,23 +17,52 @@ type PendingRequest = {
   reject: (reason: Error) => void;
 };
 
+type RecoveryEvent = "online" | "visibilitychange";
+type SocketOptions = {
+  reconnectDelaysMs?: number[];
+  random?: () => number;
+  addWindowListener?: (name: RecoveryEvent, listener: () => void) => void;
+  removeWindowListener?: (name: RecoveryEvent, listener: () => void) => void;
+  isDocumentVisible?: () => boolean;
+};
+
+const DEFAULT_RECONNECT_DELAYS = [500, 1_000, 2_000, 5_000, 10_000];
+
 export class CodexSocket {
   private socket: BrowserSocket | undefined;
   private nextId = 1;
   private readonly pending = new Map<RpcId, PendingRequest>();
   private readonly listeners = new Set<(message: RpcMessage) => void>();
   private readonly sessionListeners = new Set<(envelope: GatewayEnvelope) => void>();
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private reconnectAttempt = 0;
+  private socketUrl?: string;
+  private reconnectEnabled = false;
+  private deliberateDisconnect = false;
+  private recoveryListenersBound = false;
 
   constructor(
     private readonly factory: SocketFactory = (url, protocols) =>
       new WebSocket(url, protocols) as unknown as BrowserSocket,
+    private readonly options: SocketOptions = {},
   ) {}
 
   connect(token: string, url = defaultSocketUrl()): Promise<void> {
     if (this.socket) throw new Error("codex-socket-already-connected");
+    this.deliberateDisconnect = false;
+    this.socketUrl = url;
+    return this.open(url, token ? ["codex-local", `token.${encodeToken(token)}`] : ["codex-local"], false)
+      .then(() => {
+        this.reconnectEnabled = true;
+        this.reconnectAttempt = 0;
+        this.bindRecoveryListeners();
+      });
+  }
+
+  private open(url: string, protocols: string[], reconnecting: boolean): Promise<void> {
     const socket = this.factory(
       url,
-      token ? ["codex-local", `token.${encodeToken(token)}`] : ["codex-local"],
+      protocols,
     );
     this.socket = socket;
 
@@ -69,12 +98,15 @@ export class CodexSocket {
         rejectConnection();
         if (this.socket === socket) this.socket = undefined;
         this.rejectPending("codex-socket-disconnected");
+        if (!this.deliberateDisconnect && this.reconnectEnabled) this.scheduleReconnect();
       };
 
       if (socket.readyState === socket.OPEN) {
         opened = true;
         resolveWhenReady();
       }
+    }).then(() => {
+      if (reconnecting) this.reconnectAttempt = 0;
     });
   }
 
@@ -110,6 +142,10 @@ export class CodexSocket {
   }
 
   disconnect() {
+    this.deliberateDisconnect = true;
+    this.reconnectEnabled = false;
+    this.cancelReconnect();
+    this.unbindRecoveryListeners();
     const socket = this.socket;
     this.socket = undefined;
     socket?.close(1000, "client-disconnect");
@@ -148,6 +184,69 @@ export class CodexSocket {
   private rejectPending(message: string) {
     for (const request of this.pending.values()) request.reject(new Error(message));
     this.pending.clear();
+  }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer || this.socket || !this.socketUrl) return;
+    this.emitSession({ type: "session", state: "reconnecting", message: "正在重新连接…" });
+    const delays = this.options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS;
+    const baseDelay = delays[Math.min(this.reconnectAttempt, delays.length - 1)] ?? 10_000;
+    this.reconnectAttempt += 1;
+    const random = this.options.random?.() ?? Math.random();
+    const delay = Math.max(0, Math.round(baseDelay * (0.8 + random * 0.4)));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.reconnectNow();
+    }, delay);
+  }
+
+  private async reconnectNow() {
+    if (this.socket || !this.socketUrl || !this.reconnectEnabled || this.deliberateDisconnect) return;
+    try {
+      await this.open(this.socketUrl, ["codex-local"], true);
+    } catch {
+      this.scheduleReconnect();
+    }
+  }
+
+  private readonly recoverImmediately = () => {
+    if (!this.reconnectEnabled || this.socket) return;
+    this.cancelReconnect();
+    void this.reconnectNow();
+  };
+
+  private readonly recoverWhenVisible = () => {
+    if (this.options.isDocumentVisible?.() ?? document.visibilityState === "visible") {
+      this.recoverImmediately();
+    }
+  };
+
+  private bindRecoveryListeners() {
+    if (this.recoveryListenersBound) return;
+    const add = this.options.addWindowListener ?? ((name: RecoveryEvent, listener: () => void) =>
+      window.addEventListener(name, listener));
+    add("online", this.recoverImmediately);
+    add("visibilitychange", this.recoverWhenVisible);
+    this.recoveryListenersBound = true;
+  }
+
+  private unbindRecoveryListeners() {
+    if (!this.recoveryListenersBound) return;
+    const remove = this.options.removeWindowListener ?? ((name: RecoveryEvent, listener: () => void) =>
+      window.removeEventListener(name, listener));
+    remove("online", this.recoverImmediately);
+    remove("visibilitychange", this.recoverWhenVisible);
+    this.recoveryListenersBound = false;
+  }
+
+  private cancelReconnect() {
+    if (!this.reconnectTimer) return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+  }
+
+  private emitSession(envelope: GatewayEnvelope) {
+    for (const listener of this.sessionListeners) listener(envelope);
   }
 }
 

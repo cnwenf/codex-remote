@@ -8,6 +8,7 @@ type ConversationViewportProps = {
   threadId: string;
   history: ThreadHistoryState;
   onLoadEarlier: () => Promise<void>;
+  onInteract?: () => void;
   children: ReactNode;
 };
 
@@ -17,6 +18,7 @@ export function ConversationViewport({
   threadId,
   history,
   onLoadEarlier,
+  onInteract,
   children,
 }: ConversationViewportProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -79,6 +81,7 @@ export function ConversationViewport({
       className="timeline-scroll"
       data-testid="timeline-scroll"
       onScroll={handleScroll}
+      onPointerDown={onInteract}
     >
       <div className="history-sentinel" role="status" aria-live="polite">
         {history.loading

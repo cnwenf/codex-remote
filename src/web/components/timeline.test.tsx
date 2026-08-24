@@ -2,10 +2,10 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { CodexThread } from "../../protocol/thread-store";
-import { Timeline } from "./timeline";
+import { Timeline, TodoListDock } from "./timeline";
 
 describe("Timeline", () => {
-  it("renders the latest Desktop todo list with pending running and completed states", () => {
+  it("renders the latest Desktop todo list with pending running and completed states", async () => {
     const thread: CodexThread = {
       id: "todo",
       title: "Todo",
@@ -22,13 +22,28 @@ describe("Timeline", () => {
       },
     };
 
-    render(<Timeline thread={thread} />);
+    render(<TodoListDock todoList={thread.todoList} />);
 
-    expect(screen.getByLabelText("任务进度，1/3 已完成")).toBeVisible();
+    expect(screen.getByRole("button", { name: "任务进度，第 2/3 步" })).toBeVisible();
+    expect(screen.queryByText("Keep this list current")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "任务进度，第 2/3 步" }));
     expect(screen.getByText("Keep this list current")).toBeVisible();
     expect(screen.getByText("Inspect").closest("li")).toHaveClass("todo-completed");
     expect(screen.getByText("Implement").closest("li")).toHaveClass("todo-inProgress");
     expect(screen.getByText("Verify").closest("li")).toHaveClass("todo-pending");
+  });
+
+  it("does not bury the current todo inside the scrollable conversation history", () => {
+    const thread: CodexThread = {
+      id: "todo-history",
+      title: "Todo",
+      status: "running",
+      turnOrder: [],
+      turns: {},
+      todoList: { items: [{ step: "Visible outside", status: "inProgress" }] },
+    };
+    render(<Timeline thread={thread} />);
+    expect(screen.queryByText("Visible outside")).not.toBeInTheDocument();
   });
 
   it("groups execution events inside their conversation turn", async () => {
@@ -62,6 +77,59 @@ describe("Timeline", () => {
     await userEvent.click(screen.getByText("执行过程（2 项）"));
     expect(screen.getByText("Inspecting failures")).toBeVisible();
     expect(screen.getByText("pnpm test")).toBeVisible();
+  });
+
+  it("keeps tool activity after the assistant text that preceded it and shows a running ellipsis", () => {
+    const thread: CodexThread = {
+      id: "ordered",
+      title: "Ordered output",
+      status: "running",
+      activeTurnId: "turn-1",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "inProgress",
+          itemOrder: ["agent-before", "tool-after"],
+          items: {
+            "agent-before": { id: "agent-before", type: "agentMessage", text: "先输出文字" },
+            "tool-after": { id: "tool-after", type: "commandExecution", text: "pnpm test", status: "running" },
+          },
+        },
+      },
+    };
+
+    const { container } = render(<Timeline thread={thread} />);
+    const agent = screen.getByText("先输出文字").closest("article");
+    const activity = screen.getByText("执行过程（1 项）").closest("details");
+    expect((agent?.compareDocumentPosition(activity as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByLabelText("Codex 仍在输出")).toBeVisible();
+    expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
+  });
+
+  it("collapses an earlier completed activity segment after newer assistant output", () => {
+    const thread: CodexThread = {
+      id: "completed-segment",
+      title: "Completed segment",
+      status: "running",
+      activeTurnId: "turn-1",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "inProgress",
+          itemOrder: ["tool", "agent"],
+          items: {
+            tool: { id: "tool", type: "commandExecution", text: "done", status: "completed" },
+            agent: { id: "agent", type: "agentMessage", text: "工具之后的新文本" },
+          },
+        },
+      },
+    };
+    const { container } = render(<Timeline thread={thread} />);
+    const activity = screen.getByText("执行过程（1 项）").closest("details");
+    expect(activity).not.toHaveAttribute("open");
+    expect(container.querySelector(".activity-group .run-inProgress")).toBeNull();
   });
 
   it("renders assistant messages as safe GitHub-flavored Markdown", () => {

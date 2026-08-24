@@ -6,7 +6,7 @@ import { ConversationViewport } from "./components/conversation-viewport";
 import { DiffViewer } from "./components/diff-viewer";
 import { NewConversation } from "./components/new-conversation";
 import { isDirectThread, projectsFromThreads, TaskList } from "./components/task-list";
-import { Timeline } from "./components/timeline";
+import { Timeline, TodoListDock } from "./components/timeline";
 import { TokenDialog } from "./components/token-dialog";
 import { useCodex, type CreateThreadOptions } from "./state/use-codex";
 import "./styles.css";
@@ -16,13 +16,14 @@ export function App() {
   const autoConnectAttempted = useRef(false);
   const [decisionNotice, setDecisionNotice] = useState<string>();
   const [showNewConversation, setShowNewConversation] = useState(false);
+  const [composerExpanded, setComposerExpanded] = useState(false);
   const threads = codex.state.threadOrder
     .map((id) => codex.state.threads[id])
     .filter(Boolean);
 
   async function connect(token: string) {
-    await codex.connect(token);
     await createBrowserSession(token);
+    await codex.connect("");
     await refreshConnectedState();
   }
 
@@ -43,11 +44,13 @@ export function App() {
   }, []);
 
   function selectThread(id: string) {
+    setComposerExpanded(false);
     setShowNewConversation(false);
     void codex.selectThread(id).catch(() => undefined);
   }
 
   function startNewConversation() {
+    setComposerExpanded(false);
     codex.clearSelection();
     setShowNewConversation(true);
   }
@@ -73,11 +76,17 @@ export function App() {
         </div>
         <div className={`connection-state connection-${codex.connection}`}>
           <span aria-hidden="true" />
-          {codex.connection === "ready" ? "Connected" : codex.connection === "connecting" ? "Connecting" : "Offline"}
+          {codex.connection === "ready"
+            ? "Connected"
+            : codex.connection === "reconnecting"
+            ? "Reconnecting"
+            : codex.connection === "connecting"
+            ? "Connecting"
+            : "Offline"}
         </div>
       </header>
 
-      {codex.connection !== "ready" ? (
+      {codex.connection !== "ready" && codex.connection !== "reconnecting" ? (
         <div className="connect-stage">
           <TokenDialog
             onConnect={connect}
@@ -102,7 +111,7 @@ export function App() {
 
           <section className="task-pane" aria-label="当前对话">
             {codex.state.stale ? (
-              <div className="stale-banner" role="status">连接已变化，请刷新后再操作。</div>
+              <div className="stale-banner" role="status">连接暂时中断，正在自动恢复…</div>
             ) : null}
             {showNewConversation ? (
               <NewConversation
@@ -160,6 +169,7 @@ export function App() {
                 threadId={codex.selectedThread.id}
                 history={codex.selectedThreadHistory}
                 onLoadEarlier={codex.loadEarlierThreadHistory}
+                onInteract={() => setComposerExpanded(false)}
               >
                 <Timeline thread={codex.selectedThread} />
                 {codex.selectedThread.diff ? (
@@ -169,7 +179,9 @@ export function App() {
                   </details>
                 ) : null}
               </ConversationViewport>
-              <Composer
+              <div className={`conversation-controls ${composerExpanded ? "controls-expanded" : "controls-collapsed"}`}>
+                <TodoListDock todoList={codex.selectedThread.todoList} />
+                <Composer
                 draftKey={codex.selectedThread.id}
                 onSend={codex.sendInstruction}
                 running={codex.selectedThread.status === "running"}
@@ -180,13 +192,16 @@ export function App() {
                 reasoningEffort={codex.selectedThread.reasoningEffort}
                 permission={codex.selectedThread.permission}
                 onSettingsChange={codex.updateSelectedThreadSettings}
+                expanded={composerExpanded}
+                onExpandedChange={setComposerExpanded}
                 disabled={
                   codex.state.stale ||
                   codex.selectedThreadLoading ||
                   Boolean(codex.selectedThreadError) ||
                   Boolean(codex.selectedThread.desktopMirror && !codex.desktopControlAvailable)
                 }
-              />
+                />
+              </div>
               </>
             ) : (
               <div className="timeline-scroll"><Timeline /></div>

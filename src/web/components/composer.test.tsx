@@ -4,6 +4,49 @@ import { describe, expect, it, vi } from "vitest";
 import { Composer } from "./composer";
 
 describe("Composer", () => {
+  it("starts as one line, expands on focus, and can be collapsed without losing the draft", async () => {
+    const { rerender } = render(
+      <Composer
+        onSend={vi.fn()}
+        running={false}
+        expanded={false}
+        onExpandedChange={vi.fn()}
+        models={[{ id: "gpt-test", displayName: "GPT Test", defaultReasoningEffort: "high", reasoningEfforts: ["high"] }]}
+        model="gpt-test"
+      />,
+    );
+    const input = screen.getByRole("textbox", { name: "Instruction" });
+    expect(input).toHaveAttribute("rows", "1");
+    expect(screen.queryByLabelText("对话设置")).not.toBeInTheDocument();
+
+    rerender(
+      <Composer
+        onSend={vi.fn()}
+        running={false}
+        expanded
+        onExpandedChange={vi.fn()}
+        models={[{ id: "gpt-test", displayName: "GPT Test", defaultReasoningEffort: "high", reasoningEfforts: ["high"] }]}
+        model="gpt-test"
+      />,
+    );
+    await userEvent.type(input, "draft stays");
+    expect(input).toHaveAttribute("rows", "3");
+    expect(screen.getByLabelText("对话设置")).toBeVisible();
+
+    rerender(
+      <Composer
+        onSend={vi.fn()}
+        running={false}
+        expanded={false}
+        onExpandedChange={vi.fn()}
+        models={[{ id: "gpt-test", displayName: "GPT Test", defaultReasoningEffort: "high", reasoningEfforts: ["high"] }]}
+        model="gpt-test"
+      />,
+    );
+    expect(input).toHaveValue("draft stays");
+    expect(input).toHaveAttribute("rows", "1");
+  });
+
   it("restores an unsent draft per conversation after navigation and remount", async () => {
     localStorage.clear();
     const props = { onSend: vi.fn(), running: false };
@@ -47,7 +90,7 @@ describe("Composer", () => {
   });
 
   it("offers stop and steer while a task is running", () => {
-    render(<Composer onSend={vi.fn()} running onStop={vi.fn()} />);
+    render(<Composer onSend={vi.fn()} running onStop={vi.fn()} expanded />);
 
     expect(screen.getByRole("button", { name: "Steer" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
@@ -55,7 +98,7 @@ describe("Composer", () => {
 
   it("supports selecting and pasting multiple images and keeps them until send succeeds", async () => {
     const onSend = vi.fn().mockResolvedValue(undefined);
-    render(<Composer onSend={onSend} running={false} />);
+    render(<Composer onSend={onSend} running={false} expanded />);
     const picker = screen.getByLabelText("添加图片");
     const first = new File(["png"], "first.png", { type: "image/png" });
     const second = new File(["jpg"], "second.jpg", { type: "image/jpeg" });
@@ -71,7 +114,7 @@ describe("Composer", () => {
 
   it("keeps selected images when sending fails", async () => {
     const onSend = vi.fn().mockRejectedValue(new Error("upload failed"));
-    render(<Composer onSend={onSend} running={false} />);
+    render(<Composer onSend={onSend} running={false} expanded />);
     const image = new File(["png"], "keep.png", { type: "image/png" });
     await userEvent.upload(screen.getByLabelText("添加图片"), image);
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
@@ -121,6 +164,7 @@ describe("Composer", () => {
     const { rerender } = render(
       <Composer
         {...props}
+        expanded
         model="gpt-test"
         reasoningEffort="high"
         permission="auto"
@@ -139,7 +183,7 @@ describe("Composer", () => {
       permission: "auto",
     });
     rerender(
-      <Composer {...props} model="gpt-next" reasoningEffort="high" permission="auto" />,
+      <Composer {...props} expanded model="gpt-next" reasoningEffort="high" permission="auto" />,
     );
     await userEvent.selectOptions(screen.getByLabelText("思考强度"), "low");
     expect(onSettingsChange).toHaveBeenLastCalledWith({
@@ -148,7 +192,7 @@ describe("Composer", () => {
       permission: "auto",
     });
     rerender(
-      <Composer {...props} model="gpt-next" reasoningEffort="low" permission="auto" />,
+      <Composer {...props} expanded model="gpt-next" reasoningEffort="low" permission="auto" />,
     );
     await userEvent.click(screen.getByRole("button", { name: "权限：请求批准" }));
     expect(screen.getByRole("listbox", { name: "权限" })).toBeVisible();

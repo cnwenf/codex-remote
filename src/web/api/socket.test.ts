@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexSocket, createBrowserSession, type BrowserSocket } from "./socket";
 
 class FakeBrowserSocket implements BrowserSocket {
@@ -29,6 +29,10 @@ class FakeBrowserSocket implements BrowserSocket {
     this.onmessage?.({ data: JSON.stringify(payload) });
   }
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("CodexSocket", () => {
   it("does not finish connecting until the gateway session is ready", async () => {
@@ -126,5 +130,100 @@ describe("CodexSocket", () => {
     expect(received).toEqual([
       { id: "server-1", method: "item/commandExecution/requestApproval" },
     ]);
+  });
+
+  it("reconnects with the saved cookie after an established connection closes", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeBrowserSocket[] = [];
+    const protocols: string[][] = [];
+    const socket = new CodexSocket((_url, value) => {
+      protocols.push(value);
+      const next = new FakeBrowserSocket();
+      sockets.push(next);
+      return next;
+    }, { reconnectDelaysMs: [100, 200], random: () => 0.5 });
+    const sessions: string[] = [];
+    socket.subscribeSession((session) => {
+      if (session.type === "session") sessions.push(session.state);
+    });
+
+    await socket.connect("initial-secret", "ws://127.0.0.1/rpc");
+    sockets[0].close();
+
+    expect(sessions.at(-1)).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(100);
+    await Promise.resolve();
+
+    expect(sockets).toHaveLength(2);
+    expect(protocols).toEqual([
+      ["codex-local", expect.stringMatching(/^token\./)],
+      ["codex-local"],
+    ]);
+    expect(sessions.at(-1)).toBe("ready");
+  });
+
+  it("backs off after a failed reconnect and retries immediately when the network returns", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeBrowserSocket[] = [];
+    const onlineListeners = new Set<() => void>();
+    const socket = new CodexSocket(() => {
+      const next = new FakeBrowserSocket(sockets.length !== 1);
+      sockets.push(next);
+      return next;
+    }, {
+      reconnectDelaysMs: [100, 1_000],
+      random: () => 0.5,
+      addWindowListener: (name, listener) => {
+        if (name === "online") onlineListeners.add(listener);
+      },
+      removeWindowListener: (_name, listener) => onlineListeners.delete(listener),
+    });
+
+    await socket.connect("", "ws://127.0.0.1/rpc");
+    sockets[0].close();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sockets).toHaveLength(2);
+    sockets[1].close();
+
+    for (const listener of onlineListeners) listener();
+    await Promise.resolve();
+
+    expect(sockets).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(3);
+  });
+
+  it("does not reconnect after a deliberate disconnect", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeBrowserSocket[] = [];
+    const socket = new CodexSocket(() => {
+      const next = new FakeBrowserSocket();
+      sockets.push(next);
+      return next;
+    }, { reconnectDelaysMs: [10] });
+
+    await socket.connect("", "ws://127.0.0.1/rpc");
+    socket.disconnect();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(sockets).toHaveLength(1);
+  });
+
+  it("rejects but never replays an in-flight mutation after reconnecting", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeBrowserSocket[] = [];
+    const socket = new CodexSocket(() => {
+      const next = new FakeBrowserSocket();
+      sockets.push(next);
+      return next;
+    }, { reconnectDelaysMs: [10], random: () => 0.5 });
+    await socket.connect("", "ws://127.0.0.1/rpc");
+
+    const mutation = socket.request("turn/steer", { threadId: "t1", input: "once" });
+    sockets[0].close();
+    await expect(mutation).rejects.toThrow("codex-socket-disconnected");
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(sockets[1].sent).toEqual([]);
   });
 });
