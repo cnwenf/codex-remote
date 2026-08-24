@@ -194,6 +194,20 @@ describe("gateway server", () => {
     await gateway.stop();
   });
 
+  it("accepts an authenticated Capacitor WebView controller", async () => {
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      transport: new AlreadyInitializedTransport(),
+    });
+    const address = await gateway.start();
+    const socket = await connect(address, "test-token", "capacitor://localhost");
+    await expect(nextJson(socket)).resolves.toMatchObject({ type: "session", state: "ready" });
+    socket.close();
+    await once(socket, "close");
+    await gateway.stop();
+  });
+
   it("defaults to loopback", async () => {
     const gateway = createGateway({
       port: 0,
@@ -228,6 +242,96 @@ describe("gateway server", () => {
     } finally {
       await gateway.stop();
       await rm(staticDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves a bounded mobile status snapshot to Bearer and browser-session authentication", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const desktopState = {
+      request(method: string) {
+        expect(method).toBe("desktopState/listThreads");
+        return {
+          data: [{
+            id: "task-1",
+            title: "Active task",
+            status: "running",
+            updatedAt: 42,
+            cwd: "/must/not/leak",
+            turns: [{ items: [{ text: "private output" }] }],
+          }],
+        };
+      },
+      close() {},
+    };
+    const gateway = createGateway({
+      port: 0,
+      token,
+      allowedOrigins: [origin],
+      desktopState,
+      transport: new AlreadyInitializedTransport(),
+    });
+    const address = await gateway.start();
+    try {
+      const unauthenticated = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`);
+      expect(unauthenticated.status).toBe(401);
+
+      const bearer = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(bearer.status).toBe(200);
+      expect(bearer.headers.get("cache-control")).toBe("no-store");
+      const body = await bearer.json() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        version: 1,
+        threads: [{ id: "task-1", title: "Active task", status: "running", updatedAt: 42 }],
+      });
+      expect(JSON.stringify(body)).not.toMatch(/must\/not\/leak|private output/);
+
+      const login = await fetch(`http://127.0.0.1:${address.port}/auth/session`, {
+        method: "POST",
+        headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const cookie = login.headers.get("set-cookie")?.split(";", 1)[0] as string;
+      const session = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { cookie },
+      });
+      expect(session.status).toBe(200);
+
+      const wrongMethod = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(wrongMethod.status).toBe(405);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it("answers native WebView CORS preflight for authenticated mobile APIs", async () => {
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      desktopState: { request: () => ({ data: [] }), close() {} },
+      transport: new AlreadyInitializedTransport(),
+    });
+    const address = await gateway.start();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "capacitor://localhost",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-origin")).toBe("capacitor://localhost");
+      expect(response.headers.get("access-control-allow-methods")).toContain("GET");
+      expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+    } finally {
+      await gateway.stop();
     }
   });
 

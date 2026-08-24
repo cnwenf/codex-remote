@@ -263,21 +263,29 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
       return updateTurn(thread, turnId, (turn) => {
         const previous = turn.items[itemId];
         const text = itemText(item) || previous?.text || "";
+        const itemType = stringValue(item.type) ?? previous?.type ?? "item";
+        const optimisticId = itemType === "userMessage"
+          ? findMatchingOptimisticUserMessage(turn, text, itemId)
+          : undefined;
+        const optimistic = optimisticId ? turn.items[optimisticId] : undefined;
+        const nextItems = { ...turn.items };
+        if (optimisticId) delete nextItems[optimisticId];
+        nextItems[itemId] = {
+          id: itemId,
+          type: itemType,
+          text,
+          ...(previous?.imageIds || optimistic?.imageIds
+            ? { imageIds: previous?.imageIds ?? optimistic?.imageIds }
+            : {}),
+          status: message.method === "item/completed"
+            ? stringValue(item.status) ?? "completed"
+            : stringValue(item.status) ?? "running",
+        };
         return {
           ...turn,
           status: message.method === "item/completed" ? turn.status : "inProgress",
-          itemOrder: appendUnique(turn.itemOrder, itemId),
-          items: {
-            ...turn.items,
-            [itemId]: {
-              id: itemId,
-              type: stringValue(item.type) ?? previous?.type ?? "item",
-              text,
-              status: message.method === "item/completed"
-                ? stringValue(item.status) ?? "completed"
-                : stringValue(item.status) ?? "running",
-            },
-          },
+          itemOrder: replaceOrAppendItemId(turn.itemOrder, optimisticId, itemId),
+          items: nextItems,
         };
       }, "inProgress", message.method === "item/started");
     });
@@ -334,6 +342,31 @@ function emptyTurn(id: string, status: TurnStatus = "unknown"): CodexTurn {
 
 function appendUnique(values: string[], value: string) {
   return values.includes(value) ? values : [...values, value];
+}
+
+function findMatchingOptimisticUserMessage(
+  turn: CodexTurn,
+  text: string,
+  authoritativeId: string,
+) {
+  if (turn.items[authoritativeId]) return undefined;
+  const expected = normalizeUserMessageText(text);
+  return turn.itemOrder.find((id) => {
+    const candidate = turn.items[id];
+    return id.startsWith("web-steer-") &&
+      candidate?.type === "userMessage" &&
+      normalizeUserMessageText(candidate.text) === expected;
+  });
+}
+
+function replaceOrAppendItemId(values: string[], replacedId: string | undefined, value: string) {
+  if (!replacedId) return appendUnique(values, value);
+  const next = values.filter((id) => id !== value);
+  return next.map((id) => id === replacedId ? value : id);
+}
+
+function normalizeUserMessageText(value: string) {
+  return value.trim().replace(/\s+/g, " ");
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

@@ -2,6 +2,7 @@ import readline from "node:readline";
 
 const lines = readline.createInterface({ input: process.stdin });
 let createdThread;
+let approvalDeclines = 0;
 const loadedThreads = new Set();
 const pinnedThreads = new Set();
 const pinnedSection = { id: "fixture-pinned-section", name: "Pinned", appearance: null };
@@ -119,7 +120,7 @@ lines.on("line", (line) => {
       method: "turn/started",
       params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn" } },
     });
-    if (message.method === "turn/start") {
+    {
       const text = message.params?.input?.find?.((item) => item.type === "text")?.text;
       if (text) {
         send({
@@ -127,7 +128,11 @@ lines.on("line", (line) => {
           params: {
             threadId: "fixture-thread",
             turnId: "fixture-live-turn",
-            item: { id: "fixture-live-user", type: "userMessage", content: [{ type: "text", text }] },
+            item: {
+              id: message.method === "turn/steer" ? "fixture-official-steer" : "fixture-live-user",
+              type: "userMessage",
+              content: [{ type: "text", text }],
+            },
           },
         });
       }
@@ -191,6 +196,7 @@ lines.on("line", (line) => {
     return;
   }
   if (message.id === "fixture-approval" && message.result?.decision === "decline") {
+    approvalDeclines += 1;
     send({
       method: "item/agentMessage/delta",
       params: {
@@ -200,6 +206,25 @@ lines.on("line", (line) => {
         delta: "Request denied",
       },
     });
+    if (approvalDeclines >= 2) {
+      send({
+        method: "turn/plan/updated",
+        params: {
+          threadId: "fixture-thread",
+          turnId: "fixture-live-turn",
+          explanation: "Fixture checklist completed",
+          plan: [
+            { step: "Inspect fixture", status: "completed" },
+            { step: "Run checks", status: "completed" },
+            { step: "Review result", status: "completed" },
+          ],
+        },
+      });
+      send({
+        method: "turn/completed",
+        params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn", status: "completed" } },
+      });
+    }
   }
 });
 

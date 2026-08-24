@@ -26,6 +26,7 @@ import {
   ImageUploadStore,
   MAX_IMAGE_BYTES,
 } from "./image-upload-store";
+import { projectMobileStatus } from "./mobile-status";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 4 * 1024;
@@ -36,6 +37,13 @@ const KNOWN_SERVER_REQUESTS = new Set([
   "item/fileChange/requestApproval",
   "item/permissions/requestApproval",
   "item/tool/requestUserInput",
+]);
+const MOBILE_STATUS_RATE_WINDOW_MS = 60_000;
+const MOBILE_STATUS_RATE_LIMIT = 120;
+const NATIVE_WEBVIEW_ORIGINS = new Set([
+  "capacitor://localhost",
+  "http://localhost",
+  "https://localhost",
 ]);
 
 type GatewayOptions = {
@@ -68,13 +76,18 @@ export function createGateway(options: GatewayOptions) {
   const imageStore = new ImageUploadStore(
     options.uploadDir ?? join(homedir(), ".codex", "codex-remote", "uploads"),
   );
-  let allowedOrigins = new Set(options.allowedOrigins ?? []);
+  const mobileStatusRate = new Map<string, { startedAt: number; count: number }>();
+  let allowedOrigins = new Set([
+    ...(options.allowedOrigins ?? []),
+    ...NATIVE_WEBVIEW_ORIGINS,
+  ]);
   let initializeResolve: (() => void) | undefined;
   let initializeReject: ((error: Error) => void) | undefined;
 
   const handleHttpRequest = (request: IncomingMessage, response: ServerResponse) => {
     setSecurityHeaders(response);
     const pathname = new URL(request.url ?? "/", "http://gateway.local").pathname;
+    if (isMobileApiPath(pathname) && applyNativeCors(request, response)) return;
     if (pathname === "/health") {
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       response.end('{"ok":true}');
@@ -92,6 +105,10 @@ export function createGateway(options: GatewayOptions) {
       void handleSessionRequest(request, response);
       return;
     }
+    if (pathname === "/api/mobile/status") {
+      void handleMobileStatus(request, response);
+      return;
+    }
     if (pathname === "/api/images") {
       void handleImageUpload(request, response);
       return;
@@ -103,6 +120,18 @@ export function createGateway(options: GatewayOptions) {
     }
     serveStatic(request, response, options.staticDir);
   };
+
+  function applyNativeCors(request: IncomingMessage, response: ServerResponse) {
+    const origin = request.headers.origin;
+    if (!origin || !NATIVE_WEBVIEW_ORIGINS.has(origin)) return false;
+    response.setHeader("Access-Control-Allow-Origin", origin);
+    response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    response.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-File-Name");
+    response.setHeader("Vary", "Origin");
+    if (request.method !== "OPTIONS") return false;
+    response.writeHead(204).end();
+    return true;
+  }
   const httpServer = createServer(handleHttpRequest);
   const additionalHttpServers: ReturnType<typeof createServer>[] = [];
 
@@ -286,8 +315,9 @@ export function createGateway(options: GatewayOptions) {
         await options.transport.stop();
         throw error;
       }
-      if (allowedOrigins.size === 0) {
+      if (!options.allowedOrigins || options.allowedOrigins.length === 0) {
         allowedOrigins = new Set([
+          ...allowedOrigins,
           `http://${host}:${address.port}`,
           ...additionalHosts.map((additionalHost) => `http://${additionalHost}:${address.port}`),
           `http://localhost:${address.port}`,
@@ -388,12 +418,16 @@ export function createGateway(options: GatewayOptions) {
       response.writeHead(405, { Allow: "POST" }).end();
       return;
     }
-    if (!isAllowedOrigin(request.headers.origin, allowedOrigins)) {
+    if (request.headers.origin && !isAllowedOrigin(request.headers.origin, allowedOrigins)) {
       response.writeHead(403).end();
       return;
     }
     const providedSession = readCookie(request.headers.cookie, SESSION_COOKIE_NAME);
-    if (!providedSession || !isAuthorized(providedSession, sessionCredential)) {
+    const providedBearer = singleHeader(request.headers.authorization)?.match(/^Bearer ([^\s]+)$/i)?.[1];
+    if (
+      !(providedSession && isAuthorized(providedSession, sessionCredential)) &&
+      !(providedBearer && isAuthorized(providedBearer, options.token))
+    ) {
       response.writeHead(401).end();
       return;
     }
@@ -419,6 +453,51 @@ export function createGateway(options: GatewayOptions) {
     }
   }
 
+  async function handleMobileStatus(request: IncomingMessage, response: ServerResponse) {
+    response.setHeader("Cache-Control", "no-store");
+    if (request.method !== "GET") {
+      response.writeHead(405, { Allow: "GET" }).end();
+      return;
+    }
+    const authorization = singleHeader(request.headers.authorization);
+    const bearer = authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
+    const session = readCookie(request.headers.cookie, SESSION_COOKIE_NAME);
+    const authorized =
+      (bearer !== undefined && isAuthorized(bearer, options.token)) ||
+      (session !== undefined && isAuthorized(session, sessionCredential));
+    if (!authorized) {
+      response.writeHead(401).end();
+      return;
+    }
+    const remoteAddress = request.socket.remoteAddress ?? "unknown";
+    if (!consumeMobileStatusRate(remoteAddress)) {
+      response.writeHead(429, { "Retry-After": "60" }).end();
+      return;
+    }
+    if (!options.desktopState) {
+      response.writeHead(503).end();
+      return;
+    }
+    try {
+      const value = await options.desktopState.request("desktopState/listThreads", {});
+      response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify(projectMobileStatus(value)));
+    } catch {
+      response.writeHead(503).end();
+    }
+  }
+
+  function consumeMobileStatusRate(remoteAddress: string) {
+    const now = Date.now();
+    const current = mobileStatusRate.get(remoteAddress);
+    if (!current || now - current.startedAt >= MOBILE_STATUS_RATE_WINDOW_MS) {
+      mobileStatusRate.set(remoteAddress, { startedAt: now, count: 1 });
+      return true;
+    }
+    current.count += 1;
+    return current.count <= MOBILE_STATUS_RATE_LIMIT;
+  }
+
   async function handleImageDownload(
     request: IncomingMessage,
     response: ServerResponse,
@@ -430,7 +509,11 @@ export function createGateway(options: GatewayOptions) {
       return;
     }
     const providedSession = readCookie(request.headers.cookie, SESSION_COOKIE_NAME);
-    if (!providedSession || !isAuthorized(providedSession, sessionCredential)) {
+    const providedBearer = singleHeader(request.headers.authorization)?.match(/^Bearer ([^\s]+)$/i)?.[1];
+    if (
+      !(providedSession && isAuthorized(providedSession, sessionCredential)) &&
+      !(providedBearer && isAuthorized(providedBearer, options.token))
+    ) {
       response.writeHead(401).end();
       return;
     }
@@ -564,6 +647,12 @@ function setSecurityHeaders(response: ServerResponse) {
   response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("X-Frame-Options", "DENY");
+}
+
+function isMobileApiPath(pathname: string) {
+  return pathname === "/api/mobile/status" ||
+    pathname === "/api/images" ||
+    /^\/api\/images\/[0-9a-f-]+$/i.test(pathname);
 }
 
 function serveStatic(

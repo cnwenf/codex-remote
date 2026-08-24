@@ -46,6 +46,19 @@ describe("Timeline", () => {
     expect(screen.queryByText("Visible outside")).not.toBeInTheDocument();
   });
 
+  it("hides the todo dock after every item is completed", () => {
+    render(<TodoListDock todoList={{
+      explanation: "All work is done",
+      items: [
+        { step: "Implement", status: "completed" },
+        { step: "Verify", status: "completed" },
+      ],
+    }} />);
+
+    expect(screen.queryByRole("button", { name: /任务进度/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("All work is done")).not.toBeInTheDocument();
+  });
+
   it("groups execution events inside their conversation turn", async () => {
     const thread: CodexThread = {
       id: "t1",

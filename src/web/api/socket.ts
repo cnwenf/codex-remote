@@ -37,6 +37,7 @@ export class CodexSocket {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private reconnectAttempt = 0;
   private socketUrl?: string;
+  private reconnectProtocols: string[] = ["codex-local"];
   private reconnectEnabled = false;
   private deliberateDisconnect = false;
   private recoveryListenersBound = false;
@@ -47,11 +48,13 @@ export class CodexSocket {
     private readonly options: SocketOptions = {},
   ) {}
 
-  connect(token: string, url = defaultSocketUrl()): Promise<void> {
+  connect(token: string, url = defaultSocketUrl(), reuseTokenOnReconnect = false): Promise<void> {
     if (this.socket) throw new Error("codex-socket-already-connected");
     this.deliberateDisconnect = false;
     this.socketUrl = url;
-    return this.open(url, token ? ["codex-local", `token.${encodeToken(token)}`] : ["codex-local"], false)
+    const protocols = token ? ["codex-local", `token.${encodeToken(token)}`] : ["codex-local"];
+    this.reconnectProtocols = reuseTokenOnReconnect ? protocols : ["codex-local"];
+    return this.open(url, protocols, false)
       .then(() => {
         this.reconnectEnabled = true;
         this.reconnectAttempt = 0;
@@ -203,7 +206,7 @@ export class CodexSocket {
   private async reconnectNow() {
     if (this.socket || !this.socketUrl || !this.reconnectEnabled || this.deliberateDisconnect) return;
     try {
-      await this.open(this.socketUrl, ["codex-local"], true);
+      await this.open(this.socketUrl, this.reconnectProtocols, true);
     } catch {
       this.scheduleReconnect();
     }
@@ -270,13 +273,23 @@ export type UploadedImage = {
   size: number;
 };
 
-export async function uploadImage(file: File, fetcher: typeof fetch = fetch): Promise<UploadedImage> {
-  const response = await fetcher("/api/images", {
+export type RemoteApiOptions = {
+  baseUrl?: string;
+  token?: string;
+};
+
+export async function uploadImage(
+  file: File,
+  fetcher: typeof fetch = fetch,
+  options: RemoteApiOptions = {},
+): Promise<UploadedImage> {
+  const response = await fetcher(`${options.baseUrl ?? ""}/api/images`, {
     method: "POST",
-    credentials: "same-origin",
+    credentials: options.baseUrl ? "omit" : "same-origin",
     headers: {
       "content-type": file.type,
       "x-file-name": encodeURIComponent(file.name),
+      ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
     },
     body: file,
   });
@@ -296,6 +309,15 @@ export async function uploadImage(file: File, fetcher: typeof fetch = fetch): Pr
     throw new Error("图片上传响应无效");
   }
   return image as UploadedImage;
+}
+
+export function remoteSocketUrl(baseUrl: string) {
+  const url = new URL(baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = `${url.pathname.replace(/\/$/, "")}/rpc`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function defaultSocketUrl() {

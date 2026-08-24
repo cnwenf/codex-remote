@@ -25,6 +25,18 @@ When installation finishes, quit and reopen Codex Desktop once. This enables its
 
 Open the URL printed by the installer, for example `http://192.168.1.20:4321`, and enter your password. The login cookie lasts 30 days and multiple browsers may connect simultaneously.
 
+## Android and iPhone clients
+
+Download the mobile artifacts from [GitHub Releases](https://github.com/cnwenf/codex-remote/releases):
+
+- `Codex-Remote-android-arm64.apk` is an installable ARM64 Android build. Allow notifications on first launch.
+- `Codex-Remote-iOS-Simulator.zip` is an unsigned iPhone Simulator build for development and verification.
+- `Codex-Remote-iOS-unsigned.ipa` is a compiled ARM64 device build, but it must be re-signed with your own Apple Developer Team before installation. The repository never includes certificates or provisioning profiles.
+
+The native clients reuse the Web conversation UI. Tap **New connection**, then enter a name, the Mac private-network URL (for example `http://192.168.1.20:4321`), and the Web password. You can save, open, edit, and delete multiple connections. Passwords are stored in Android Keystore or iOS Keychain instead of ordinary preferences.
+
+Android displays a low-priority foreground notification listing running tasks and sends a completion or failure notification; tapping it opens that connection and task. iOS refreshes and notifies when the operating system grants background execution time. iOS does not guarantee polling intervals; production-grade immediate lock-screen notifications require connecting `CodexRemoteNativePlugin` to APNs.
+
 ## Install through a Codex conversation
 
 Copy this prompt into Codex:
@@ -64,3 +76,5 @@ curl -fsS http://127.0.0.1:4321/health
 ## Security
 
 The current DMG uses ad-hoc signing, so macOS may ask for confirmation on first launch. Installation proceeds only after checksum verification. Keep ports `4321` and `9229` off the public Internet; `9229` must remain loopback-only.
+
+Mobile clients only allow plain HTTP for numeric IP addresses, `localhost`, and `.local` hosts. The password is sent in the `Authorization` header and never placed in the URL.

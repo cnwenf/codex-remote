@@ -24,10 +24,10 @@ export default defineConfig({
       },
     },
   ],
-  webServer: {
+  webServer: process.env.CODEX_REMOTE_E2E_EXTERNAL ? undefined : {
     command: "pnpm test:stack",
     url: "http://127.0.0.1:4318/health",
-    reuseExistingServer: false,
+    reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },
 });

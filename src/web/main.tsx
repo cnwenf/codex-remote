@@ -1,5 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { Capacitor } from "@capacitor/core";
+import { MobileShell } from "../mobile/mobile-shell";
 import { App } from "./app";
 import { watchAppVersion } from "./api/app-version";
 
@@ -13,6 +15,6 @@ watchAppVersion();
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    {Capacitor.isNativePlatform() ? <MobileShell /> : <App />}
   </StrictMode>,
 );

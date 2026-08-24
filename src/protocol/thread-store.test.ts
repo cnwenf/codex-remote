@@ -70,6 +70,66 @@ describe("reduceCodexState", () => {
     expect(second.threads.t1.turns["turn-2"].items["user-2"].text).toBe("Second");
   });
 
+  it("replaces one optimistic steer with the authoritative live user message", () => {
+    const state = {
+      ...initialCodexState,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live task",
+          status: "running" as const,
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "inProgress" as const,
+              itemOrder: ["agent-before", "web-steer-1"],
+              items: {
+                "agent-before": {
+                  id: "agent-before",
+                  type: "agentMessage",
+                  text: "Still working",
+                },
+                "web-steer-1": {
+                  id: "web-steer-1",
+                  type: "userMessage",
+                  text: "Check this image",
+                  imageIds: ["uploaded-image"],
+                  status: "completed",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reduceCodexState(state, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          id: "desktop-user-1",
+          type: "userMessage",
+          content: [{ type: "text", text: "Check this image" }],
+        },
+      },
+    });
+    const turn = next.threads.t1.turns["turn-1"];
+
+    expect(turn.itemOrder).toEqual(["agent-before", "desktop-user-1"]);
+    expect(turn.items["web-steer-1"]).toBeUndefined();
+    expect(turn.items["desktop-user-1"]).toMatchObject({
+      id: "desktop-user-1",
+      type: "userMessage",
+      text: "Check this image",
+      imageIds: ["uploaded-image"],
+    });
+  });
+
   it("updates thread status from notifications", () => {
     const next = reduceCodexState(initialCodexState, {
       method: "thread/status/changed",

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { createBrowserSession } from "./api/socket";
+import { createBrowserSession, remoteSocketUrl } from "./api/socket";
 import { ApprovalSheet, type ApprovalResolution } from "./components/approval-sheet";
 import { Composer } from "./components/composer";
 import { ConversationViewport } from "./components/conversation-viewport";
@@ -11,8 +11,17 @@ import { TokenDialog } from "./components/token-dialog";
 import { useCodex, type CreateThreadOptions } from "./state/use-codex";
 import "./styles.css";
 
-export function App() {
-  const codex = useCodex();
+export type NativeRemoteSession = {
+  connectionId: string;
+  name: string;
+  baseUrl: string;
+  token: string;
+  requestedThreadId?: string;
+  onManageConnections(): void;
+};
+
+export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
+  const codex = useCodex(undefined, remote ? { baseUrl: remote.baseUrl, token: remote.token } : {});
   const autoConnectAttempted = useRef(false);
   const [decisionNotice, setDecisionNotice] = useState<string>();
   const [showNewConversation, setShowNewConversation] = useState(false);
@@ -38,8 +47,15 @@ export function App() {
   useEffect(() => {
     if (autoConnectAttempted.current) return;
     autoConnectAttempted.current = true;
-    void codex.connect("")
-      .then(refreshConnectedState)
+    void codex.connect(
+      remote?.token ?? "",
+      remote ? remoteSocketUrl(remote.baseUrl) : undefined,
+      Boolean(remote),
+    )
+      .then(async () => {
+        await refreshConnectedState();
+        if (remote?.requestedThreadId) await codex.selectThread(remote.requestedThreadId);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -74,6 +90,11 @@ export function App() {
           <span className="brand-glyph" aria-hidden="true">C</span>
           <h1>Codex Remote</h1>
         </div>
+        {remote ? (
+          <button type="button" className="manage-connections-button" onClick={remote.onManageConnections}>
+            {remote.name}
+          </button>
+        ) : null}
         <div className={`connection-state connection-${codex.connection}`}>
           <span aria-hidden="true" />
           {codex.connection === "ready"
@@ -88,11 +109,26 @@ export function App() {
 
       {codex.connection !== "ready" && codex.connection !== "reconnecting" ? (
         <div className="connect-stage">
-          <TokenDialog
-            onConnect={connect}
-            busy={codex.connection === "connecting"}
-            error={codex.error}
-          />
+          {remote ? (
+            <section className="native-connect-error">
+              <h2>无法连接 {remote.name}</h2>
+              <p>{codex.error ?? "请确认 Mac 在线、VPN 已连接且 Remote 地址可访问。"}</p>
+              <div>
+                <button type="button" className="secondary-button" onClick={remote.onManageConnections}>返回连接列表</button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => window.location.reload()}
+                >重试</button>
+              </div>
+            </section>
+          ) : (
+            <TokenDialog
+              onConnect={connect}
+              busy={codex.connection === "connecting"}
+              error={codex.error}
+            />
+          )}
         </div>
       ) : (
         <div className={`app-shell ${codex.selectedThreadId || showNewConversation ? "has-selection" : ""}`}>
@@ -171,7 +207,10 @@ export function App() {
                 onLoadEarlier={codex.loadEarlierThreadHistory}
                 onInteract={() => setComposerExpanded(false)}
               >
-                <Timeline thread={codex.selectedThread} />
+                <Timeline
+                  thread={codex.selectedThread}
+                  imageRequest={remote ? { baseUrl: remote.baseUrl, token: remote.token } : undefined}
+                />
                 {codex.selectedThread.diff ? (
                   <details className="diff-panel">
                     <summary>查看代码变更</summary>

@@ -12,7 +12,7 @@ test("keeps the browser signed in after a reload", async ({ page }) => {
   await expect(page.getByLabel("Access token")).toHaveCount(0);
 });
 
-test("controller opens a task, streams output, denies approval, and reviews diff", async ({ page }) => {
+test("controller opens a task, streams output, denies approval, and reviews diff", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");
   await page.getByRole("button", { name: "Connect" }).click();
@@ -57,13 +57,22 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   await expect(approval).toHaveCount(0);
   await todoTrigger.click();
   await expect(page.getByLabel("任务进度，1/3 已完成")).toBeVisible();
+  if (process.env.CODEX_REMOTE_CAPTURE) {
+    await page.screenshot({
+      path: `artifacts/acceptance-${testInfo.project.name}.png`,
+      fullPage: false,
+    });
+  }
   await todoTrigger.click();
   await expect(page.locator(".decision-toast", { hasText: "Request denied" })).toBeVisible();
   await page.getByRole("textbox", { name: "Instruction" }).fill("Steer follow-up from Web");
   await page.getByRole("button", { name: "Steer" }).click();
-  await expect(page.locator(".message-user", { hasText: "Steer follow-up from Web" })).toBeVisible();
+  const steerMessage = page.locator(".message-user", { hasText: "Steer follow-up from Web" });
+  await expect(steerMessage).toHaveCount(1);
+  await expect(steerMessage).toBeVisible();
   await expect(approval).toBeVisible();
   await approval.getByRole("button", { name: "Deny" }).click();
+  await expect(todoTrigger).toHaveCount(0);
   await page.getByTestId("timeline-scroll").dispatchEvent("pointerdown");
   await page.getByText("查看代码变更").click();
   await expect(page.getByLabel("Unified diff")).toContainText("fixture.txt");

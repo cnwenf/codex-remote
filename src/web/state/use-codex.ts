@@ -19,7 +19,7 @@ import {
   permissionStateFromProtocol,
   type PermissionModeVisibility,
 } from "../../protocol/permissions";
-import { CodexSocket, uploadImage } from "../api/socket";
+import { CodexSocket, uploadImage, type RemoteApiOptions } from "../api/socket";
 
 export type ConnectionState = "disconnected" | "connecting" | "reconnecting" | "ready";
 export type TransportMode = "desktop-live" | "desktop-cold" | "web-live";
@@ -60,7 +60,7 @@ const emptyCreationOptions = {
   error: undefined as string | undefined,
 };
 
-export function useCodex(socketOverride?: CodexSocket) {
+export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptions = {}) {
   const [socket] = useState(() => socketOverride ?? new CodexSocket());
   const [state, setState] = useState<CodexState>(initialCodexState);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
@@ -126,11 +126,11 @@ export function useCodex(socketOverride?: CodexSocket) {
   }, [socket]);
 
   const connect = useCallback(
-    async (token: string, url?: string) => {
+    async (token: string, url?: string, reuseTokenOnReconnect = false) => {
       setConnection("connecting");
       setError(undefined);
       try {
-        await socket.connect(token, url);
+        await socket.connect(token, url, reuseTokenOnReconnect);
         setConnection("ready");
       } catch (cause) {
         setConnection("disconnected");
@@ -437,7 +437,7 @@ export function useCodex(socketOverride?: CodexSocket) {
         throw new Error("此对话正由 Codex Desktop 运行，Web 当前为同步查看模式");
       }
       const uploaded = images.length > 0
-        ? await Promise.all(images.map((image) => uploadImage(image)))
+        ? await Promise.all(images.map((image) => uploadImage(image, fetch, remoteApi)))
         : [];
       const input = [
         ...(text ? [{ type: "text", text }] : []),
@@ -506,7 +506,7 @@ export function useCodex(socketOverride?: CodexSocket) {
         }
       }
     },
-    [desktopControlAvailable, selectedThreadId, socket, state.threads, threadLoadError],
+    [desktopControlAvailable, remoteApi.baseUrl, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
   );
 
   const updateSelectedThreadSettings = useCallback((settings: CreateThreadOptions) => {

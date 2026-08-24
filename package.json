@@ -1,6 +1,6 @@
 {
   "name": "codex-remote",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,9 +14,17 @@
     "test:stack": "pnpm build && tsx scripts/start-test-stack.ts",
     "smoke:app-server": "node scripts/smoke-app-server.mjs",
     "build:mac": "scripts/build-macos-app.sh",
-    "package:dmg": "scripts/package-macos-dmg.sh"
+    "package:dmg": "scripts/package-macos-dmg.sh",
+    "mobile:sync": "pnpm build && cap sync",
+    "build:android": "pnpm mobile:sync && cd android && ./gradlew assembleDebug",
+    "build:ios:sim": "pnpm mobile:sync && scripts/build-ios-simulator.sh",
+    "build:ios:device": "pnpm mobile:sync && scripts/build-ios-unsigned.sh"
   },
   "dependencies": {
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/local-notifications": "^8.3.1",
+    "@capacitor/preferences": "^8.0.1",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "react-markdown": "^10.1.0",
@@ -24,6 +32,9 @@
     "ws": "8.21.0"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
     "@playwright/test": "1.55.1",
     "@testing-library/jest-dom": "6.8.0",
     "@testing-library/react": "16.3.0",

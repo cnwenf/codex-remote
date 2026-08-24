@@ -1,6 +1,7 @@
-name: Release macOS app
+name: Release Codex Remote
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -9,44 +10,42 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-15
+  verify:
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
         with:
           version: 10
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Test
-        run: pnpm check
-
+  macos:
+    needs: verify
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Build ARM64 DMG
         run: |
-          set +e
           export CODEX_REMOTE_NODE_BIN="$(command -v node)"
-          export VERSION="${GITHUB_REF_NAME#v}"
-          scripts/package-macos-dmg.sh 2>&1 | tee build.log
-          build_result=${PIPESTATUS[0]}
-          {
-            echo '## macOS package build'
-            echo '```text'
-            tail -100 build.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit "$build_result"
-
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          else
+            export VERSION="$(node -p "require('./package.json').version")"
+          fi
+          scripts/package-macos-dmg.sh
       - name: Verify package
         run: |
           (cd artifacts && shasum -a 256 -c Codex-Remote-arm64.dmg.sha256)
@@ -56,13 +55,87 @@ jobs:
           file "$mount_dir/Codex Remote.app/Contents/MacOS/Codex Remote" | grep -q arm64
           file "$mount_dir/Codex Remote.app/Contents/Resources/bin/node" | grep -q arm64
           hdiutil detach "$mount_dir" -quiet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            artifacts/Codex-Remote-arm64.dmg
+            artifacts/Codex-Remote-arm64.dmg.sha256
 
+  android:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm mobile:sync
+      - name: Build installable ARM64 debug APK
+        run: cd android && ./gradlew assembleDebug
+      - name: Package and checksum
+        run: |
+          mkdir -p artifacts
+          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts/Codex-Remote-android-arm64.apk
+          (cd artifacts && sha256sum Codex-Remote-android-arm64.apk > Codex-Remote-android-arm64.apk.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            artifacts/Codex-Remote-android-arm64.apk
+            artifacts/Codex-Remote-android-arm64.apk.sha256
+
+  ios-simulator:
+    needs: verify
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm mobile:sync
+      - run: scripts/build-ios-simulator.sh
+      - run: scripts/build-ios-unsigned.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator
+          path: |
+            artifacts/Codex-Remote-iOS-Simulator.zip
+            artifacts/Codex-Remote-iOS-Simulator.zip.sha256
+            artifacts/Codex-Remote-iOS-unsigned.ipa
+            artifacts/Codex-Remote-iOS-unsigned.ipa.sha256
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, android, ios-simulator]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            artifacts/Codex-Remote-arm64.dmg \
-            artifacts/Codex-Remote-arm64.dmg.sha256 \
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Codex Remote $GITHUB_REF_NAME" \
             --generate-notes

@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-store";
 
-export function Timeline({ thread }: { thread?: CodexThread }) {
+type ImageRequest = { baseUrl: string; token: string };
+
+export function Timeline({ thread, imageRequest }: { thread?: CodexThread; imageRequest?: ImageRequest }) {
   if (!thread) {
     return (
       <div className="empty-thread">
@@ -28,13 +30,13 @@ export function Timeline({ thread }: { thread?: CodexThread }) {
     <ol className="timeline" aria-label="对话内容">
       {thread.turnOrder.map((turnId) => {
         const turn = thread.turns[turnId];
-        return turn ? <TurnView key={turnId} turn={turn} /> : null;
+        return turn ? <TurnView key={turnId} turn={turn} imageRequest={imageRequest} /> : null;
       })}
     </ol>
   );
 }
 
-function TurnView({ turn }: { turn: CodexTurn }) {
+function TurnView({ turn, imageRequest }: { turn: CodexTurn; imageRequest?: ImageRequest }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const segments = segmentItems(items);
 
@@ -69,11 +71,11 @@ function TurnView({ turn }: { turn: CodexTurn }) {
               {item.imageIds?.length ? (
                 <div className="message-images">
                   {item.imageIds.map((imageId, index) => (
-                    <img
+                    <AuthenticatedImage
                       key={`${imageId}-${index}`}
-                      src={`/api/images/${encodeURIComponent(imageId)}`}
+                      imageId={imageId}
+                      request={imageRequest}
                       alt={`用户上传的图片 ${index + 1}`}
-                      loading="lazy"
                     />
                   ))}
                 </div>
@@ -98,6 +100,31 @@ function TurnView({ turn }: { turn: CodexTurn }) {
       ) : null}
     </li>
   );
+}
+
+function AuthenticatedImage({ imageId, request, alt }: { imageId: string; request?: ImageRequest; alt: string }) {
+  const fallback = `/api/images/${encodeURIComponent(imageId)}`;
+  const [source, setSource] = useState(request ? undefined : fallback);
+  useEffect(() => {
+    if (!request) { setSource(fallback); return; }
+    let disposed = false;
+    let objectUrl: string | undefined;
+    void fetch(`${request.baseUrl}/api/images/${encodeURIComponent(imageId)}`, {
+      headers: { authorization: `Bearer ${request.token}` },
+    }).then((response) => {
+      if (!response.ok) throw new Error("image-download-failed");
+      return response.blob();
+    }).then((blob) => {
+      if (disposed) return;
+      objectUrl = URL.createObjectURL(blob);
+      setSource(objectUrl);
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [fallback, imageId, request?.baseUrl, request?.token]);
+  return source ? <img src={source} alt={alt} loading="lazy" /> : <span className="image-loading">正在加载图片…</span>;
 }
 
 type TurnSegment =
@@ -126,11 +153,15 @@ function segmentItems(items: CodexItem[]): TurnSegment[] {
 
 export function TodoListDock({ todoList }: { todoList?: CodexThread["todoList"] }) {
   const [open, setOpen] = useState(false);
-  if (!todoList || todoList.items.length === 0) return null;
+  if (
+    !todoList ||
+    todoList.items.length === 0 ||
+    todoList.items.every((item) => item.status === "completed")
+  ) return null;
 
   const completed = todoList.items.filter((item) => item.status === "completed").length;
   const activeIndex = todoList.items.findIndex((item) => item.status !== "completed");
-  const current = activeIndex === -1 ? todoList.items.length : activeIndex + 1;
+  const current = activeIndex + 1;
 
   return (
     <div className="todo-list-dock">
@@ -141,7 +172,7 @@ export function TodoListDock({ todoList }: { todoList?: CodexThread["todoList"] 
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <span className={`run-indicator ${completed === todoList.items.length ? "" : "run-inProgress"}`} aria-hidden="true" />
+        <span className="run-indicator run-inProgress" aria-hidden="true" />
         第 {current}/{todoList.items.length} 步
       </button>
       {open ? (

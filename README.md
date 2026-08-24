@@ -25,6 +25,18 @@ curl -fsSL https://raw.githubusercontent.com/cnwenf/codex-remote/main/install.sh
 
 安装器最后会显示访问 URL，例如 `http://192.168.1.20:4321`。在手机浏览器打开并输入安装时设置的密码。登录 Cookie 默认保留 30 天，多个浏览器可以同时连接。
 
+## Android 与 iPhone 客户端
+
+从 [GitHub Releases](https://github.com/cnwenf/codex-remote/releases) 下载移动端构建产物：
+
+- `Codex-Remote-android-arm64.apk`：适用于 ARM64 Android 手机，可直接安装；首次运行请允许通知。
+- `Codex-Remote-iOS-Simulator.zip`：无需签名的 iPhone Simulator 构建，用于开发和验收。
+- `Codex-Remote-iOS-unsigned.ipa`：已编译的 iPhone 真机 ARM64 包，但未签名，安装前必须使用自己的 Apple Developer Team 重新签名；仓库不包含证书或描述文件。
+
+客户端复用 Web 对话界面。首次打开后点“新建连接”，输入名称、Mac 私网访问 URL（例如 `http://192.168.1.20:4321`）和 Web 登录密码。可保存多个连接，之后直接点击进入，也可编辑或删除；密码保存在 Android Keystore 或 iOS Keychain，不写入普通偏好设置。
+
+Android 会用常驻低优先级通知显示当前运行中的任务，并在任务完成或失败时通知；点击通知会直接进入对应连接和对话。iOS 会在系统允许的后台刷新时更新运行状态和完成通知；iOS 不保证固定轮询频率，生产环境需要为 `CodexRemoteNativePlugin` 接入 APNs 才能获得可靠、即时的锁屏通知。
+
 ## 通过 Codex 对话安装
 
 把下面整段 Prompt 复制给 Codex：
@@ -69,3 +81,4 @@ curl -fsS http://127.0.0.1:4321/health
 - 安装器必须成功校验 GitHub Release 中的 SHA-256 才会安装。
 - 只在可信本地私网中使用，不要做公网端口映射。
 - `4321` 只绑定所选本地私网地址和 `127.0.0.1`；`9229` 只绑定 `127.0.0.1`。
+- 移动端只允许 HTTP 连接数值 IP、`localhost` 或 `.local` 主机；鉴权密码仅通过 `Authorization` Header 发送，不进入 URL。

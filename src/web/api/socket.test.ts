@@ -162,6 +162,26 @@ describe("CodexSocket", () => {
     expect(sessions.at(-1)).toBe("ready");
   });
 
+  it("reuses the in-memory token protocol for native reconnects", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeBrowserSocket[] = [];
+    const protocols: string[][] = [];
+    const socket = new CodexSocket((_url, value) => {
+      protocols.push(value);
+      const next = new FakeBrowserSocket();
+      sockets.push(next);
+      return next;
+    }, { reconnectDelaysMs: [10], random: () => 0.5 });
+
+    await socket.connect("native-secret", "ws://remote/rpc", true);
+    sockets[0].close();
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(protocols).toHaveLength(2);
+    expect(protocols[1]).toEqual(protocols[0]);
+    expect(protocols[1]).toEqual(["codex-local", expect.stringMatching(/^token\./)]);
+  });
+
   it("backs off after a failed reconnect and retries immediately when the network returns", async () => {
     vi.useFakeTimers();
     const sockets: FakeBrowserSocket[] = [];
