@@ -9,6 +9,7 @@ export type CodexItem = {
   type: string;
   text: string;
   status?: string;
+  imageIds?: string[];
 };
 
 export type CodexTurn = {

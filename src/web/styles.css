@@ -204,6 +204,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .message-user { width: fit-content; max-width: min(100%, 72ch); margin-left: auto; padding: 12px 15px; border-radius: 14px; background: var(--surface-muted); }
 .message-user .message-author { display: none; }
 .message-user .markdown-body { margin: 0; }
+.message-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin-top: 9px; }
+.message-images img { display: block; width: 100%; max-width: 420px; max-height: 420px; border-radius: 10px; object-fit: contain; background: var(--surface); }
 .message-agent { padding: 4px 2px; }
 .message-pending { color: var(--ink-muted); }
 .markdown-body > :first-child { margin-top: 0; }

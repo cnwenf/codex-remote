@@ -45,6 +45,18 @@ function TurnView({ turn }: { turn: CodexTurn }) {
         <article key={item.id} className="message message-user">
           <span className="message-author">你</span>
           <MarkdownContent text={item.text || "等待输入…"} />
+          {item.imageIds?.length ? (
+            <div className="message-images">
+              {item.imageIds.map((imageId, index) => (
+                <img
+                  key={`${imageId}-${index}`}
+                  src={`/api/images/${encodeURIComponent(imageId)}`}
+                  alt={`用户上传的图片 ${index + 1}`}
+                  loading="lazy"
+                />
+              ))}
+            </div>
+          ) : null}
         </article>
       ))}
 

@@ -85,6 +85,11 @@ export function createGateway(options: GatewayOptions) {
       void handleImageUpload(request, response);
       return;
     }
+    const imageMatch = pathname.match(/^\/api\/images\/([0-9a-f-]+)$/i);
+    if (imageMatch) {
+      void handleImageDownload(request, response, imageMatch[1]);
+      return;
+    }
     serveStatic(request, response, options.staticDir);
   };
   const httpServer = createServer(handleHttpRequest);
@@ -383,6 +388,34 @@ export function createGateway(options: GatewayOptions) {
       }));
     } catch (cause) {
       const status = cause instanceof ImageUploadError ? cause.status : 400;
+      response.writeHead(status).end();
+    }
+  }
+
+  async function handleImageDownload(
+    request: IncomingMessage,
+    response: ServerResponse,
+    imageId: string,
+  ) {
+    response.setHeader("Cache-Control", "private, max-age=86400");
+    if (request.method !== "GET") {
+      response.writeHead(405, { Allow: "GET" }).end();
+      return;
+    }
+    const providedSession = readCookie(request.headers.cookie, SESSION_COOKIE_NAME);
+    if (!providedSession || !isAuthorized(providedSession, sessionCredential)) {
+      response.writeHead(401).end();
+      return;
+    }
+    try {
+      const image = await imageStore.open(imageId);
+      response.writeHead(200, {
+        "content-type": image.mimeType,
+        "content-length": String(image.size),
+      });
+      createReadStream(image.path).pipe(response);
+    } catch (cause) {
+      const status = cause instanceof ImageUploadError ? cause.status : 404;
       response.writeHead(status).end();
     }
   }

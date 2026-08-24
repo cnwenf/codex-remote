@@ -661,6 +661,7 @@ function hydrateThread(
         type: stringValue(item.type) ?? "item",
         text: extractItemText(item),
         status: stringValue(item.status),
+        imageIds: stringArray(item.imageIds),
       };
     }
     const items = { ...snapshotItems };
@@ -784,6 +785,12 @@ function appendMissing(primary: string[], secondary: string[]) {
 
 function emptyThread(id: string): CodexThread {
   return { id, title: "Untitled task", status: "unknown", turnOrder: [], turns: {} };
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
 }
 
 function rememberThreadSettings(

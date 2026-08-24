@@ -305,6 +305,19 @@ describe("gateway server", () => {
       expect(imageInput?.path).toBe(join(uploadDir, `${uploaded.id}.png`));
       expect(await readFile(imageInput?.path as string)).toEqual(png);
       expect((await stat(imageInput?.path as string)).mode & 0o777).toBe(0o600);
+
+      const rendered = await fetch(
+        `http://127.0.0.1:${address.port}/api/images/${uploaded.id}`,
+        { headers: { cookie: cookie as string } },
+      );
+      expect(rendered.status).toBe(200);
+      expect(rendered.headers.get("content-type")).toBe("image/png");
+      expect(Buffer.from(await rendered.arrayBuffer())).toEqual(png);
+
+      const unauthenticatedRender = await fetch(
+        `http://127.0.0.1:${address.port}/api/images/${uploaded.id}`,
+      );
+      expect(unauthenticatedRender.status).toBe(401);
       socket.close();
       await once(socket, "close");
     } finally {

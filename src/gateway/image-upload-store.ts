@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -41,6 +41,8 @@ const formats = [
   },
 ] as const;
 
+const imageIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export class ImageUploadStore {
   private readonly images = new Map<string, StoredImage>();
 
@@ -75,6 +77,36 @@ export class ImageUploadStore {
     const image = this.images.get(id);
     if (!image) throw new ImageUploadError("image-upload-not-found", 400);
     return image.path;
+  }
+
+  referenceForPath(path: string): string | undefined {
+    const name = basename(path);
+    const extension = formats.find((format) => name.endsWith(format.extension))?.extension;
+    if (!extension) return undefined;
+    const id = name.slice(0, -extension.length);
+    if (!imageIdPattern.test(id) || join(this.root, name) !== path) return undefined;
+    return id;
+  }
+
+  async open(id: string): Promise<StoredImage> {
+    if (!imageIdPattern.test(id)) throw new ImageUploadError("image-upload-not-found", 404);
+    for (const format of formats) {
+      const path = join(this.root, `${id}${format.extension}`);
+      try {
+        const info = await lstat(path);
+        if (!info.isFile() || info.size <= 0 || info.size > MAX_IMAGE_BYTES) continue;
+        return {
+          id,
+          name: `image${format.extension}`,
+          mimeType: format.mimeType,
+          size: info.size,
+          path,
+        };
+      } catch {
+        // Try the next supported extension.
+      }
+    }
+    throw new ImageUploadError("image-upload-not-found", 404);
   }
 }
 

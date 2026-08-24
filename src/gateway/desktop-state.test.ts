@@ -279,6 +279,80 @@ describe("DesktopState", () => {
     state.close();
   });
 
+  it("projects uploaded image references from Desktop user-message events", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const uploadId = "e77e86c9-bc6b-4aaa-9b6a-d87a55f694c1";
+    const uploadRoot = join(dirname(databasePath), "codex-remote", "uploads");
+    mkdirSync(uploadRoot, { recursive: true });
+    appendFileSync(rolloutPath, [
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "user-image",
+          role: "user",
+          content: [
+            { type: "input_text", text: "Inspect this image" },
+            { type: "input_image", image_url: "data:image/jpeg;base64,ignored" },
+          ],
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "Inspect this image",
+          local_images: [join(uploadRoot, `${uploadId}.jpg`)],
+        },
+      },
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+
+    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+
+    expect(result.thread.turns[0].items.at(-1)).toMatchObject({
+      id: "user-image",
+      type: "userMessage",
+      text: "Inspect this image",
+      imageIds: [uploadId],
+    });
+    state.close();
+  });
+
+  it("uses the latest rollout settings instead of stale SQLite composer settings", () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, `${JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "thread_settings_applied",
+        thread_settings: {
+          model: "gpt-new",
+          reasoning_effort: "low",
+          approval_policy: "on-request",
+          approvals_reviewer: "user",
+          permission_profile: { type: "managed" },
+          active_permission_profile: { id: ":workspace" },
+        },
+      },
+    })}\n`);
+    const state = new DesktopState(databasePath);
+
+    expect((state.request("desktopState/listThreads", {}) as any).data[0]).toMatchObject({
+      model: "gpt-new",
+      reasoningEffort: "low",
+      permission: "auto",
+      permissionProfile: ":workspace",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+    });
+    expect(state.request("desktopState/readThread", { threadId: "thread-1" })).toMatchObject({
+      model: "gpt-new",
+      reasoningEffort: "low",
+      permission: "auto",
+    });
+    state.close();
+  });
+
   it("returns only the latest turn for lightweight live polling", () => {
     const { databasePath } = fixture();
     const state = new DesktopState(databasePath);

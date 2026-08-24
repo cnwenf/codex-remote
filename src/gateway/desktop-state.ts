@@ -2,6 +2,7 @@ import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } f
 import { dirname, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { permissionStateFromProtocol } from "../protocol/permissions";
+import { ImageUploadStore } from "./image-upload-store";
 
 const MAX_THREAD_IDS = 100;
 const MAX_THREADS = 500;
@@ -32,7 +33,12 @@ type ThreadRow = {
   recency_at_ms: number | null;
 };
 
-type ParsedItem = { id: string; type: string; text: string; status?: string };
+type ParsedItem = { id: string; type: string; text: string; status?: string; imageIds?: string[] };
+type RolloutSettings = {
+  model?: string;
+  reasoningEffort?: string;
+  permissionProtocol?: Record<string, unknown>;
+};
 type ParsedTurn = {
   id: string;
   status: "inProgress" | "completed" | "interrupted" | "failed";
@@ -47,6 +53,7 @@ export class DesktopState {
   private readonly allowedRolloutRoot: string;
   private readonly globalStatePath: string;
   private readonly sessionIndexPath: string;
+  private readonly imageStore: ImageUploadStore;
   private sessionNamesCache: {
     mtimeMs: number;
     size: number;
@@ -65,12 +72,20 @@ export class DesktopState {
     size: number;
     status: string;
   }>();
+  private readonly settingsCache = new Map<string, {
+    mtimeMs: number;
+    size: number;
+    settings?: RolloutSettings;
+  }>();
 
   constructor(private readonly databasePath: string) {
     this.database = new DatabaseSync(databasePath, { readOnly: true });
     this.allowedRolloutRoot = resolve(dirname(databasePath), "sessions");
     this.globalStatePath = resolve(dirname(databasePath), ".codex-global-state.json");
     this.sessionIndexPath = resolve(dirname(databasePath), "session_index.jsonl");
+    this.imageStore = new ImageUploadStore(
+      resolve(dirname(databasePath), "codex-remote", "uploads"),
+    );
   }
 
   request(method: string, params: unknown) {
@@ -121,13 +136,7 @@ export class DesktopState {
     const atomState = this.readDesktopAtomState();
     const byId = new Map(rows.map((row) => [
       row.id,
-      metadata(
-        row,
-        undefined,
-        pinned?.has(row.id),
-        sessionNames.get(row.id),
-        this.readThreadPermissionProtocol(row, atomState),
-      ),
+      this.threadMetadata(row, undefined, pinned?.has(row.id), sessionNames.get(row.id), atomState),
     ]));
     return threadIds.flatMap((id) => byId.get(id) ?? []);
   }
@@ -151,12 +160,12 @@ export class DesktopState {
           ...pinnedThreadIds.flatMap((id) => rows.find((row) => row.id === id) ?? []),
           ...rows.filter((row) => !pinnedThreadIds.includes(row.id)),
         ];
-    return orderedRows.map((row) => metadata(
+    return orderedRows.map((row) => this.threadMetadata(
       row,
       this.rolloutStatus(row.rollout_path),
       pinned?.has(row.id),
       sessionNames.get(row.id),
-      this.readThreadPermissionProtocol(row, atomState),
+      atomState,
     ));
   }
 
@@ -170,7 +179,8 @@ export class DesktopState {
       ? row.is_pinned === 1
       : pinnedThreadIds.includes(row.id);
     const title = displayTitle(row, this.readSessionThreadNames().get(row.id));
-    const permissionProtocol = this.readThreadPermissionProtocol(row);
+    const latestSettings = this.readRolloutSettings(row.rollout_path);
+    const permissionProtocol = latestSettings?.permissionProtocol ?? this.readThreadPermissionProtocol(row);
     const permissionKey = JSON.stringify(permissionProtocol);
     if (stat.size > MAX_ROLLOUT_BYTES) throw new Error("Desktop thread history is too large");
     const cached = this.rolloutCache.get(threadId);
@@ -179,8 +189,8 @@ export class DesktopState {
       cached.isPinned === isPinned && cached.title === title &&
       cached.permissionKey === permissionKey
     ) return cached.value;
-    const turns = parseRollout(readFileSync(rolloutPath, "utf8"));
-    const value = threadSnapshot(row, turns, isPinned, title, permissionProtocol);
+    const turns = parseRollout(readFileSync(rolloutPath, "utf8"), this.imageStore);
+    const value = threadSnapshot(row, turns, isPinned, title, permissionProtocol, latestSettings);
     this.rolloutCache.set(threadId, {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
@@ -200,14 +210,22 @@ export class DesktopState {
     const before = historyCursor(history.beforeCursor, stat.size);
     const limitTurns = clampInteger(history.limitTurns, DEFAULT_HISTORY_TURNS, 1, MAX_HISTORY_TURNS);
     const maxBytes = clampInteger(history.maxBytes, DEFAULT_HISTORY_BYTES, 64 * 1024, MAX_HISTORY_BYTES);
-    const page = readConversationPage(rolloutPath, before, limitTurns, maxBytes);
+    const page = readConversationPage(rolloutPath, before, limitTurns, maxBytes, this.imageStore);
     const pinnedThreadIds = this.readPinnedThreadIds();
     const isPinned = pinnedThreadIds === undefined
       ? row.is_pinned === 1
       : pinnedThreadIds.includes(row.id);
     const title = displayTitle(row, this.readSessionThreadNames().get(row.id));
+    const latestSettings = this.readRolloutSettings(row.rollout_path);
     return {
-      ...threadSnapshot(row, page.turns, isPinned, title, this.readThreadPermissionProtocol(row)),
+      ...threadSnapshot(
+        row,
+        page.turns,
+        isPinned,
+        title,
+        latestSettings?.permissionProtocol ?? this.readThreadPermissionProtocol(row),
+        latestSettings,
+      ),
       history: page.start > 0
         ? { hasMoreBefore: true, beforeCursor: String(page.start) }
         : { hasMoreBefore: false },
@@ -272,6 +290,58 @@ export class DesktopState {
       };
     }
     return storedPermissionProtocol(row);
+  }
+
+  private threadMetadata(
+    row: ThreadRow,
+    status?: { type: string },
+    pinnedOverride?: boolean,
+    preferredTitle?: string,
+    atomState = this.readDesktopAtomState(),
+  ) {
+    const settings = this.readRolloutSettings(row.rollout_path);
+    return metadata(
+      row,
+      status,
+      pinnedOverride,
+      preferredTitle,
+      settings?.permissionProtocol ?? this.readThreadPermissionProtocol(row, atomState),
+      settings,
+    );
+  }
+
+  private readRolloutSettings(path: string): RolloutSettings | undefined {
+    try {
+      const rolloutPath = this.validateRolloutPath(path);
+      const stat = statSync(rolloutPath);
+      const cached = this.settingsCache.get(rolloutPath);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+        return cached.settings;
+      }
+      if (cached && stat.size >= cached.size) {
+        const appendedBytes = stat.size - cached.size;
+        if (appendedBytes <= MAX_STATUS_APPEND_BYTES) {
+          const appendedSettings = settingsFromRolloutText(
+            readFileRange(rolloutPath, cached.size, appendedBytes),
+          );
+          const settings = appendedSettings ?? cached.settings;
+          this.settingsCache.set(rolloutPath, {
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+            settings,
+          });
+          return settings;
+        }
+      }
+      const length = Math.min(stat.size, STATUS_TAIL_BYTES);
+      const settings = settingsFromRolloutText(
+        readFileRange(rolloutPath, stat.size - length, length),
+      );
+      this.settingsCache.set(rolloutPath, { mtimeMs: stat.mtimeMs, size: stat.size, settings });
+      return settings;
+    } catch {
+      return undefined;
+    }
   }
 
   private readSessionThreadNames() {
@@ -386,7 +456,13 @@ function turnBoundaries(buffer: Buffer, baseOffset: number) {
   return boundaries;
 }
 
-function readConversationPage(path: string, before: number, limitTurns: number, maxBytes: number) {
+function readConversationPage(
+  path: string,
+  before: number,
+  limitTurns: number,
+  maxBytes: number,
+  imageStore: ImageUploadStore,
+) {
   let cursor = before;
   while (cursor > 0) {
     const rangeStart = Math.max(0, cursor - maxBytes);
@@ -409,7 +485,7 @@ function readConversationPage(path: string, before: number, limitTurns: number, 
       : boundaries[0];
     const pageStart = selectedBoundary?.offset ?? alignedStart;
     const pageRelativeStart = Math.max(0, pageStart - rangeStart);
-    const turns = parseRollout(buffer.subarray(pageRelativeStart).toString("utf8"));
+    const turns = parseRollout(buffer.subarray(pageRelativeStart).toString("utf8"), imageStore);
     if (turns.length > 0 || pageStart === 0) return { start: pageStart, turns };
     cursor = pageStart < cursor ? pageStart : rangeStart;
   }
@@ -422,6 +498,7 @@ function threadSnapshot(
   isPinned: boolean,
   title = displayTitle(row),
   permissionProtocol: Record<string, unknown> = storedPermissionProtocol(row),
+  settings?: RolloutSettings,
 ) {
   const active = turns.at(-1)?.status === "inProgress";
   return {
@@ -434,8 +511,9 @@ function threadSnapshot(
       section: isPinned ? { id: "desktop-pinned", name: "Pinned" } : null,
       turns,
     },
-    model: row.model ?? undefined,
-    reasoningEffort: row.reasoning_effort ?? undefined,
+    model: settings?.model ?? row.model ?? undefined,
+    reasoningEffort: settings?.reasoningEffort ?? row.reasoning_effort ?? undefined,
+    ...permissionStateFromProtocol(permissionProtocol),
     ...permissionProtocol,
     sandbox: permissionProtocol.sandboxPolicy,
   };
@@ -469,6 +547,42 @@ function statusFromRolloutText(raw: string) {
   return "unknown";
 }
 
+function settingsFromRolloutText(raw: string): RolloutSettings | undefined {
+  const lines = raw.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let entry: Record<string, unknown>;
+    try { entry = asRecord(JSON.parse(lines[index])); } catch { continue; }
+    if (entry.type !== "event_msg") continue;
+    const payload = asRecord(entry.payload);
+    if (payload.type !== "thread_settings_applied") continue;
+    const settings = asRecord(payload.thread_settings);
+    const activeProfile = asRecord(settings.active_permission_profile);
+    const permissionProfile = asRecord(settings.permission_profile);
+    const permissionType = stringValue(permissionProfile.type);
+    const sandboxPolicy = permissionType === "disabled"
+      ? { type: "dangerFullAccess" }
+      : permissionType === "readOnly" || permissionType === "read-only"
+        ? { type: "readOnly" }
+        : permissionType
+          ? { type: "workspaceWrite" }
+          : undefined;
+    const permissionProtocol = {
+      approvalPolicy: sanitizeApprovalPolicy(settings.approval_policy),
+      approvalsReviewer: stringValue(settings.approvals_reviewer),
+      sandboxPolicy,
+      activePermissionProfile: stringValue(activeProfile.id)
+        ? { id: stringValue(activeProfile.id) }
+        : null,
+    };
+    return {
+      model: stringValue(settings.model),
+      reasoningEffort: stringValue(settings.reasoning_effort),
+      permissionProtocol,
+    };
+  }
+  return undefined;
+}
+
 function incrementalSnapshot(value: unknown) {
   const outer = asRecord(value);
   const thread = asRecord(outer.thread);
@@ -488,6 +602,7 @@ function metadata(
   pinnedOverride?: boolean,
   preferredTitle?: string,
   permissionProtocol: Record<string, unknown> = storedPermissionProtocol(row),
+  settings?: RolloutSettings,
 ) {
   const permission = permissionStateFromProtocol(permissionProtocol);
   return {
@@ -495,8 +610,8 @@ function metadata(
     title: displayTitle(row, preferredTitle),
     cwd: row.cwd,
     isPinned: pinnedOverride ?? row.is_pinned === 1,
-    model: row.model ?? undefined,
-    reasoningEffort: row.reasoning_effort ?? undefined,
+    model: settings?.model ?? row.model ?? undefined,
+    reasoningEffort: settings?.reasoningEffort ?? row.reasoning_effort ?? undefined,
     permission: permission.permission,
     permissionProfile: permission.permissionProfile,
     approvalPolicy: permission.approvalPolicy,
@@ -520,10 +635,11 @@ function displayTitle(
     : `${normalized.slice(0, MAX_TITLE_TEXT)}…`;
 }
 
-function parseRollout(raw: string): ParsedTurn[] {
+function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
   const turns = new Map<string, ParsedTurn>();
   const order: string[] = [];
   let currentTurnId: string | undefined;
+  let pendingUserImageIds: string[] = [];
   const ensureTurn = (id: string) => {
     let turn = turns.get(id);
     if (!turn) {
@@ -551,6 +667,25 @@ function parseRollout(raw: string): ParsedTurn[] {
     if (entry.type === "event_msg") {
       const eventType = stringValue(payload.type);
       const turnId = stringValue(payload.turn_id) ?? currentTurnId;
+      if (eventType === "user_message") {
+        const imageIds = Array.isArray(payload.local_images)
+          ? payload.local_images.flatMap((value) => {
+              const path = stringValue(value);
+              const id = path ? imageStore.referenceForPath(path) : undefined;
+              return id ? [id] : [];
+            })
+          : [];
+        const turn = turnId ? turns.get(turnId) : undefined;
+        const userItem = turn
+          ? [...turn.items].reverse().find((item) => item.type === "userMessage")
+          : undefined;
+        if (userItem && imageIds.length > 0) {
+          userItem.imageIds = [...new Set([...(userItem.imageIds ?? []), ...imageIds])];
+          pendingUserImageIds = [];
+        } else {
+          pendingUserImageIds = imageIds;
+        }
+      }
       if (eventType === "task_started" && turnId) {
         currentTurnId = turnId;
         const turn = ensureTurn(turnId);
@@ -567,8 +702,9 @@ function parseRollout(raw: string): ParsedTurn[] {
     if (entry.type !== "response_item") continue;
     const itemTurnId = stringValue(asRecord(payload.internal_chat_message_metadata_passthrough).turn_id) ?? currentTurnId;
     if (!itemTurnId) continue;
-    const item = rolloutItem(payload);
+    const item = rolloutItem(payload, pendingUserImageIds);
     if (!item) continue;
+    if (item.type === "userMessage") pendingUserImageIds = [];
     const turn = ensureTurn(itemTurnId);
     const index = turn.items.findIndex((candidate) => candidate.id === item.id);
     if (index >= 0) turn.items[index] = item;
@@ -577,7 +713,10 @@ function parseRollout(raw: string): ParsedTurn[] {
   return order.map((id) => turns.get(id) as ParsedTurn).filter((turn) => turn.items.length > 0);
 }
 
-function rolloutItem(payload: Record<string, unknown>): ParsedItem | undefined {
+function rolloutItem(
+  payload: Record<string, unknown>,
+  pendingUserImageIds: string[] = [],
+): ParsedItem | undefined {
   const id = stringValue(payload.id) ?? stringValue(payload.call_id);
   const type = stringValue(payload.type);
   if (!id || !type) return undefined;
@@ -585,8 +724,15 @@ function rolloutItem(payload: Record<string, unknown>): ParsedItem | undefined {
     const role = stringValue(payload.role);
     if (role !== "user" && role !== "assistant") return undefined;
     const text = textContent(payload.content);
-    if (!text) return undefined;
-    return { id, type: role === "user" ? "userMessage" : "agentMessage", text };
+    if (!text && (role !== "user" || pendingUserImageIds.length === 0)) return undefined;
+    return {
+      id,
+      type: role === "user" ? "userMessage" : "agentMessage",
+      text,
+      ...(role === "user" && pendingUserImageIds.length > 0
+        ? { imageIds: pendingUserImageIds }
+        : {}),
+    };
   }
   if (type === "reasoning") {
     const text = textContent(payload.summary) || textContent(payload.content);

@@ -67,4 +67,35 @@ describe("Timeline", () => {
     expect(container.querySelector("code")).toHaveTextContent("pnpm test");
     expect(container.querySelector("script")).toBeNull();
   });
+
+  it("renders authenticated uploaded images in user messages", () => {
+    const thread: CodexThread = {
+      id: "images",
+      title: "Images",
+      status: "idle",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          itemOrder: ["user"],
+          items: {
+            user: {
+              id: "user",
+              type: "userMessage",
+              text: "看这张图",
+              imageIds: ["e77e86c9-bc6b-4aaa-9b6a-d87a55f694c1"],
+            },
+          },
+        },
+      },
+    };
+
+    render(<Timeline thread={thread} />);
+
+    expect(screen.getByRole("img", { name: "用户上传的图片 1" })).toHaveAttribute(
+      "src",
+      "/api/images/e77e86c9-bc6b-4aaa-9b6a-d87a55f694c1",
+    );
+  });
 });
