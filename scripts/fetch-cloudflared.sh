@@ -11,7 +11,8 @@ esac
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/codex-remote-cloudflared.XXXXXX")
 trap 'rm -rf "$work"' EXIT
-/usr/bin/curl -fsSL --proto '=https' --tlsv1.2 \
+CURL_OPTIONS=(-fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)
+/usr/bin/curl "${CURL_OPTIONS[@]}" \
   https://api.github.com/repos/cloudflare/cloudflared/releases/latest -o "$work/release.json"
 metadata=$(/usr/bin/python3 - "$work/release.json" "$ASSET" <<'PY'
 import json, sys
@@ -25,7 +26,7 @@ PY
 )
 url=${metadata%%$'\n'*}
 digest=${metadata##*$'\n'}
-/usr/bin/curl -fsSL --proto '=https' --tlsv1.2 "$url" -o "$work/$ASSET"
+/usr/bin/curl "${CURL_OPTIONS[@]}" "$url" -o "$work/$ASSET"
 actual=$(/usr/bin/shasum -a 256 "$work/$ASSET" | /usr/bin/awk '{print $1}')
 [[ "$actual" == "$digest" ]] || { print -u2 "cloudflared SHA-256 mismatch"; exit 1; }
 /usr/bin/tar -xzf "$work/$ASSET" -C "$work"

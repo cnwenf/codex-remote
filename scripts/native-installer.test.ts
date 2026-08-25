@@ -25,6 +25,8 @@ describe("native installer contract", () => {
     expect(fetchTunnel).toContain("api.github.com/repos/cloudflare/cloudflared/releases/latest");
     expect(fetchTunnel).toContain("digest");
     expect(fetchTunnel).toContain("shasum -a 256");
+    expect(fetchTunnel).toContain("--retry 5 --retry-all-errors");
+    expect(fetchTunnel).toContain("--connect-timeout 20");
     expect(appSource).toContain('"ConnectionMode"] as? String) == "public"');
     expect(appSource).toContain("trycloudflare\\.com");
   });
