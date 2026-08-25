@@ -77,6 +77,51 @@ describe("useCodex", () => {
     });
   });
 
+  it("does not let a stale idle list snapshot overwrite an active turn", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    async function refreshWithIdleSnapshot() {
+      let refresh: Promise<void>;
+      act(() => { refresh = result.current.refreshThreads(); });
+      const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+      fake.serverSend({
+        type: "rpc",
+        payload: { id: listRequest.id, result: { data: [{ id: "t1", name: "Task", status: { type: "idle" } }] } },
+      });
+      await waitFor(() => expect(JSON.parse(fake.sent.at(-1) as string).payload.method).toBe("desktopState/listThreads"));
+      const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+      fake.serverSend({
+        type: "rpc",
+        payload: { id: metadataRequest.id, result: { data: [{ id: "t1", title: "Task" }] } },
+      });
+      await act(() => refresh);
+    }
+
+    await refreshWithIdleSnapshot();
+    act(() => {
+      fake.serverSend({
+        type: "rpc",
+        payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "live-turn" } } },
+      });
+    });
+    expect(result.current.state.threads.t1).toMatchObject({ status: "running", activeTurnId: "live-turn" });
+
+    await refreshWithIdleSnapshot();
+    expect(result.current.state.threads.t1).toMatchObject({ status: "running", activeTurnId: "live-turn" });
+
+    act(() => {
+      fake.serverSend({
+        type: "rpc",
+        payload: { method: "turn/completed", params: { threadId: "t1", turn: { id: "live-turn", status: "completed" } } },
+      });
+    });
+    await refreshWithIdleSnapshot();
+    expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined });
+  });
+
   it("keeps the Desktop snapshot visible while the live bridge is read-only", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

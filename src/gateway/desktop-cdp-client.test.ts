@@ -82,6 +82,8 @@ describe("DesktopCdpClient", () => {
       "Runtime.evaluate",
       "Runtime.callFunctionOn",
     ]);
+    expect(String(server.ownerRequests[1]?.params?.expression))
+      .toContain("__codexRemoteRequestThreadOwnerVersion");
     expect(server.ownerRequests.at(-1)?.params?.arguments).toEqual([
       { value: "thread-follower-update-thread-settings" },
       { value: { conversationId: "thread-1", threadSettings: { model: "gpt-test" } } },

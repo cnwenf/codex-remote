@@ -39,10 +39,23 @@ describe("native installer contract", () => {
     expect(installer).toContain('chmod 600 "$support/token"');
   });
 
-  it("uses explicit persistent agents and never launchctl submit", () => {
+  it("starts at login without relaunching a deliberately closed menu app", () => {
     expect(agents).toContain("RunAtLoad");
-    expect(agents).toContain("KeepAlive");
+    expect(agents).toContain('render "$APP_PLIST" local.codex-remote.app false');
+    expect(agents).toContain('render "$DESKTOP_PLIST" local.codex-remote.desktop true');
     expect(`${installer}\n${agents}`).not.toMatch(/launchctl\s+submit/);
+  });
+
+  it("removes pre-rename launch agents that can keep relaunching ChatGPT", () => {
+    expect(agents).toContain("local.codex-web.desktop local.codex-web.gateway");
+    expect(agents).toContain('bootout "$DOMAIN/$legacy_label"');
+    expect(agents).toContain('/bin/rm -f "$AGENTS/$legacy_label.plist"');
+  });
+
+  it("replaces only a stale bundled gateway process after an app restart", () => {
+    expect(gatewayLauncher).toContain("CODEX_REMOTE_GATEWAY_PID_FILE");
+    expect(gatewayLauncher).toContain('"$RESOURCES/gateway/index.mjs"');
+    expect(gatewayLauncher).toContain("kill -TERM");
   });
 
   it("ships executable install and packaging scripts", () => {

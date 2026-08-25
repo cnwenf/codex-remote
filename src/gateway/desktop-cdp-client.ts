@@ -709,7 +709,8 @@ function visibleThreadSettingsHelperExpression(): string {
 
 function ownerHelperExpression(): string {
   return `(() => {
-    if (!window.__codexRemoteRequestThreadOwner) {
+    if (window.__codexRemoteRequestThreadOwnerVersion !== 2) {
+      window.__codexRemoteRequestThreadOwnerVersion = 2;
       let coordinationPromise;
       const getCoordination = async () => {
         if (coordinationPromise) return coordinationPromise;
@@ -739,18 +740,24 @@ function ownerHelperExpression(): string {
         return coordinationPromise;
       };
       window.__codexRemoteRequestThreadOwner = async (method, params) => {
-        const coordination = await getCoordination();
-        const conversationId = params?.conversationId;
-        if (typeof conversationId !== 'string') throw new Error('desktop-thread-id-invalid');
-        const ownerClientId = await coordination.findThreadOwner({ hostId: 'local', conversationId });
-        if (!ownerClientId) throw new Error('desktop-thread-owner-unavailable');
-        const response = await coordination.requestThreadFollower({
-          request: { method, params },
-          targetClientId: ownerClientId,
-          timeoutMs: 30000,
-        });
-        if (response?.resultType === 'error') throw new Error(response.error || 'desktop-thread-owner-request-failed');
-        return response?.result;
+        try {
+          const coordination = await getCoordination();
+          const conversationId = params?.conversationId;
+          if (typeof conversationId !== 'string') throw new Error('desktop-thread-id-invalid');
+          const ownerClientId = await coordination.findThreadOwner({ hostId: 'local', conversationId });
+          if (!ownerClientId) throw new Error('desktop-thread-owner-unavailable');
+          const response = await coordination.requestThreadFollower({
+            request: { method, params },
+            targetClientId: ownerClientId,
+            timeoutMs: 5000,
+          });
+          if (response?.resultType === 'error') throw new Error(response.error || 'desktop-thread-owner-request-failed');
+          return response?.result;
+        } catch (error) {
+          // Renderer changes can leave both the coordination port and owner id stale.
+          coordinationPromise = undefined;
+          throw error;
+        }
       };
     }
     return window;

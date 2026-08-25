@@ -423,6 +423,7 @@ function unwrapOwnerResponse(value: unknown) {
 function isOwnerUnavailable(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
   return message.includes("desktop-thread-owner-unavailable") ||
+    message.endsWith("Error: timeout") ||
     message.includes("desktop-owner-module-not-found") ||
     message.includes("desktop-owner-rpc-factory-not-found") ||
     message.includes("desktop-owner-coordination-unavailable") ||

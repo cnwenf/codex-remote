@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     process.arguments = [isPublic ? "127.0.0.1" : hostField.stringValue, "4321"]
     var env = ProcessInfo.processInfo.environment
     env["ACCESS_TOKEN_FILE"] = support.appendingPathComponent("token").path
+    env["CODEX_REMOTE_GATEWAY_PID_FILE"] = support.appendingPathComponent("gateway.pid").path
     env["CODEX_REMOTE_PUBLIC_TUNNEL"] = isPublic ? "1" : "0"
     process.environment = env; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
     do {

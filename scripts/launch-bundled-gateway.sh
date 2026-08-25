@@ -6,6 +6,28 @@ PORT=${2:-4321}
 APP_PATH=${CODEX_DESKTOP_APP_PATH:-/Applications/ChatGPT.app}
 CDP_ENDPOINT=http://127.0.0.1:9229
 TOKEN_FILE=${ACCESS_TOKEN_FILE:-$HOME/Library/Application Support/Codex Remote/token}
+PID_FILE=${CODEX_REMOTE_GATEWAY_PID_FILE:-$HOME/Library/Application Support/Codex Remote/gateway.pid}
+
+if [[ -f "$PID_FILE" ]]; then
+  OLD_PID=$(<"$PID_FILE")
+  if [[ "$OLD_PID" == <-> ]] && /bin/kill -0 "$OLD_PID" >/dev/null 2>&1; then
+    OLD_COMMAND=$(/bin/ps -p "$OLD_PID" -o command= 2>/dev/null || true)
+    if [[ "$OLD_COMMAND" == *"$RESOURCES/gateway/index.mjs"* ]]; then
+      /bin/kill -TERM "$OLD_PID"
+      for _ in {1..30}; do
+        /bin/kill -0 "$OLD_PID" >/dev/null 2>&1 || break
+        sleep 0.1
+      done
+      /bin/kill -0 "$OLD_PID" >/dev/null 2>&1 && {
+        print -u2 "The previous bundled gateway did not stop"
+        exit 1
+      }
+    fi
+  fi
+fi
+umask 077
+print -r -- "$$" > "$PID_FILE.tmp"
+/bin/mv -f "$PID_FILE.tmp" "$PID_FILE"
 
 for _ in {1..120}; do
   /usr/bin/curl -fsS "$CDP_ENDPOINT/json/list" >/dev/null 2>&1 && break

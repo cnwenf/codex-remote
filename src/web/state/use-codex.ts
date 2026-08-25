@@ -751,7 +751,9 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
         numberValue(desktop?.updatedAt) ??
         numberValue(record.updatedAt) ??
         numberValue(record.updated_at),
-      status: normalizeStatus(record.status, current?.status),
+      // thread/list can lag behind the live event stream. Keep an acknowledged
+      // active turn running until turn/completed clears activeTurnId.
+      status: current?.activeTurnId ? "running" : normalizeStatus(record.status, current?.status),
       turnOrder: current?.turnOrder ?? [],
       turns: current?.turns ?? {},
       diff: current?.diff,

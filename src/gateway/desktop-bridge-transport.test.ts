@@ -267,6 +267,24 @@ describe("DesktopBridgeTransport", () => {
     await transport.stop();
   });
 
+  it("falls back when Desktop reports a stale thread owner timeout", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    client.ownerRequestError = new Error("desktop-thread-owner-request-failed:Error: timeout");
+    transport.send({
+      id: 24,
+      method: "turn/steer",
+      params: { threadId: "thread-stale", input: [{ type: "text", text: "Continue" }] },
+    });
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    expect(client.sent[0]).toMatchObject({
+      type: "mcp-request",
+      request: { id: 24, method: "turn/steer" },
+    });
+    expect(messages).toEqual([]);
+    await transport.stop();
+  });
+
   it("becomes read-only when the renderer disconnects", async () => {
     const { client, diagnostics, transport } = await createStartedTransport();
     expect(transport.state).toBe("live");

@@ -232,6 +232,7 @@ lines.on("line", (line) => {
         method: "turn/completed",
         params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn", status: "completed" } },
       });
+      approvalDeclines = 0;
     }
   }
 });
