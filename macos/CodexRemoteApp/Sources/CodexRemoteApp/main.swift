@@ -10,6 +10,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var tunnel: Process?
   private var tunnelOutput: Pipe?
   private var publicURL: String?
+  private var serviceGeneration = 0
+  private var gatewayRestart: DispatchWorkItem?
+  private var tunnelRestart: DispatchWorkItem?
+  private var tunnelRestartAttempt = 0
+  private var tunnelLogBuffer = ""
   private let support = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/Codex Remote", isDirectory: true)
   private var passwordField = NSSecureTextField()
@@ -17,12 +22,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var statusLabel = NSTextField(labelWithString: "Stopped")
   private var toggle = NSButton(checkboxWithTitle: "Remote enabled", target: nil, action: nil)
   private var connectionMode = NSPopUpButton()
+  private var updateController: UpdateController!
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
     configureMenu()
     configureWindow()
     loadConfiguration()
+    let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    updateController = UpdateController(currentVersion: version) { [weak self] message in self?.statusLabel.stringValue = message }
+    writeUpdateReadiness(version: version)
     if toggle.state == .on { startGateway() }
   }
 
@@ -106,10 +115,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard let url = URL(string: value) else { return }
     NSWorkspace.shared.open(url)
   }
-  @objc private func checkForUpdates() { NSWorkspace.shared.open(URL(string: "https://github.com/cnwenf/codex-remote/releases/latest")!) }
+  @objc private func checkForUpdates() { updateController.checkAndInstall() }
+  private func writeUpdateReadiness(version: String) {
+    try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try? version.write(to: support.appendingPathComponent("update-ready"), atomically: true, encoding: .utf8)
+  }
   private func restartGateway() { stopGateway(); if toggle.state == .on { startGateway() } }
   private func startGateway() {
     guard gateway == nil else { return }
+    let generation = serviceGeneration
     let resources = Bundle.main.resourceURL!
     let process = Process(); process.executableURL = resources.appendingPathComponent("launch-gateway.sh")
     let isPublic = connectionMode.indexOfSelectedItem == 1
@@ -119,13 +133,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     env["CODEX_REMOTE_GATEWAY_PID_FILE"] = support.appendingPathComponent("gateway.pid").path
     env["CODEX_REMOTE_PUBLIC_TUNNEL"] = isPublic ? "1" : "0"
     process.environment = env; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+    process.terminationHandler = { [weak self, weak process] _ in
+      guard let process else { return }
+      Task { @MainActor in self?.gatewayDidExit(process, generation: generation) }
+    }
     do {
       try process.run(); gateway = process
       if isPublic { startTunnel() }
       else { statusLabel.stringValue = "Running at \(effectiveRemoteURL())" }
     } catch { statusLabel.stringValue = "Failed: \(error.localizedDescription)" }
   }
-  private func stopGateway() { stopTunnel(); gateway?.terminate(); gateway = nil; statusLabel.stringValue = "Stopped" }
+  private func stopGateway() {
+    serviceGeneration += 1
+    gatewayRestart?.cancel(); gatewayRestart = nil
+    tunnelRestart?.cancel(); tunnelRestart = nil
+    stopTunnel()
+    gateway?.terminationHandler = nil
+    gateway?.terminate(); gateway = nil
+    statusLabel.stringValue = "Stopped"
+  }
+
+  private func gatewayDidExit(_ process: Process, generation: Int) {
+    guard gateway === process else { return }
+    gateway = nil
+    stopTunnel()
+    guard generation == serviceGeneration, toggle.state == .on else { return }
+    statusLabel.stringValue = "Gateway stopped; reconnecting…"
+    let work = DispatchWorkItem { [weak self] in
+      Task { @MainActor in self?.startGateway() }
+    }
+    gatewayRestart = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+  }
 
   private func effectiveRemoteURL() -> String {
     publicURL ?? "http://\(hostField.stringValue):4321"
@@ -133,11 +172,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private func startTunnel() {
     guard tunnel == nil else { return }
+    let generation = serviceGeneration
     let binary = Bundle.main.resourceURL!.appendingPathComponent("bin/cloudflared")
     guard FileManager.default.isExecutableFile(atPath: binary.path) else {
       statusLabel.stringValue = "Public HTTPS helper is unavailable in this build"; return
     }
     publicURL = nil
+    tunnelLogBuffer = ""
     let output = Pipe()
     let process = Process()
     process.executableURL = binary
@@ -146,17 +187,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     process.standardError = output
     output.fileHandleForReading.readabilityHandler = { [weak self] handle in
       let text = String(decoding: handle.availableData, as: UTF8.self)
-      guard let match = text.range(of: #"https://[a-z0-9-]+\.trycloudflare\.com"#, options: .regularExpression) else { return }
-      let url = String(text[match])
-      Task { @MainActor in self?.publicURL = url; self?.statusLabel.stringValue = "Running at \(url)" }
+      guard !text.isEmpty else { return }
+      Task { @MainActor in self?.consumeTunnelOutput(text) }
+    }
+    process.terminationHandler = { [weak self, weak process] _ in
+      guard let process else { return }
+      Task { @MainActor in self?.tunnelDidExit(process, generation: generation) }
     }
     do { try process.run(); tunnel = process; tunnelOutput = output; statusLabel.stringValue = "Starting public HTTPS…" }
     catch { statusLabel.stringValue = "Public HTTPS failed: \(error.localizedDescription)" }
   }
 
-  private func stopTunnel() {
+  private func consumeTunnelOutput(_ text: String) {
+    tunnelLogBuffer = String((tunnelLogBuffer + text).suffix(16_384))
+    guard let match = tunnelLogBuffer.range(of: #"https://[a-z0-9-]+\.trycloudflare\.com"#, options: .regularExpression) else { return }
+    let url = String(tunnelLogBuffer[match])
+    publicURL = url
+    tunnelRestartAttempt = 0
+    statusLabel.stringValue = "Running at \(url)"
+  }
+
+  private func tunnelDidExit(_ process: Process, generation: Int) {
+    guard tunnel === process else { return }
     tunnelOutput?.fileHandleForReading.readabilityHandler = nil
+    tunnel = nil; tunnelOutput = nil; publicURL = nil
+    guard generation == serviceGeneration, toggle.state == .on,
+          connectionMode.indexOfSelectedItem == 1, gateway?.isRunning == true else { return }
+    tunnelRestartAttempt += 1
+    let delay = min(pow(2.0, Double(tunnelRestartAttempt - 1)), 30)
+    statusLabel.stringValue = "Public HTTPS disconnected; retrying in \(Int(delay))s…"
+    let work = DispatchWorkItem { [weak self] in
+      Task { @MainActor in self?.startTunnel() }
+    }
+    tunnelRestart = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+  }
+
+  private func stopTunnel() {
+    tunnelRestart?.cancel(); tunnelRestart = nil
+    tunnelOutput?.fileHandleForReading.readabilityHandler = nil
+    tunnel?.terminationHandler = nil
     tunnel?.terminate(); tunnel = nil; tunnelOutput = nil; publicURL = nil
+    tunnelLogBuffer = ""
   }
 
   @objc private func showPairingQR() {
@@ -204,6 +276,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)) else { return nil }
     let representation = NSCIImageRep(ciImage: output)
     let image = NSImage(size: representation.size); image.addRepresentation(representation); return image
+  }
+}
+
+if CommandLine.arguments.contains("--self-test") {
+  do {
+    try runUpdateSelfTest(requirePackagedResources: Bundle.main.bundleURL.pathExtension == "app")
+    print("Codex Remote self-test passed (\(try currentArchitecture()))")
+    exit(0)
+  } catch {
+    fputs("Codex Remote self-test failed: \(error.localizedDescription)\n", stderr)
+    exit(1)
   }
 }
 

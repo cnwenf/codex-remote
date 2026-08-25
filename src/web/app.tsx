@@ -54,14 +54,52 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     )
       .then(async () => {
         await refreshConnectedState();
-        if (remote?.requestedThreadId) await codex.selectThread(remote.requestedThreadId);
+        if (remote?.requestedThreadId) {
+          pushView("thread", remote.requestedThreadId);
+          await codex.selectThread(remote.requestedThreadId);
+        }
       })
       .catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    if (!asRemoteView(window.history.state)) {
+      window.history.replaceState({ ...historyRecord(window.history.state), codexRemoteView: "list" }, "");
+    }
+    const handleBack = () => {
+      setComposerExpanded(false);
+      setShowNewConversation(false);
+      codex.clearSelection();
+    };
+    window.addEventListener("popstate", handleBack);
+    return () => window.removeEventListener("popstate", handleBack);
+  }, [codex.clearSelection]);
+
+  function pushView(view: "thread" | "new", threadId?: string) {
+    if (asRemoteView(window.history.state) === view &&
+        (view !== "thread" || historyRecord(window.history.state).codexRemoteThreadId === threadId)) return;
+    window.history.pushState({
+      ...historyRecord(window.history.state),
+      codexRemoteView: view,
+      ...(threadId ? { codexRemoteThreadId: threadId } : {}),
+    }, "");
+  }
+
+  function returnToList() {
+    setComposerExpanded(false);
+    const view = asRemoteView(window.history.state);
+    if (view === "thread" || view === "new") {
+      window.history.back();
+      return;
+    }
+    setShowNewConversation(false);
+    codex.clearSelection();
+  }
+
   function selectThread(id: string) {
     setComposerExpanded(false);
     setShowNewConversation(false);
+    pushView("thread", id);
     void codex.selectThread(id).catch(() => undefined);
   }
 
@@ -69,10 +107,16 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     setComposerExpanded(false);
     codex.clearSelection();
     setShowNewConversation(true);
+    pushView("new");
   }
 
   async function createThread(options: CreateThreadOptions) {
-    await codex.createThread(options);
+    const id = await codex.createThread(options);
+    if (id) window.history.replaceState({
+      ...historyRecord(window.history.state),
+      codexRemoteView: "thread",
+      codexRemoteThreadId: id,
+    }, "");
     setShowNewConversation(false);
   }
 
@@ -135,6 +179,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
           <aside className="sidebar">
             <TaskList
               threads={threads}
+              archivedThreads={codex.archivedThreads}
+              archivedLoading={codex.archivedThreadsLoading}
               directCwd={codex.defaultCwd}
               selectedId={codex.selectedThreadId}
               onSelect={selectThread}
@@ -145,6 +191,16 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               onArchive={codex.desktopStateAvailable && !codex.desktopControlAvailable
                 ? undefined
                 : (id) => void codex.archiveThread(id).catch(() => undefined)}
+              onRename={codex.desktopStateAvailable && !codex.desktopControlAvailable
+                ? undefined
+                : codex.renameThread}
+              onUnarchive={codex.desktopStateAvailable && !codex.desktopControlAvailable
+                ? undefined
+                : codex.unarchiveThread}
+              onDelete={codex.desktopStateAvailable && !codex.desktopControlAvailable
+                ? undefined
+                : codex.deleteThread}
+              onLoadArchived={codex.refreshArchivedThreads}
             />
           </aside>
 
@@ -162,7 +218,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 onProjectChange={(cwd) => codex.refreshCreationOptions(cwd || undefined)}
                 onRetry={(cwd) => codex.refreshCreationOptions(cwd || undefined)}
                 onCreate={createThread}
-                onCancel={() => setShowNewConversation(false)}
+                onCancel={returnToList}
               />
             ) : codex.selectedThread ? (
               <>
@@ -170,7 +226,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 <button
                   type="button"
                   className="back-button"
-                  onClick={codex.clearSelection}
+                  onClick={returnToList}
                   aria-label="返回对话列表"
                 >
                   ‹
@@ -261,6 +317,15 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
       ) : null}
     </main>
   );
+}
+
+function historyRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function asRemoteView(value: unknown) {
+  const view = historyRecord(value).codexRemoteView;
+  return view === "list" || view === "thread" || view === "new" ? view : undefined;
 }
 
 function statusLabel(status: "running" | "idle" | "error" | "unknown") {

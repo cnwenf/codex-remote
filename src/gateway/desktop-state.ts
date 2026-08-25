@@ -114,7 +114,7 @@ export class DesktopState {
 
   request(method: string, params: unknown) {
     if (method === "desktopState/listThreads") {
-      return { data: this.listThreads() };
+      return { data: this.listThreads(asRecord(params).archived === true) };
     }
     if (method === "desktopState/listThreadMetadata") {
       return { data: this.listThreadMetadata(asThreadIds(params)) };
@@ -166,21 +166,21 @@ export class DesktopState {
     return threadIds.flatMap((id) => byId.get(id) ?? []);
   }
 
-  private listThreads() {
+  private listThreads(archived = false) {
     const rows = this.database.prepare(`SELECT id, rollout_path, name, title, preview, cwd,
       is_pinned, model, reasoning_effort, sandbox_policy, approval_mode,
       updated_at_ms, recency_at_ms
       FROM threads
-      WHERE archived = 0
+      WHERE archived = ?
         AND (thread_source IS NULL OR thread_source <> 'subagent')
       ORDER BY COALESCE(recency_at_ms, updated_at_ms, created_at_ms) DESC
-      LIMIT ?`).all(MAX_THREADS) as ThreadRow[];
+      LIMIT ?`).all(archived ? 1 : 0, MAX_THREADS) as ThreadRow[];
     const pinnedThreadIds = this.readPinnedThreadIds();
     const pinned = pinnedThreadIds === undefined ? undefined : new Set(pinnedThreadIds);
     const sessionNames = this.readSessionThreadNames();
     const atomState = this.readDesktopAtomState();
     const projects = this.readDesktopProjects();
-    const orderedRows = pinnedThreadIds === undefined
+    const orderedRows = archived || pinnedThreadIds === undefined
       ? rows
       : [
           ...pinnedThreadIds.flatMap((id) => rows.find((row) => row.id === id) ?? []),
@@ -189,7 +189,7 @@ export class DesktopState {
     return orderedRows.map((row) => this.threadMetadata(
       row,
       this.rolloutStatus(row.rollout_path),
-      pinned?.has(row.id),
+      archived ? false : pinned?.has(row.id),
       sessionNames.get(row.id),
       atomState,
       projects,

@@ -4,5 +4,7 @@ import PackageDescription
 let package = Package(
   name: "CodexRemoteApp",
   platforms: [.macOS(.v13)],
-  targets: [.executableTarget(name: "CodexRemoteApp")]
+  targets: [
+    .executableTarget(name: "CodexRemoteApp"),
+  ]
 )

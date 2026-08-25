@@ -120,6 +120,23 @@ describe("DesktopCdpClient", () => {
     await client.stop();
   });
 
+  it("reads the visible Desktop composer settings for live E2E verification", async () => {
+    server = new FakeCdpServer();
+    const endpoint = await server.start();
+    const client = new DesktopCdpClient({ endpoint });
+    await client.start(() => undefined, () => undefined);
+
+    await expect(client.inspectVisibleThreadSettings()).resolves.toEqual({
+      conversationId: "thread-1",
+      permissionLabel: "完全访问",
+      modelLabel: "5.6 Sol",
+      reasoningEffort: "high",
+    });
+    await expect(client.visibleConversationContainsText("visible steer")).resolves.toBe(true);
+    await expect(client.visibleConversationContainsText("missing steer")).resolves.toBe(false);
+    await client.stop();
+  });
+
   it("rejects a non-loopback DevTools endpoint", async () => {
     const client = new DesktopCdpClient({ endpoint: "http://192.0.2.8:9222" });
     await expect(client.start(() => undefined, () => undefined))

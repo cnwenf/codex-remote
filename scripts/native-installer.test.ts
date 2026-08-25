@@ -29,6 +29,8 @@ describe("native installer contract", () => {
     expect(fetchTunnel).toContain("--connect-timeout 20");
     expect(appSource).toContain('"ConnectionMode"] as? String) == "public"');
     expect(appSource).toContain("trycloudflare\\.com");
+    expect(appSource).toContain("Public HTTPS disconnected; retrying");
+    expect(appSource).toContain("tunnelDidExit");
   });
 
   it("creates one-time pairing QR codes without embedding the password", () => {
@@ -83,5 +85,16 @@ describe("native installer contract", () => {
   it("opens the Remote Web page when the running Dock app is clicked", () => {
     expect(appSource).toContain("applicationShouldHandleReopen");
     expect(appSource).toContain("openBrowser()");
+  });
+
+  it("ships an in-app rollback updater instead of only opening Releases", () => {
+    const updateSource = readFileSync(join(root, "macos/CodexRemoteApp/Sources/CodexRemoteApp/UpdateSupport.swift"), "utf8");
+    const updateScript = readFileSync(join(root, "scripts/perform-macos-update.sh"), "utf8");
+    expect(appSource).toContain("updateController.checkAndInstall()");
+    expect(updateSource).toContain("checksumMismatch");
+    expect(updateSource).toContain("codesign");
+    expect(updateSource).toContain("currentArchitecture()");
+    expect(updateScript).toContain("restored previous app");
+    expect(buildScript).toContain("perform-macos-update.sh");
   });
 });

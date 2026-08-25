@@ -6,6 +6,8 @@ let approvalDeclines = 0;
 const loadedThreads = new Set();
 const pinnedThreads = new Set();
 const archivedThreads = new Set();
+const deletedThreads = new Set();
+const threadNames = new Map();
 const pinnedSection = { id: "fixture-pinned-section", name: "Pinned", appearance: null };
 
 lines.on("line", (line) => {
@@ -15,7 +17,7 @@ lines.on("line", (line) => {
     return;
   }
   if (message.method === "thread/list") {
-    const threads = listThreads();
+    const threads = listThreads(message.params?.archived === true);
     const data = message.params && Object.hasOwn(message.params, "sectionId")
       ? threads.filter((thread) => message.params.sectionId === pinnedSection.id
         ? thread.section?.id === pinnedSection.id
@@ -41,6 +43,23 @@ lines.on("line", (line) => {
   if (message.method === "thread/archive") {
     archivedThreads.add(message.params?.threadId);
     pinnedThreads.delete(message.params?.threadId);
+    send({ id: message.id, result: {} });
+    return;
+  }
+  if (message.method === "thread/unarchive") {
+    archivedThreads.delete(message.params?.threadId);
+    send({ id: message.id, result: {} });
+    return;
+  }
+  if (message.method === "thread/delete") {
+    deletedThreads.add(message.params?.threadId);
+    archivedThreads.delete(message.params?.threadId);
+    pinnedThreads.delete(message.params?.threadId);
+    send({ id: message.id, result: {} });
+    return;
+  }
+  if (message.method === "thread/name/set") {
+    threadNames.set(message.params?.threadId, message.params?.name);
     send({ id: message.id, result: {} });
     return;
   }
@@ -237,7 +256,7 @@ lines.on("line", (line) => {
   }
 });
 
-function listThreads() {
+function listThreads(archived = false) {
   const fixture = {
     id: "fixture-thread",
     name: "Fixture task",
@@ -253,9 +272,11 @@ function listThreads() {
     updatedAt: 1_787_199_999 - index,
   }));
   return [createdThread, fixture, ...extras].filter(Boolean)
-    .filter((thread) => !archivedThreads.has(thread.id))
+    .filter((thread) => !deletedThreads.has(thread.id))
+    .filter((thread) => archivedThreads.has(thread.id) === archived)
     .map((thread) => ({
     ...thread,
+    name: threadNames.get(thread.id) ?? thread.name,
     section: pinnedThreads.has(thread.id) ? pinnedSection : null,
     sectionEnteredAt: pinnedThreads.has(thread.id) ? 1_787_200_200 : null,
   }));
@@ -288,7 +309,9 @@ function fixtureThreadWithTurns() {
       {
         id: `agent-${index}`,
         type: "agentMessage",
-        text: `Completed follow-up ${index + 1}. This response is intentionally long enough to exercise the independent mobile conversation scroller.`,
+        text: index === 9
+          ? `Completed follow-up ${index + 1}.\n\n\`\`\`text\nrds-agent -> browser-v1-sandbox-with-a-deliberately-long-unbroken-command-line-that-must-scroll-inside-the-code-block-only\n\`\`\``
+          : `Completed follow-up ${index + 1}. This response is intentionally long enough to exercise the independent mobile conversation scroller.`,
       },
     ],
   }));

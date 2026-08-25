@@ -55,7 +55,7 @@ GitHub repository: git@github.com:cnwenf/codex-remote.git
 
 ## App controls
 
-Codex Remote appears in both the Dock and macOS menu bar. Clicking its Dock icon opens the current Remote Web page. The menu-bar app can enable or disable Remote, choose private or public HTTPS, change the bind address and Web password, open the Web UI, show a mobile pairing QR, show status and version, and check GitHub for updates.
+Codex Remote appears in both the Dock and macOS menu bar. Clicking its Dock icon opens the current Remote Web page. The menu-bar app can enable or disable Remote, choose private or public HTTPS, change the bind address and Web password, open the Web UI, show a mobile pairing QR, show status and version, and install the latest GitHub release in place. In-app updates download the matching architecture DMG, verify SHA-256, signature, and architecture, and restore the previous app if the new version does not start successfully.
 
 The password is stored at `~/Library/Application Support/Codex Remote/token` with mode `0600`; its directory uses mode `0700`.
 
@@ -63,7 +63,7 @@ The password is stored at `~/Library/Application Support/Codex Remote/token` wit
 
 The installer creates two explicit user LaunchAgents:
 
-- `local.codex-remote.app` starts and keeps the native app running.
+- `local.codex-remote.app` starts the native app at login but does not repeatedly relaunch it after the user deliberately quits.
 - `local.codex-remote.desktop` starts Desktop with `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9229`.
 
 ```bash
@@ -76,4 +76,4 @@ curl -fsS http://127.0.0.1:4321/health
 
 The current DMG uses ad-hoc signing, so macOS may ask for confirmation on first launch. Installation proceeds only after checksum verification. Keep ports `4321` and `9229` off the public Internet; `9229` must remain loopback-only.
 
-Mobile clients only allow plain HTTP for numeric IP addresses, `localhost`, and `.local` hosts. Public mode uses a checksum-verified Cloudflare Quick Tunnel over HTTPS and still requires a strong Web password. Quick Tunnels are intended for testing/development and have no SLA; validate public mode on a dedicated machine before sustained use. The password is sent in the `Authorization` header and never placed in the URL.
+Mobile clients only allow plain HTTP for numeric IP addresses, `localhost`, and `.local` hosts. Public mode uses a checksum-verified Cloudflare Quick Tunnel over HTTPS and still requires a strong Web password. Quick Tunnel URLs change after reconnection, are intended for testing/development, have no SLA, and Cloudflare does not support SSE on them. Codex Remote uses WebSocket, but public mode must still be validated on a dedicated machine before use. The password is sent in the `Authorization` header and never placed in the URL.

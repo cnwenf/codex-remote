@@ -211,6 +211,7 @@ describe("DesktopBridgeTransport", () => {
       params: {
         threadId: "thread-1",
         expectedTurnId: "turn-1",
+        cwd: "/safe/project",
         input: [
           { type: "text", text: "Continue from the phone" },
           { type: "localImage", path: "/safe/upload/image.png" },
@@ -224,7 +225,7 @@ describe("DesktopBridgeTransport", () => {
     expect(ownerRequest?.params).toMatchObject({
       conversationId: "thread-1",
       input: [
-        { type: "text", text: "Continue from the phone" },
+        { type: "text", text: "Continue from the phone", text_elements: [] },
         { type: "localImage", path: "/safe/upload/image.png" },
       ],
       restoreMessage: {
@@ -234,7 +235,9 @@ describe("DesktopBridgeTransport", () => {
           addedFiles: [],
           fileAttachments: [],
           imageAttachments: [],
+          workspaceRoots: ["/safe/project"],
         },
+        cwd: "/safe/project",
       },
     });
     expect(ownerRequest?.params).toMatchObject({

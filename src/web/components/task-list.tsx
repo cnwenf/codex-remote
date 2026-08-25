@@ -1,14 +1,20 @@
-import { useMemo, useRef, useState, type PointerEvent } from "react";
+import { useMemo, useRef, useState, type FormEvent, type PointerEvent } from "react";
 import type { CodexThread, ThreadStatus } from "../../protocol/thread-store";
 
 type TaskListProps = {
   threads: CodexThread[];
+  archivedThreads?: CodexThread[];
+  archivedLoading?: boolean;
   directCwd?: string;
   selectedId?: string;
   onSelect: (id: string) => void;
   onNew: () => void;
   onTogglePin?: (id: string) => void;
   onArchive?: (id: string) => void;
+  onRename?: (id: string, name: string) => void | Promise<void>;
+  onUnarchive?: (id: string) => void | Promise<void>;
+  onDelete?: (id: string) => void | Promise<void>;
+  onLoadArchived?: () => void | Promise<void>;
 };
 
 type ProjectGroup = {
@@ -21,16 +27,27 @@ type ProjectGroup = {
 
 export function TaskList({
   threads,
+  archivedThreads = [],
+  archivedLoading = false,
   directCwd,
   selectedId,
   onSelect,
   onNew,
   onTogglePin,
   onArchive,
+  onRename,
+  onUnarchive,
+  onDelete,
+  onLoadArchived,
 }: TaskListProps) {
   const [query, setQuery] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [revealedThreadId, setRevealedThreadId] = useState<string>();
+  const [archivedExpanded, setArchivedExpanded] = useState(false);
+  const [dialog, setDialog] = useState<{ type: "rename" | "delete"; thread: CodexThread }>();
+  const [dialogName, setDialogName] = useState("");
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [dialogError, setDialogError] = useState<string>();
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return threads;
@@ -54,6 +71,44 @@ export function TaskList({
       else next.add(cwd);
       return next;
     });
+  }
+
+  function openRename(thread: CodexThread) {
+    setDialog({ type: "rename", thread });
+    setDialogName(thread.title);
+    setDialogError(undefined);
+  }
+
+  function openDelete(thread: CodexThread) {
+    setDialog({ type: "delete", thread });
+    setDialogError(undefined);
+  }
+
+  async function submitDialog(event: FormEvent) {
+    event.preventDefault();
+    if (!dialog || dialogBusy) return;
+    const name = dialogName.trim();
+    if (dialog.type === "rename" && !name) {
+      setDialogError("标题不能为空");
+      return;
+    }
+    setDialogBusy(true);
+    setDialogError(undefined);
+    try {
+      if (dialog.type === "rename") await onRename?.(dialog.thread.id, name);
+      else await onDelete?.(dialog.thread.id);
+      setDialog(undefined);
+    } catch (cause) {
+      setDialogError(cause instanceof Error ? cause.message : "操作失败");
+    } finally {
+      setDialogBusy(false);
+    }
+  }
+
+  function toggleArchived() {
+    const expanded = !archivedExpanded;
+    setArchivedExpanded(expanded);
+    if (expanded) void onLoadArchived?.();
   }
 
   return (
@@ -81,7 +136,7 @@ export function TaskList({
 
       <div className="task-list" data-testid="task-list-scroll">
         {filtered.length === 0 ? (
-          <p className="empty-list">{threads.length === 0 ? "还没有对话" : "没有匹配的对话"}</p>
+          <p className="empty-list">{threads.length === 0 ? "还没有活跃对话" : "没有匹配的对话"}</p>
         ) : (
           <>
             <section className="nav-section" aria-labelledby="pinned-heading">
@@ -95,6 +150,8 @@ export function TaskList({
                     onSelect={onSelect}
                     onTogglePin={onTogglePin}
                     onArchive={onArchive}
+                    onRename={onRename ? openRename : undefined}
+                    onDelete={onDelete ? openDelete : undefined}
                     actionsRevealed={revealedThreadId === thread.id}
                     onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
                     directCwd={directCwd}
@@ -135,6 +192,8 @@ export function TaskList({
                               onSelect={onSelect}
                               onTogglePin={onTogglePin}
                               onArchive={onArchive}
+                              onRename={onRename ? openRename : undefined}
+                              onDelete={onDelete ? openDelete : undefined}
                               actionsRevealed={revealedThreadId === thread.id}
                               onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
                               directCwd={directCwd}
@@ -161,6 +220,8 @@ export function TaskList({
                     onSelect={onSelect}
                     onTogglePin={onTogglePin}
                     onArchive={onArchive}
+                    onRename={onRename ? openRename : undefined}
+                    onDelete={onDelete ? openDelete : undefined}
                     actionsRevealed={revealedThreadId === thread.id}
                     onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
                     directCwd={directCwd}
@@ -169,9 +230,82 @@ export function TaskList({
                 )) : <p className="empty-section">暂无直接对话</p>}
               </div>
             </section>
+
           </>
         )}
+        {!query.trim() ? (
+          <section className="nav-section archive-section" aria-label="归档对话">
+              <button
+                type="button"
+                className="archive-heading"
+                aria-expanded={archivedExpanded}
+                onClick={toggleArchived}
+              >
+                <span>归档对话</span>
+                <span>{archivedLoading ? "加载中" : archivedThreads.length}</span>
+                <span aria-hidden="true">⌄</span>
+              </button>
+              {archivedExpanded ? (
+                <div className="conversation-list archived-conversations">
+                  {archivedLoading && archivedThreads.length === 0 ? (
+                    <p className="empty-section">正在加载归档对话…</p>
+                  ) : archivedThreads.length > 0 ? archivedThreads.map((thread) => (
+                    <ConversationRow
+                      key={thread.id}
+                      thread={thread}
+                      selected={false}
+                      onSelect={() => undefined}
+                      onRename={onRename ? openRename : undefined}
+                      onUnarchive={onUnarchive}
+                      onDelete={onDelete ? openDelete : undefined}
+                      archived
+                      actionsRevealed={revealedThreadId === thread.id}
+                      onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
+                      directCwd={directCwd}
+                      desktopProjectsAvailable={hasDesktopProjects}
+                    />
+                  )) : <p className="empty-section">暂无归档对话</p>}
+                </div>
+              ) : null}
+          </section>
+        ) : null}
       </div>
+      {dialog ? (
+        <div className="thread-dialog-backdrop" onPointerDown={(event) => {
+          if (event.currentTarget === event.target && !dialogBusy) setDialog(undefined);
+        }}>
+          <form
+            className="thread-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={dialog.type === "rename" ? "重命名对话" : "删除对话"}
+            onSubmit={submitDialog}
+          >
+            <h3>{dialog.type === "rename" ? "重命名对话" : "删除对话"}</h3>
+            {dialog.type === "rename" ? (
+              <label>
+                <span>对话标题</span>
+                <input
+                  aria-label="对话标题"
+                  value={dialogName}
+                  maxLength={200}
+                  autoFocus
+                  onChange={(event) => setDialogName(event.target.value)}
+                />
+              </label>
+            ) : (
+              <p>“{dialog.thread.title}”将从 Codex Desktop 中永久删除，无法恢复。</p>
+            )}
+            {dialogError ? <p className="inline-error" role="alert">{dialogError}</p> : null}
+            <div className="thread-dialog-actions">
+              <button type="button" className="secondary-button" disabled={dialogBusy} onClick={() => setDialog(undefined)}>取消</button>
+              <button type="submit" className={dialog.type === "delete" ? "danger-button" : "primary-button"} disabled={dialogBusy}>
+                {dialog.type === "rename" ? "保存" : "永久删除"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </nav>
   );
 }
@@ -182,6 +316,10 @@ function ConversationRow({
   onSelect,
   onTogglePin,
   onArchive,
+  onRename,
+  onUnarchive,
+  onDelete,
+  archived = false,
   actionsRevealed,
   onRevealActions,
   compact = false,
@@ -193,6 +331,10 @@ function ConversationRow({
   onSelect: (id: string) => void;
   onTogglePin?: (id: string) => void;
   onArchive?: (id: string) => void;
+  onRename?: (thread: CodexThread) => void;
+  onUnarchive?: (id: string) => void | Promise<void>;
+  onDelete?: (thread: CodexThread) => void;
+  archived?: boolean;
   actionsRevealed: boolean;
   onRevealActions: (revealed: boolean) => void;
   compact?: boolean;
@@ -202,7 +344,8 @@ function ConversationRow({
   const pinned = isPinnedThread(thread);
   const pointerStart = useRef<{ x: number; y: number } | undefined>(undefined);
   const consumedSwipe = useRef(false);
-  const hasActions = Boolean(onTogglePin || onArchive);
+  const actions = [onRename, onTogglePin, onArchive, onUnarchive, onDelete].filter(Boolean);
+  const hasActions = actions.length > 0;
 
   function beginSwipe(event: PointerEvent<HTMLDivElement>) {
     if (!hasActions) return;
@@ -238,17 +381,31 @@ function ConversationRow({
     action?.(thread.id);
   }
 
+  function runThreadAction(action: ((thread: CodexThread) => void) | undefined) {
+    onRevealActions(false);
+    action?.(thread);
+  }
+
   return (
     <div
       className={`task-row-shell ${compact ? "task-row-shell-compact" : ""}`}
       data-selected={selected}
       data-actions-open={actionsRevealed}
+      data-action-count={actions.length}
       onPointerDown={beginSwipe}
       onPointerUp={finishSwipe}
       onPointerCancel={() => { pointerStart.current = undefined; }}
     >
       {hasActions ? (
         <div className="task-row-actions" aria-hidden={!actionsRevealed}>
+          {onRename ? (
+            <button
+              type="button"
+              tabIndex={actionsRevealed ? 0 : -1}
+              aria-label={`重命名 ${thread.title}`}
+              onClick={() => runThreadAction(onRename)}
+            >重命名</button>
+          ) : null}
           {onTogglePin ? (
             <button
               type="button"
@@ -266,6 +423,23 @@ function ConversationRow({
               onClick={() => runAction(onArchive)}
             >归档</button>
           ) : null}
+          {onUnarchive ? (
+            <button
+              type="button"
+              tabIndex={actionsRevealed ? 0 : -1}
+              aria-label={`取消归档 ${thread.title}`}
+              onClick={() => runAction(onUnarchive)}
+            >取消归档</button>
+          ) : null}
+          {onDelete ? (
+            <button
+              type="button"
+              className="delete-action"
+              tabIndex={actionsRevealed ? 0 : -1}
+              aria-label={`删除 ${thread.title}`}
+              onClick={() => runThreadAction(onDelete)}
+            >删除</button>
+          ) : null}
         </div>
       ) : null}
       <div className="task-row-content">
@@ -273,6 +447,7 @@ function ConversationRow({
           type="button"
           className={`task-row-main ${compact ? "task-row-compact" : ""}`}
           onClick={selectConversation}
+          disabled={archived}
           aria-label={`${thread.title}，${statusLabel(thread.status)}`}
         >
           <span className={`status-dot status-${thread.status}`} aria-hidden="true" />

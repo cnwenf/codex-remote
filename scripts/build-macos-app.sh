@@ -33,6 +33,7 @@ cp -R dist/. "$RES/web/"
 cp scripts/launch-bundled-gateway.sh "$RES/launch-gateway.sh"
 cp scripts/install-launch-agents.sh "$RES/install-launch-agents.sh"
 cp scripts/launch-codex-desktop.sh "$RES/launch-codex-desktop.sh"
+cp scripts/perform-macos-update.sh "$RES/perform-macos-update.sh"
 chmod 755 "$RES"/*.sh "$RES/bin/node" "$APP/Contents/MacOS/Codex Remote"
 
 iconset="$OUTPUT/AppIcon.iconset"

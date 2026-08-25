@@ -69,6 +69,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const [loadingThreadId, setLoadingThreadId] = useState<string>();
   const [threadLoadError, setThreadLoadError] = useState<{ threadId: string; message: string }>();
   const [threadHistory, setThreadHistory] = useState<Record<string, ThreadHistoryState>>({});
+  const [archivedThreads, setArchivedThreads] = useState<CodexThread[]>([]);
+  const [archivedThreadsLoading, setArchivedThreadsLoading] = useState(false);
   const [pinnedSectionId, setPinnedSectionId] = useState<string>();
   const [pendingRequests, setPendingRequests] = useState<RpcRequest[]>([]);
   const [creationOptions, setCreationOptions] = useState(emptyCreationOptions);
@@ -175,6 +177,40 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     ));
   }, [socket]);
 
+  const refreshArchivedThreads = useCallback(async () => {
+    setArchivedThreadsLoading(true);
+    try {
+      let result: unknown;
+      try {
+        result = await socket.request("thread/list", {
+          archived: true,
+          limit: 100,
+          sortKey: "updated_at",
+        });
+      } catch {
+        // Desktop SQLite can still provide archived metadata while the bridge reconnects.
+      }
+      let desktopList: unknown;
+      try {
+        desktopList = await socket.request("desktopState/listThreads", { archived: true });
+        setDesktopStateAvailable(true);
+      } catch {
+        // Older gateways do not expose archived Desktop metadata.
+      }
+      if (result === undefined && desktopList === undefined) {
+        throw new Error("读取归档对话失败");
+      }
+      const normalized = replaceThreadList(
+        initialCodexState,
+        mergeDesktopThreadList(result ?? { data: [] }, desktopList),
+        desktopList,
+      );
+      setArchivedThreads(normalized.threadOrder.map((id) => normalized.threads[id]).filter(Boolean));
+    } finally {
+      setArchivedThreadsLoading(false);
+    }
+  }, [socket]);
+
   useEffect(() => {
     const unsubscribe = socket.subscribe((message) => {
       if ("method" in message && message.method === "desktop/pins/updated") {
@@ -237,13 +273,50 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   }, [desktopControlAvailable, pinnedSectionId, refreshThreads, socket, state.threadOrder, state.threads]);
 
   const archiveThread = useCallback(async (threadId: string) => {
+    const archivedThread = state.threads[threadId];
     await socket.request("thread/archive", { threadId });
+    if (archivedThread) {
+      setArchivedThreads((current) => [
+        { ...archivedThread, sectionId: undefined, sectionName: undefined },
+        ...current.filter((thread) => thread.id !== threadId),
+      ]);
+    }
     if (selectedThreadId === threadId) {
       setSelectedThreadId(undefined);
       setThreadLoadError(undefined);
     }
     await refreshThreads();
-  }, [refreshThreads, selectedThreadId, socket]);
+  }, [refreshThreads, selectedThreadId, socket, state.threads]);
+
+  const renameThread = useCallback(async (threadId: string, name: string) => {
+    const normalizedName = name.trim();
+    if (!normalizedName) throw new Error("标题不能为空");
+    await socket.request("thread/name/set", { threadId, name: normalizedName });
+    setState((current) => updateThreadTitle(current, threadId, normalizedName));
+    setArchivedThreads((current) => current.map((thread) =>
+      thread.id === threadId ? { ...thread, title: normalizedName } : thread
+    ));
+  }, [socket]);
+
+  const unarchiveThread = useCallback(async (threadId: string) => {
+    await socket.request("thread/unarchive", { threadId });
+    let restored: CodexThread | undefined;
+    setArchivedThreads((current) => {
+      restored = current.find((thread) => thread.id === threadId);
+      return current.filter((thread) => thread.id !== threadId);
+    });
+    if (restored) setState((current) => restoreThread(current, restored as CodexThread));
+  }, [socket]);
+
+  const deleteThread = useCallback(async (threadId: string) => {
+    await socket.request("thread/delete", { threadId });
+    setState((current) => removeThread(current, threadId));
+    setArchivedThreads((current) => current.filter((thread) => thread.id !== threadId));
+    if (selectedThreadId === threadId) {
+      setSelectedThreadId(undefined);
+      setThreadLoadError(undefined);
+    }
+  }, [selectedThreadId, socket]);
 
   const refreshCreationOptions = useCallback(async (cwd?: string) => {
     const version = ++catalogRequestVersion.current;
@@ -471,6 +544,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
             threadId: selectedThreadId,
             expectedTurnId: thread.activeTurnId,
             input,
+            cwd: thread.cwd,
           });
         } catch (cause) {
           if (turnId) {
@@ -574,6 +648,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   return useMemo(
     () => ({
       state,
+      archivedThreads,
+      archivedThreadsLoading,
       creationOptions,
       connection,
       defaultCwd,
@@ -594,9 +670,13 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       connect,
       disconnect,
       refreshThreads,
+      refreshArchivedThreads,
       refreshThreadSections,
       togglePin,
       archiveThread,
+      renameThread,
+      unarchiveThread,
+      deleteThread,
       refreshCreationOptions,
       selectThread,
       loadEarlierThreadHistory,
@@ -609,6 +689,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     }),
     [
       connect,
+      archivedThreads,
+      archivedThreadsLoading,
       connection,
       createThread,
       creationOptions,
@@ -618,6 +700,10 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       disconnect,
       error,
       interrupt,
+      refreshArchivedThreads,
+      renameThread,
+      unarchiveThread,
+      deleteThread,
       loadingThreadId,
       loadEarlierThreadHistory,
       pendingRequests,
@@ -641,7 +727,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   );
 }
 
-function addOptimisticUserMessage(
+export function addOptimisticUserMessage(
   state: CodexState,
   threadId: string,
   turnId: string,
@@ -652,6 +738,15 @@ function addOptimisticUserMessage(
   const thread = state.threads[threadId];
   const turn = thread?.turns[turnId];
   if (!thread || !turn) return state;
+  // Desktop can emit the authoritative user item before React applies this
+  // optimistic update. In that ordering, adding the optimistic item here would
+  // leave the same steer visible twice until the next full hydration.
+  const authoritative = latestConversationalItem(thread);
+  const optimistic = { id: itemId, type: "userMessage", text, imageIds };
+  if (authoritative && !authoritative.id.startsWith("web-steer-") && sameUserMessage(authoritative, optimistic)) {
+    if (imageIds.length === 0 || authoritative.imageIds?.length) return state;
+    return updateItemImages(state, threadId, authoritative.id, imageIds);
+  }
   return {
     ...state,
     threads: {
@@ -673,6 +768,42 @@ function addOptimisticUserMessage(
                 status: "completed",
               },
             },
+          },
+        },
+      },
+    },
+  };
+}
+
+function latestConversationalItem(thread: CodexThread) {
+  for (const turnId of [...thread.turnOrder].reverse()) {
+    const turn = thread.turns[turnId];
+    for (const itemId of [...(turn?.itemOrder ?? [])].reverse()) {
+      const item = turn?.items[itemId];
+      const type = item?.type.toLocaleLowerCase() ?? "";
+      if (item && (type.includes("user") || type.includes("agentmessage"))) return item;
+    }
+  }
+  return undefined;
+}
+
+function updateItemImages(state: CodexState, threadId: string, itemId: string, imageIds: string[]) {
+  const thread = state.threads[threadId];
+  if (!thread) return state;
+  const turnId = thread.turnOrder.find((candidate) => Boolean(thread.turns[candidate]?.items[itemId]));
+  if (!turnId) return state;
+  const turn = thread.turns[turnId];
+  return {
+    ...state,
+    threads: {
+      ...state.threads,
+      [threadId]: {
+        ...thread,
+        turns: {
+          ...thread.turns,
+          [turnId]: {
+            ...turn,
+            items: { ...turn.items, [itemId]: { ...turn.items[itemId], imageIds } },
           },
         },
       },
@@ -707,6 +838,34 @@ function removeOptimisticItem(
         },
       },
     },
+  };
+}
+
+function updateThreadTitle(state: CodexState, threadId: string, title: string): CodexState {
+  const thread = state.threads[threadId];
+  if (!thread) return state;
+  return {
+    ...state,
+    threads: { ...state.threads, [threadId]: { ...thread, title } },
+  };
+}
+
+function restoreThread(state: CodexState, thread: CodexThread): CodexState {
+  return {
+    ...state,
+    threadOrder: [thread.id, ...state.threadOrder.filter((id) => id !== thread.id)],
+    threads: { ...state.threads, [thread.id]: thread },
+  };
+}
+
+function removeThread(state: CodexState, threadId: string): CodexState {
+  if (!state.threads[threadId]) return state;
+  const threads = { ...state.threads };
+  delete threads[threadId];
+  return {
+    ...state,
+    threadOrder: state.threadOrder.filter((id) => id !== threadId),
+    threads,
   };
 }
 

@@ -84,6 +84,12 @@ export class FakeCdpServer {
         const visibleSettingsSync = !owner &&
           request.method === "Runtime.callFunctionOn" &&
           String(request.params?.functionDeclaration).includes("__codexRemoteSyncVisibleThreadSettings");
+        const visibleSettingsInspection = !owner &&
+          request.method === "Runtime.callFunctionOn" &&
+          String(request.params?.functionDeclaration).includes("data-selected-reasoning-effort");
+        const visibleTextInspection = !owner &&
+          request.method === "Runtime.callFunctionOn" &&
+          String(request.params?.functionDeclaration).includes("document.body.innerText.includes");
         if (visibleSettingsSync && this.visibleSettingsSyncDelayMs > 0) {
           this.activeVisibleSettingsSyncRequests += 1;
           this.maxConcurrentVisibleSettingsSyncRequests = Math.max(
@@ -105,6 +111,10 @@ export class FakeCdpServer {
             ? { value: this.ownerResponse }
           : visibleSettingsSync
             ? { value: { visible: true, synced: true, failures: [] } }
+          : visibleSettingsInspection
+            ? { value: { conversationId: "thread-1", permissionLabel: "完全访问", modelLabel: "5.6 Sol", reasoningEffort: "high" } }
+          : visibleTextInspection
+            ? { value: ((request.params?.arguments as Array<{ value?: unknown }> | undefined)?.[0]?.value) === "visible steer" }
           : { value: true };
         socket.send(JSON.stringify({ id: request.id, result: { result: runtimeResult } }));
       });

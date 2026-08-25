@@ -270,6 +270,9 @@ describe("DesktopState", () => {
         expect.objectContaining({ id: "user-1", title: "Visible user task" }),
       ],
     });
+    expect(state.request("desktopState/listThreads", { archived: true })).toEqual({
+      data: [expect.objectContaining({ id: "archived-1", title: "Archived task" })],
+    });
     expect(state.request("desktopState/listThreadMetadata", {
       threadIds: ["thread-1", "user-1", "subagent-1", "archived-1"],
     })).toEqual({ data: [

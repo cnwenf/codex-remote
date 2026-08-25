@@ -55,7 +55,7 @@ GitHub 仓库：git@github.com:cnwenf/codex-remote.git
 
 ## App 操作
 
-`Codex Remote.app` 同时显示在 Dock 和 macOS 右上角菜单栏；点击 Dock 图标会直接打开当前 Remote Web 页面。菜单栏支持开启/关闭 Remote、切换私网/公网 HTTPS、修改绑定地址和 Web 登录密码、打开浏览器、显示手机配对二维码、查看版本与运行状态、检查 GitHub 最新版本。
+`Codex Remote.app` 同时显示在 Dock 和 macOS 右上角菜单栏；点击 Dock 图标会直接打开当前 Remote Web 页面。菜单栏支持开启/关闭 Remote、切换私网/公网 HTTPS、修改绑定地址和 Web 登录密码、打开浏览器、显示手机配对二维码、查看版本与运行状态，以及直接安装 GitHub 最新版本。应用内更新会按 CPU 架构下载 DMG，校验 SHA-256、签名和架构；新版本未正常启动时自动恢复旧版本。
 
 密码保存在 `~/Library/Application Support/Codex Remote/token`，目录权限为 `700`，文件权限为 `600`；不会写入 plist、URL 或日志。
 
@@ -63,7 +63,7 @@ GitHub 仓库：git@github.com:cnwenf/codex-remote.git
 
 安装器创建两个明确的当前用户 LaunchAgent：
 
-- `local.codex-remote.app`：登录后启动并保持 Codex Remote App 运行。
+- `local.codex-remote.app`：登录后启动 Codex Remote App；用户主动退出后不会反复拉起。
 - `local.codex-remote.desktop`：使用 `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9229` 启动 Codex Desktop。
 
 检查状态：
@@ -79,6 +79,6 @@ curl -fsS http://127.0.0.1:4321/health
 - 当前 DMG 使用 ad-hoc 签名，首次打开时 macOS 可能要求确认。
 - 安装器必须成功校验 GitHub Release 中的 SHA-256 才会安装。
 - 私网模式不要做公网端口映射。公网模式仅通过打包并校验过的 Cloudflare Quick Tunnel 建立 HTTPS 出站隧道，仍必须使用强登录密码。
-- Quick Tunnel 是实验/开发用途服务，没有 SLA；公网功能应在专用机器上验收后再长期使用。
+- Quick Tunnel 是实验/开发用途服务，地址会在重连后变化、没有 SLA，Cloudflare 官方也不保证 SSE；Codex Remote 使用 WebSocket，但公网功能仍应在专用机器上验收后再使用。
 - `4321` 只绑定所选本地私网地址和 `127.0.0.1`；`9229` 只绑定 `127.0.0.1`。
 - 移动端只允许 HTTP 连接数值 IP、`localhost` 或 `.local` 主机；鉴权密码仅通过 `Authorization` Header 发送，不进入 URL。

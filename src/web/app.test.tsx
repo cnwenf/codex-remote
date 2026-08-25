@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
 
@@ -23,6 +24,12 @@ function codexState(overrides: Record<string, unknown> = {}) {
     refreshCreationOptions: vi.fn().mockResolvedValue(undefined),
     togglePin: vi.fn().mockResolvedValue(undefined),
     archiveThread: vi.fn().mockResolvedValue(undefined),
+    archivedThreads: [],
+    archivedThreadsLoading: false,
+    refreshArchivedThreads: vi.fn().mockResolvedValue(undefined),
+    renameThread: vi.fn().mockResolvedValue(undefined),
+    unarchiveThread: vi.fn().mockResolvedValue(undefined),
+    deleteThread: vi.fn().mockResolvedValue(undefined),
     selectThread: vi.fn().mockResolvedValue(undefined),
     loadEarlierThreadHistory: vi.fn().mockResolvedValue(undefined),
     clearSelection: vi.fn(),
@@ -72,5 +79,30 @@ describe("App", () => {
       screen.queryByText("已连接 Codex Desktop，本页与 Desktop 操作同一会话。"),
     ).not.toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeVisible();
+  });
+
+  it("keeps mobile browser back swipe inside the app and returns to the conversation list", async () => {
+    const thread = {
+      id: "thread-1",
+      title: "Swipe back task",
+      status: "idle",
+      turnOrder: [],
+      turns: {},
+    };
+    const value = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+    });
+    useCodexMock.mockReturnValue(value);
+    window.history.replaceState(null, "", "/");
+    render(<App />);
+
+    await userEvent.click(screen.getByRole("button", { name: /^Swipe back task，/ }));
+    expect(window.history.state).toMatchObject({ codexRemoteView: "thread" });
+
+    act(() => window.dispatchEvent(new PopStateEvent("popstate", {
+      state: { codexRemoteView: "list" },
+    })));
+    expect(value.clearSelection).toHaveBeenCalled();
   });
 });

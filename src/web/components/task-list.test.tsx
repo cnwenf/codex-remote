@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CodexThread } from "../../protocol/thread-store";
@@ -220,5 +220,49 @@ describe("TaskList", () => {
     await userEvent.click(screen.getByRole("button", { name: "归档 Fix login race" }));
     expect(onArchive).toHaveBeenCalledWith("t1");
     expect(row).toHaveAttribute("data-actions-open", "false");
+  });
+
+  it("renames active conversations and restores or deletes archived conversations", async () => {
+    const onRename = vi.fn().mockResolvedValue(undefined);
+    const onUnarchive = vi.fn().mockResolvedValue(undefined);
+    const onDelete = vi.fn().mockResolvedValue(undefined);
+    const archived = {
+      ...thread,
+      id: "archived",
+      title: "Archived task",
+      status: "idle" as const,
+    };
+    render(
+      <TaskList
+        threads={[{ ...thread, cwd: undefined }]}
+        archivedThreads={[archived]}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+        onRename={onRename}
+        onUnarchive={onUnarchive}
+        onDelete={onDelete}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "对话操作 Fix login race" }));
+    await userEvent.click(screen.getByRole("button", { name: "重命名 Fix login race" }));
+    const renameDialog = screen.getByRole("dialog", { name: "重命名对话" });
+    const nameInput = within(renameDialog).getByRole("textbox", { name: "对话标题" });
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, "Renamed task");
+    await userEvent.click(within(renameDialog).getByRole("button", { name: "保存" }));
+    expect(onRename).toHaveBeenCalledWith("t1", "Renamed task");
+
+    await userEvent.click(screen.getByRole("button", { name: /归档对话.*1/ }));
+    await userEvent.click(screen.getByRole("button", { name: "对话操作 Archived task" }));
+    await userEvent.click(screen.getByRole("button", { name: "取消归档 Archived task" }));
+    expect(onUnarchive).toHaveBeenCalledWith("archived");
+
+    await userEvent.click(screen.getByRole("button", { name: "对话操作 Archived task" }));
+    await userEvent.click(screen.getByRole("button", { name: "删除 Archived task" }));
+    const deleteDialog = screen.getByRole("dialog", { name: "删除对话" });
+    expect(deleteDialog).toHaveTextContent("Archived task");
+    await userEvent.click(within(deleteDialog).getByRole("button", { name: "永久删除" }));
+    expect(onDelete).toHaveBeenCalledWith("archived");
   });
 });

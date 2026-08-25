@@ -176,6 +176,18 @@ test("mobile task list and conversation scroll independently", async ({ page }) 
 
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
   await expect(page.getByText("Follow-up instruction 10")).toBeVisible();
+  const codeBlock = page.locator(".message-agent pre").last();
+  await expect(codeBlock).toBeVisible();
+  const codeBounds = await codeBlock.boundingBox();
+  const timelineBounds = await page.locator(".timeline").boundingBox();
+  expect(codeBounds).not.toBeNull();
+  expect(timelineBounds).not.toBeNull();
+  expect(codeBounds!.x).toBeGreaterThanOrEqual(timelineBounds!.x);
+  expect(codeBounds!.x + codeBounds!.width).toBeLessThanOrEqual(
+    timelineBounds!.x + timelineBounds!.width + 1,
+  );
+  expect(await codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const timeline = page.getByTestId("timeline-scroll");
   await expect(timeline).toBeVisible();
   const conversationScroll = await timeline.evaluate((element) => {
@@ -193,7 +205,21 @@ test("mobile task list and conversation scroll independently", async ({ page }) 
   await expect(composer).toHaveClass(/composer-collapsed/);
 });
 
-test("pins, unpins, and archives through the Desktop-aligned sidebar", async ({ page }) => {
+test("mobile browser back swipe history returns to the conversation list", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 720 });
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await expect(page.getByRole("heading", { name: "Fixture task" })).toBeVisible();
+
+  await page.evaluate(() => window.history.back());
+  await expect(page.getByTestId("task-list-scroll")).toBeVisible();
+  await expect(page).toHaveURL(/127\.0\.0\.1:4318\/?$/);
+});
+
+test("pins, renames, archives, restores, and deletes through the Desktop-aligned sidebar", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");
   await page.getByRole("button", { name: "Connect" }).click();
@@ -216,6 +242,26 @@ test("pins, unpins, and archives through the Desktop-aligned sidebar", async ({ 
   await archivedRow.dispatchEvent("pointerdown", { clientX: 260, clientY: 40, pointerId: 1 });
   await archivedRow.dispatchEvent("pointerup", { clientX: 110, clientY: 44, pointerId: 1 });
   await expect(archivedRow).toHaveAttribute("data-actions-open", "true");
-  await page.getByRole("button", { name: `归档 ${archiveTitle}` }).click();
-  await expect(page.getByRole("button", { name: new RegExp(`^${archiveTitle}，`) })).toHaveCount(0);
+  await page.getByRole("button", { name: `重命名 ${archiveTitle}` }).click();
+  const renamedTitle = `${archiveTitle} Renamed`;
+  await page.getByRole("textbox", { name: "对话标题" }).fill(renamedTitle);
+  await page.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`^${renamedTitle}，`) })).toBeVisible();
+
+  await page.getByRole("button", { name: `对话操作 ${renamedTitle}` }).click();
+  await page.getByRole("button", { name: `归档 ${renamedTitle}` }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`^${renamedTitle}，`) })).toHaveCount(0);
+
+  await page.getByRole("button", { name: /归档对话/ }).click();
+  await expect(page.getByText(renamedTitle, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: `对话操作 ${renamedTitle}` }).click();
+  await page.getByRole("button", { name: `取消归档 ${renamedTitle}` }).click();
+  await expect(page.getByRole("button", { name: new RegExp(`^${renamedTitle}，`) })).toBeVisible();
+
+  await page.getByRole("button", { name: `对话操作 ${renamedTitle}` }).click();
+  await page.getByRole("button", { name: `归档 ${renamedTitle}` }).click();
+  await page.getByRole("button", { name: `对话操作 ${renamedTitle}` }).click();
+  await page.getByRole("button", { name: `删除 ${renamedTitle}` }).click();
+  await page.getByRole("button", { name: "永久删除" }).click();
+  await expect(page.getByText(renamedTitle, { exact: true })).toHaveCount(0);
 });

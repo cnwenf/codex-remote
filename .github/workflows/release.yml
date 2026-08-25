@@ -67,6 +67,7 @@ jobs:
           file "$mount_dir/Codex Remote.app/Contents/MacOS/Codex Remote" | grep -q "${{ matrix.arch }}"
           file "$mount_dir/Codex Remote.app/Contents/Resources/bin/node" | grep -q "${{ matrix.arch }}"
           file "$mount_dir/Codex Remote.app/Contents/Resources/bin/cloudflared" | grep -q "${{ matrix.arch }}"
+          "$mount_dir/Codex Remote.app/Contents/MacOS/Codex Remote" --self-test
           hdiutil detach "$mount_dir" -quiet
       - uses: actions/upload-artifact@v4
         with:

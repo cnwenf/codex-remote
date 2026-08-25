@@ -1,7 +1,8 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CodexSocket, type BrowserSocket } from "../api/socket";
-import { useCodex } from "./use-codex";
+import type { CodexState } from "../../protocol/thread-store";
+import { addOptimisticUserMessage, useCodex } from "./use-codex";
 
 class FakeBrowserSocket implements BrowserSocket {
   readonly OPEN = 1;
@@ -835,6 +836,7 @@ describe("useCodex", () => {
           thread: {
             id: "t1",
             name: "Desktop task",
+            cwd: "/tmp/project",
             status: { type: "active" },
             turns: [{
               id: "turn-1",
@@ -890,6 +892,7 @@ describe("useCodex", () => {
       params: {
         threadId: "t1",
         expectedTurnId: "turn-1",
+        cwd: "/tmp/project",
         input: [
           { type: "text", text: "Continue from the phone" },
           { type: "remoteImage", id: "upload-1" },
@@ -1041,6 +1044,74 @@ describe("useCodex", () => {
     expect(metadataRequest.method).toBe("desktopState/listThreads");
     fake.serverSend({ type: "rpc", payload: { id: metadataRequest.id, result: { data: [] } } });
     await act(() => archiving);
+  });
+
+  it("loads archived Desktop conversations separately from the active list", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let loading: Promise<void>;
+    act(() => { loading = result.current.refreshArchivedThreads(); });
+    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(listRequest).toMatchObject({ method: "thread/list", params: { archived: true } });
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: listRequest.id, result: { data: [{ id: "a1", name: "Old archived title" }] } },
+    });
+    await waitFor(() => expect(JSON.parse(fake.sent.at(-1) as string).payload.method)
+      .toBe("desktopState/listThreads"));
+    const desktopRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(desktopRequest.params).toEqual({ archived: true });
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: desktopRequest.id, result: { data: [{ id: "a1", title: "Desktop archived title" }] } },
+    });
+    await act(() => loading);
+
+    expect(result.current.archivedThreads).toEqual([
+      expect.objectContaining({ id: "a1", title: "Desktop archived title" }),
+    ]);
+  });
+
+  it("uses the official rename unarchive and delete thread methods", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const resume = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: resume.id, result: { thread: { id: "t1", name: "Original", turns: [] } } },
+    });
+    await act(() => selection);
+
+    let renaming: Promise<void>;
+    act(() => { renaming = result.current.renameThread("t1", "Renamed"); });
+    const rename = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(rename).toMatchObject({ method: "thread/name/set", params: { threadId: "t1", name: "Renamed" } });
+    fake.serverSend({ type: "rpc", payload: { id: rename.id, result: {} } });
+    await act(() => renaming);
+    expect(result.current.state.threads.t1.title).toBe("Renamed");
+
+    let unarchiving: Promise<void>;
+    act(() => { unarchiving = result.current.unarchiveThread("archived-1"); });
+    const unarchive = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(unarchive).toMatchObject({ method: "thread/unarchive", params: { threadId: "archived-1" } });
+    fake.serverSend({ type: "rpc", payload: { id: unarchive.id, result: {} } });
+    await act(() => unarchiving);
+
+    let deleting: Promise<void>;
+    act(() => { deleting = result.current.deleteThread("t1"); });
+    const deletion = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(deletion).toMatchObject({ method: "thread/delete", params: { threadId: "t1" } });
+    fake.serverSend({ type: "rpc", payload: { id: deletion.id, result: {} } });
+    await act(() => deleting);
+    expect(result.current.state.threads.t1).toBeUndefined();
   });
 
   it("loads the pinned section and moves a thread into it", async () => {
@@ -1228,5 +1299,46 @@ describe("useCodex", () => {
     act(() => result.current.clearSelection());
     expect(result.current.selectedThreadId).toBeUndefined();
     expect(result.current.connection).toBe("ready");
+  });
+});
+
+describe("optimistic steer reconciliation", () => {
+  it("does not append an optimistic duplicate when Desktop confirms first", () => {
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1", "turn-2"],
+          turns: {
+            "turn-1": { id: "turn-1", status: "inProgress", itemOrder: [], items: {} },
+            "turn-2": {
+              id: "turn-2",
+              status: "inProgress",
+              itemOrder: ["desktop-user"],
+              items: {
+                "desktop-user": { id: "desktop-user", type: "user_message", text: "你调研怎么样？" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = addOptimisticUserMessage(
+      state,
+      "t1",
+      "turn-1",
+      "web-steer-late",
+      "你调研怎么样？",
+      [],
+    );
+
+    expect(next).toBe(state);
+    expect(next.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
   });
 });

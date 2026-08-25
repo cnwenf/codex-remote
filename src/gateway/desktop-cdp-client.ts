@@ -42,6 +42,13 @@ type PendingCall = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+export type VisibleDesktopSettings = {
+  conversationId?: string;
+  permissionLabel?: string;
+  modelLabel?: string;
+  reasoningEffort?: string;
+};
+
 export class DesktopCdpClient {
   private socket?: WebSocket;
   private ownerSocket?: WebSocket;
@@ -125,6 +132,57 @@ export class DesktopCdpClient {
     );
     this.threadOwnerRequestTail = request.then(() => undefined, () => undefined);
     return request;
+  }
+
+  async inspectVisibleThreadSettings(): Promise<VisibleDesktopSettings> {
+    if (!this.windowObjectId) throw new Error("desktop-cdp-not-ready");
+    const response = await this.call("Runtime.callFunctionOn", {
+      objectId: this.windowObjectId,
+      functionDeclaration: `function() {
+        const permission = document.querySelector('button[data-composer-navigation-target="permissions"]');
+        const intelligence = document.querySelector('button[data-codex-intelligence-trigger="true"]');
+        const root = permission || intelligence || document.querySelector('[data-codex-composer-root]');
+        const fiberKey = root && Object.keys(root).find((key) => key.startsWith('__reactFiber$'));
+        let fiber = fiberKey ? root[fiberKey] : null;
+        let conversationId;
+        for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
+          if (typeof fiber.memoizedProps?.conversationId === 'string') {
+            conversationId = fiber.memoizedProps.conversationId;
+            break;
+          }
+        }
+        const firstLine = (element) => (element?.innerText || '').trim().split(/\\r?\\n/, 1)[0] || undefined;
+        return {
+          conversationId,
+          permissionLabel: firstLine(permission),
+          modelLabel: firstLine(intelligence),
+          reasoningEffort: intelligence?.getAttribute('data-selected-reasoning-effort') || undefined,
+        };
+      }`,
+      awaitPromise: false,
+      returnByValue: true,
+    });
+    throwRuntimeException(response, "desktop-visible-settings-inspection-failed");
+    const value = asRecord(asRecord(response.result).value);
+    return {
+      conversationId: stringValue(value.conversationId),
+      permissionLabel: stringValue(value.permissionLabel),
+      modelLabel: stringValue(value.modelLabel),
+      reasoningEffort: stringValue(value.reasoningEffort),
+    };
+  }
+
+  async visibleConversationContainsText(text: string): Promise<boolean> {
+    if (!this.windowObjectId) throw new Error("desktop-cdp-not-ready");
+    const response = await this.call("Runtime.callFunctionOn", {
+      objectId: this.windowObjectId,
+      functionDeclaration: "function(text) { return document.body.innerText.includes(text); }",
+      arguments: [{ value: text }],
+      awaitPromise: false,
+      returnByValue: true,
+    });
+    throwRuntimeException(response, "desktop-visible-text-inspection-failed");
+    return asRecord(response.result).value === true;
   }
 
   private async performThreadOwnerRequest(method: string, params: unknown): Promise<unknown> {
@@ -814,4 +872,12 @@ function throwRuntimeException(response: Record<string, unknown>, prefix: string
     ? description.split("\n", 1)[0]
     : typeof record.text === "string" ? record.text : "runtime-exception";
   throw new Error(`${prefix}:${message}`);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : undefined;
 }

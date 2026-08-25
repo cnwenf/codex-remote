@@ -374,18 +374,26 @@ function createOwnerRequest(message: RpcMessage) {
     };
   }
   if (message.method !== "turn/steer" || !Array.isArray(params.input)) return undefined;
-  const text = params.input
+  const input = params.input.map((item) => {
+    if (!item || typeof item !== "object") return item;
+    const record = item as Record<string, unknown>;
+    return record.type === "text" && typeof record.text === "string"
+      ? { ...record, text_elements: Array.isArray(record.text_elements) ? record.text_elements : [] }
+      : item;
+  });
+  const text = input
     .map((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "text"
       ? (item as Record<string, unknown>).text
       : undefined)
     .filter((value): value is string => typeof value === "string")
     .join("\n");
   const clientUserMessageId = randomUUID();
+  const cwd = typeof params.cwd === "string" ? params.cwd : null;
   return {
     method: "thread-follower-steer-turn",
     params: {
       conversationId,
-      input: params.input,
+      input,
       restoreMessage: {
         id: randomUUID(),
         text,
@@ -395,10 +403,9 @@ function createOwnerRequest(message: RpcMessage) {
           fileAttachments: [],
           ideContext: null,
           imageAttachments: [],
-          commentAttachments: [],
-          workspaceRoots: [],
+          workspaceRoots: cwd ? [cwd] : [],
         },
-        cwd: null,
+        cwd,
         createdAt: Date.now(),
       },
       serviceTier: params.serviceTier,
