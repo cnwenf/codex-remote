@@ -28,10 +28,26 @@ fi
 
 verify_output=$("$apksigner" verify --print-certs "$apk_path" 2>&1)
 actual=$(printf '%s\n' "$verify_output" \
-  | sed -n 's/.*Signer #1 certificate SHA-256 digest:[[:space:]]*//p' \
+  | sed -nE 's/.*certificate[[:space:]]+SHA-?256[[:space:]]+(digest|fingerprint):[[:space:]]*//Ip' \
   | head -1 \
   | tr '[:upper:]' '[:lower:]' \
   | tr -d '[:space:]:')
+
+if [[ -z "$actual" ]]; then
+  openssl_bin=${OPENSSL_BIN:-$(command -v openssl || true)}
+  if [[ -n "$openssl_bin" && -x "$openssl_bin" ]]; then
+    certificate_pem=$("$apksigner" verify --print-certs-pem "$apk_path" 2>&1 \
+      | awk '/-----BEGIN CERTIFICATE-----/{capture=1} capture{print} /-----END CERTIFICATE-----/{exit}')
+    if [[ -n "$certificate_pem" ]]; then
+      actual=$(printf '%s\n' "$certificate_pem" \
+        | "$openssl_bin" x509 -noout -fingerprint -sha256 2>/dev/null \
+        | sed -nE 's/.*fingerprint[[:space:]]*=[[:space:]]*//Ip' \
+        | head -1 \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -d '[:space:]:')
+    fi
+  fi
+fi
 expected=$(tr '[:upper:]' '[:lower:]' < "$expected_file" | tr -d '[:space:]')
 
 if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then

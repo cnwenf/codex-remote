@@ -47,16 +47,38 @@ describe("native installer contract", () => {
     const apk = join(fixture, "app.apk");
     const fingerprint = join(fixture, "fingerprint.sha256");
     const fakeApksigner = join(fixture, "apksigner");
+    const fakeOpenssl = join(fixture, "openssl");
     const expected = "a".repeat(64);
 
     try {
       writeFileSync(apk, "fixture");
       writeFileSync(fingerprint, `${expected}\n`);
-      writeFileSync(fakeApksigner, `#!/bin/sh\nprintf '  Signer #1 certificate SHA-256 digest: %s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/../&:/g;s/:$//')" >&2\n`);
+      writeFileSync(fakeApksigner, `#!/bin/sh
+if printf '%s\\n' "$*" | grep -q -- '--print-certs-pem'; then
+  printf '%s\\n' '-----BEGIN CERTIFICATE-----' 'fixture' '-----END CERTIFICATE-----'
+elif [ "\${FAKE_ANDROID_CERT_USE_PEM:-0}" != 1 ]; then
+  printf '  Signer #1 Certificate sha256 fingerprint: %s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/../&:/g;s/:$//')" >&2
+fi
+`);
+      writeFileSync(fakeOpenssl, `#!/bin/sh
+cat >/dev/null
+printf 'sha256 Fingerprint=%s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/../&:/g;s/:$//')"
+`);
       chmodSync(fakeApksigner, 0o755);
+      chmodSync(fakeOpenssl, 0o755);
 
       expect(execFileSync("/bin/bash", [join(root, "scripts/verify-android-signing.sh"), apk, fingerprint], {
         env: { ...process.env, APKSIGNER_BIN: fakeApksigner, FAKE_ANDROID_CERT: expected },
+        encoding: "utf8",
+      })).toContain(expected);
+      expect(execFileSync("/bin/bash", [join(root, "scripts/verify-android-signing.sh"), apk, fingerprint], {
+        env: {
+          ...process.env,
+          APKSIGNER_BIN: fakeApksigner,
+          OPENSSL_BIN: fakeOpenssl,
+          FAKE_ANDROID_CERT: expected,
+          FAKE_ANDROID_CERT_USE_PEM: "1",
+        },
         encoding: "utf8",
       })).toContain(expected);
       expect(() => execFileSync("/bin/bash", [join(root, "scripts/verify-android-signing.sh"), apk, fingerprint], {
