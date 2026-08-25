@@ -24,11 +24,16 @@ describe("native installer contract", () => {
 
   it("packages a verified tunnel helper without enabling public mode by default", () => {
     const fetchTunnel = readFileSync(join(root, "scripts/fetch-cloudflared.sh"), "utf8");
+    const releaseWorkflow = readFileSync(join(root, ".github/workflows/release.yml"), "utf8");
     expect(fetchTunnel).toContain("api.github.com/repos/cloudflare/cloudflared/releases/latest");
     expect(fetchTunnel).toContain("digest");
     expect(fetchTunnel).toContain("shasum -a 256");
     expect(fetchTunnel).toContain("--retry 5 --retry-all-errors");
     expect(fetchTunnel).toContain("--connect-timeout 20");
+    expect(fetchTunnel).toContain('API_CURL_OPTIONS+=(--header "Authorization: Bearer $GH_TOKEN")');
+    expect(fetchTunnel).toMatch(/curl "\$\{API_CURL_OPTIONS\[@\]\}"[\s\S]*api\.github\.com\/repos\/cloudflare\/cloudflared\/releases\/latest/);
+    expect(fetchTunnel).toMatch(/curl "\$\{CURL_OPTIONS\[@\]\}" "\$url"/);
+    expect(releaseWorkflow).toMatch(/Fetch verified public HTTPS helper[\s\S]*env:\s*\n\s+GH_TOKEN: \$\{\{ github\.token \}\}/);
     expect(appSource).toContain('"ConnectionMode"] as? String) == "public"');
     expect(appSource).toContain("trycloudflare\\.com");
     expect(appSource).toContain("Public HTTPS disconnected; retrying");
@@ -51,6 +56,14 @@ describe("native installer contract", () => {
     expect(appSource).toContain('labelWithString: "Authentication token"');
     expect(appSource).toContain('title: "Get Link QR Code"');
     expect(appSource).toContain('title: "Check for Updates"');
+  });
+
+  it("uses an explicit leading-aligned native settings layout instead of ambiguous centered stacks", () => {
+    expect(appSource).toContain("width: 820, height: 660");
+    expect(appSource).toContain("let root = NSView()");
+    expect(appSource).toContain("settingsCard.widthAnchor.constraint(equalTo: root.widthAnchor, multiplier: 0.57");
+    expect(appSource).toContain("title.alignment = .left");
+    expect(appSource).not.toContain("settingsCard.heightAnchor.constraint(equalTo: pairingCard.heightAnchor)");
   });
 
   it("never puts the password in launch agents or command arguments", () => {
@@ -124,12 +137,15 @@ touch "\${@: -1}"
     }
   });
 
-  it("uses the original monochrome connection mark instead of opaque app artwork in the menu bar", () => {
+  it("derives the monochrome menu-bar glyph from the same application icon artwork", () => {
     expect(appSource).toContain("menuBarIcon()");
     expect(appSource).toContain("menuIcon?.isTemplate = true");
-    expect(appSource).not.toContain("dot.radiowaves.right");
-    expect(appSource).not.toContain("MenuIcon.png");
-    expect(buildScript).not.toContain("MenuIcon.png");
+    const menuBarIcon = appSource.match(
+      /private func menuBarIcon\(\)[\s\S]*?\n  \}\n\n  private func appBrandIcon/,
+    )?.[0] ?? "";
+    expect(menuBarIcon).toContain("NSApplication.shared.applicationIconImage");
+    expect(menuBarIcon).toContain("alphaFromApplicationIcon");
+    expect(menuBarIcon).not.toContain("connectionMarkPaths");
   });
 
   it("provides createRequire to bundled CommonJS dependencies without losing ESM top-level await", () => {

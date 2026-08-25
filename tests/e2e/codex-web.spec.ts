@@ -261,18 +261,21 @@ test("mobile browser back swipe history returns to the conversation list", async
   await expect(page).toHaveURL(/127\.0\.0\.1:4318\/?$/);
 });
 
-test("keeps desktop conversation actions hidden until explicitly revealed", async ({ page }) => {
+test("shows conversation actions in one floating menu without shifting the desktop row", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
 
   const row = page.getByRole("button", { name: /^Fixture task，/ }).locator("xpath=../..");
-  const actions = row.locator(".task-row-actions");
-  await expect(actions).toHaveCSS("visibility", "hidden");
+  await expect(row.locator(".task-row-actions")).toHaveCount(0);
+  await expect(row.locator(".task-row-content")).toHaveCSS("transform", "none");
 
   await page.getByRole("button", { name: "对话操作 Fixture task" }).click();
-  await expect(actions).toHaveCSS("visibility", "visible");
+  const menu = page.getByRole("menu", { name: "对话操作 Fixture task" });
+  await expect(menu).toBeVisible();
+  await expect(row.locator(".task-row-content")).toHaveCSS("transform", "none");
+  expect(await row.evaluate((element) => element.contains(document.querySelector('[role="menu"]')))).toBe(false);
 });
 
 test("pins, renames, archives, restores, and deletes through the Desktop-aligned sidebar", async ({ page }) => {

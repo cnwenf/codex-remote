@@ -206,7 +206,7 @@ describe("TaskList", () => {
     expect(onTogglePin).toHaveBeenCalledTimes(2);
   });
 
-  it("reveals synchronized pin and archive actions after a left swipe", async () => {
+  it("opens one floating action menu after a left swipe without embedding actions in the row", async () => {
     const onTogglePin = vi.fn();
     const onArchive = vi.fn();
     render(
@@ -221,13 +221,17 @@ describe("TaskList", () => {
 
     const row = screen.getByRole("button", { name: /Fix login race，运行中/ }).closest(".task-row-shell");
     expect(row).toHaveAttribute("data-actions-open", "false");
+    expect(row?.querySelector(".task-row-actions")).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "对话操作 Fix login race" })).not.toBeInTheDocument();
     fireEvent(row as Element, new MouseEvent("pointerdown", { bubbles: true, clientX: 260, clientY: 40 }));
     fireEvent(row as Element, new MouseEvent("pointerup", { bubbles: true, clientX: 120, clientY: 45 }));
     expect(row).toHaveAttribute("data-actions-open", "true");
+    expect(screen.getByRole("menu", { name: "对话操作 Fix login race" })).toBeVisible();
 
     await userEvent.click(screen.getByRole("button", { name: "归档 Fix login race" }));
     expect(onArchive).toHaveBeenCalledWith("t1");
     expect(row).toHaveAttribute("data-actions-open", "false");
+    expect(screen.queryByRole("menu", { name: "对话操作 Fix login race" })).not.toBeInTheDocument();
   });
 
   it("renames active conversations and restores or deletes archived conversations", async () => {

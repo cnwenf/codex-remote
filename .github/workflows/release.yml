@@ -46,6 +46,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Fetch verified public HTTPS helper
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: scripts/fetch-cloudflared.sh "${{ matrix.arch }}" "$RUNNER_TEMP/cloudflared"
       - name: Build architecture-specific DMG
         run: |

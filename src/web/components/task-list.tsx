@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type FormEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from "react";
 import type { CodexThread, ThreadStatus } from "../../protocol/thread-store";
 
 type TaskListProps = {
@@ -25,6 +25,17 @@ type ProjectGroup = {
   status: ThreadStatus;
 };
 
+type ThreadActionAnchor = {
+  top: number;
+  right: number;
+};
+
+type ThreadActionMenuState = {
+  thread: CodexThread;
+  archived: boolean;
+  anchor: ThreadActionAnchor;
+};
+
 export function TaskList({
   threads,
   archivedThreads = [],
@@ -42,7 +53,7 @@ export function TaskList({
 }: TaskListProps) {
   const [query, setQuery] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
-  const [revealedThreadId, setRevealedThreadId] = useState<string>();
+  const [actionMenu, setActionMenu] = useState<ThreadActionMenuState>();
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [dialog, setDialog] = useState<{ type: "rename" | "delete"; thread: CodexThread }>();
   const [dialogName, setDialogName] = useState("");
@@ -64,6 +75,15 @@ export function TaskList({
     isDirectThread(thread, directCwd) || (hasDesktopProjects && !thread.projectId)
   );
 
+  useEffect(() => {
+    if (!actionMenu) return;
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setActionMenu(undefined);
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [actionMenu]);
+
   function toggleProject(cwd: string) {
     setExpandedProjects((current) => {
       const next = new Set(current);
@@ -74,12 +94,14 @@ export function TaskList({
   }
 
   function openRename(thread: CodexThread) {
+    setActionMenu(undefined);
     setDialog({ type: "rename", thread });
     setDialogName(thread.title);
     setDialogError(undefined);
   }
 
   function openDelete(thread: CodexThread) {
+    setActionMenu(undefined);
     setDialog({ type: "delete", thread });
     setDialogError(undefined);
   }
@@ -111,6 +133,20 @@ export function TaskList({
     if (expanded) void onLoadArchived?.();
   }
 
+  function revealThreadActions(
+    thread: CodexThread,
+    archived: boolean,
+    revealed: boolean,
+    anchor?: ThreadActionAnchor,
+  ) {
+    setActionMenu(revealed && anchor ? { thread, archived, anchor } : undefined);
+  }
+
+  function closeActionsAndRun(action: (() => void | Promise<void>) | undefined) {
+    setActionMenu(undefined);
+    void action?.();
+  }
+
   return (
     <nav className="task-nav" aria-label="对话导航">
       <div className="section-heading">
@@ -138,8 +174,8 @@ export function TaskList({
                     onArchive={onArchive}
                     onRename={onRename ? openRename : undefined}
                     onDelete={onDelete ? openDelete : undefined}
-                    actionsRevealed={revealedThreadId === thread.id}
-                    onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
+                    actionsRevealed={actionMenu?.thread.id === thread.id}
+                    onRevealActions={(revealed, anchor) => revealThreadActions(thread, false, revealed, anchor)}
                     directCwd={directCwd}
                     desktopProjectsAvailable={hasDesktopProjects}
                   />
@@ -180,8 +216,8 @@ export function TaskList({
                               onArchive={onArchive}
                               onRename={onRename ? openRename : undefined}
                               onDelete={onDelete ? openDelete : undefined}
-                              actionsRevealed={revealedThreadId === thread.id}
-                              onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
+                              actionsRevealed={actionMenu?.thread.id === thread.id}
+                              onRevealActions={(revealed, anchor) => revealThreadActions(thread, false, revealed, anchor)}
                               directCwd={directCwd}
                               desktopProjectsAvailable={hasDesktopProjects}
                               compact
@@ -208,8 +244,8 @@ export function TaskList({
                     onArchive={onArchive}
                     onRename={onRename ? openRename : undefined}
                     onDelete={onDelete ? openDelete : undefined}
-                    actionsRevealed={revealedThreadId === thread.id}
-                    onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
+                    actionsRevealed={actionMenu?.thread.id === thread.id}
+                    onRevealActions={(revealed, anchor) => revealThreadActions(thread, false, revealed, anchor)}
                     directCwd={directCwd}
                     desktopProjectsAvailable={hasDesktopProjects}
                   />
@@ -245,8 +281,8 @@ export function TaskList({
                       onUnarchive={onUnarchive}
                       onDelete={onDelete ? openDelete : undefined}
                       archived
-                      actionsRevealed={revealedThreadId === thread.id}
-                      onRevealActions={(revealed) => setRevealedThreadId(revealed ? thread.id : undefined)}
+                      actionsRevealed={actionMenu?.thread.id === thread.id}
+                      onRevealActions={(revealed, anchor) => revealThreadActions(thread, true, revealed, anchor)}
                       directCwd={directCwd}
                       desktopProjectsAvailable={hasDesktopProjects}
                     />
@@ -271,6 +307,22 @@ export function TaskList({
           <span className="compose-icon" aria-hidden="true" />
         </button>
       </div>
+      {actionMenu ? (
+        <ThreadActionMenu
+          state={actionMenu}
+          canRename={Boolean(onRename)}
+          canTogglePin={!actionMenu.archived && Boolean(onTogglePin)}
+          canArchive={!actionMenu.archived && Boolean(onArchive)}
+          canUnarchive={actionMenu.archived && Boolean(onUnarchive)}
+          canDelete={Boolean(onDelete)}
+          onDismiss={() => setActionMenu(undefined)}
+          onRename={() => openRename(actionMenu.thread)}
+          onTogglePin={() => closeActionsAndRun(() => onTogglePin?.(actionMenu.thread.id))}
+          onArchive={() => closeActionsAndRun(() => onArchive?.(actionMenu.thread.id))}
+          onUnarchive={() => closeActionsAndRun(() => onUnarchive?.(actionMenu.thread.id))}
+          onDelete={() => openDelete(actionMenu.thread)}
+        />
+      ) : null}
       {dialog ? (
         <div className="thread-dialog-backdrop" onPointerDown={(event) => {
           if (event.currentTarget === event.target && !dialogBusy) setDialog(undefined);
@@ -311,6 +363,99 @@ export function TaskList({
   );
 }
 
+function ThreadActionMenu({
+  state,
+  canRename,
+  canTogglePin,
+  canArchive,
+  canUnarchive,
+  canDelete,
+  onDismiss,
+  onRename,
+  onTogglePin,
+  onArchive,
+  onUnarchive,
+  onDelete,
+}: {
+  state: ThreadActionMenuState;
+  canRename: boolean;
+  canTogglePin: boolean;
+  canArchive: boolean;
+  canUnarchive: boolean;
+  canDelete: boolean;
+  onDismiss: () => void;
+  onRename: () => void;
+  onTogglePin: () => void;
+  onArchive: () => void;
+  onUnarchive: () => void;
+  onDelete: () => void;
+}) {
+  const pinned = isPinnedThread(state.thread);
+  return (
+    <div
+      className="thread-action-layer"
+      onPointerDown={(event) => {
+        if (event.currentTarget === event.target) onDismiss();
+      }}
+    >
+      <div
+        className="thread-action-menu"
+        role="menu"
+        aria-label={`对话操作 ${state.thread.title}`}
+        style={{ top: state.anchor.top, right: state.anchor.right }}
+      >
+        <p className="thread-action-title" title={state.thread.title}>{state.thread.title}</p>
+        {canRename ? (
+          <button type="button" aria-label={`重命名 ${state.thread.title}`} onClick={onRename}>
+            <ActionGlyph type="rename" />
+            <span>重命名</span>
+          </button>
+        ) : null}
+        {canTogglePin ? (
+          <button type="button" aria-label={`${pinned ? "取消置顶" : "置顶"} ${state.thread.title}`} onClick={onTogglePin}>
+            <ActionGlyph type="pin" />
+            <span>{pinned ? "取消置顶" : "置顶"}</span>
+          </button>
+        ) : null}
+        {canArchive ? (
+          <button type="button" aria-label={`归档 ${state.thread.title}`} onClick={onArchive}>
+            <ActionGlyph type="archive" />
+            <span>归档</span>
+          </button>
+        ) : null}
+        {canUnarchive ? (
+          <button type="button" aria-label={`取消归档 ${state.thread.title}`} onClick={onUnarchive}>
+            <ActionGlyph type="restore" />
+            <span>取消归档</span>
+          </button>
+        ) : null}
+        {canDelete ? (
+          <button className="thread-action-danger" type="button" aria-label={`删除 ${state.thread.title}`} onClick={onDelete}>
+            <ActionGlyph type="delete" />
+            <span>删除</span>
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ActionGlyph({ type }: { type: "rename" | "pin" | "archive" | "restore" | "delete" }) {
+  if (type === "rename") {
+    return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 16.5-.5 4 4-.5L19 8.5 15.5 5 4 16.5Z" /><path d="m13.8 6.8 3.4 3.4" /></svg>;
+  }
+  if (type === "pin") {
+    return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 4 8 0-1.5 5 3.5 3.5v1H6v-1L9.5 9 8 4Z" /><path d="M12 13.5V21" /></svg>;
+  }
+  if (type === "archive") {
+    return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16v13H4z" /><path d="M3 4h18v3H3zM9 11h6" /></svg>;
+  }
+  if (type === "restore") {
+    return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16v13H4z" /><path d="M3 4h18v3H3zM12 16v-6m0 0-3 3m3-3 3 3" /></svg>;
+  }
+  return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" /></svg>;
+}
+
 function ConversationRow({
   thread,
   selected,
@@ -337,12 +482,11 @@ function ConversationRow({
   onDelete?: (thread: CodexThread) => void;
   archived?: boolean;
   actionsRevealed: boolean;
-  onRevealActions: (revealed: boolean) => void;
+  onRevealActions: (revealed: boolean, anchor?: ThreadActionAnchor) => void;
   compact?: boolean;
   directCwd?: string;
   desktopProjectsAvailable?: boolean;
 }) {
-  const pinned = isPinnedThread(thread);
   const pointerStart = useRef<{ x: number; y: number } | undefined>(undefined);
   const consumedSwipe = useRef(false);
   const actions = [onRename, onTogglePin, onArchive, onUnarchive, onDelete].filter(Boolean);
@@ -362,7 +506,7 @@ function ConversationRow({
     const vertical = event.clientY - start.y;
     if (Math.abs(horizontal) < 42 || Math.abs(horizontal) <= Math.abs(vertical)) return;
     consumedSwipe.current = true;
-    onRevealActions(horizontal < 0);
+    onRevealActions(horizontal < 0, horizontal < 0 ? menuAnchor(event.currentTarget) : undefined);
   }
 
   function selectConversation() {
@@ -377,72 +521,15 @@ function ConversationRow({
     onSelect(thread.id);
   }
 
-  function runAction(action: ((id: string) => void) | undefined) {
-    onRevealActions(false);
-    action?.(thread.id);
-  }
-
-  function runThreadAction(action: ((thread: CodexThread) => void) | undefined) {
-    onRevealActions(false);
-    action?.(thread);
-  }
-
   return (
     <div
       className={`task-row-shell ${compact ? "task-row-shell-compact" : ""}`}
       data-selected={selected}
       data-actions-open={actionsRevealed}
-      data-action-count={actions.length}
       onPointerDown={beginSwipe}
       onPointerUp={finishSwipe}
       onPointerCancel={() => { pointerStart.current = undefined; }}
     >
-      {hasActions ? (
-        <div className="task-row-actions" aria-hidden={!actionsRevealed}>
-          {onRename ? (
-            <button
-              type="button"
-              tabIndex={actionsRevealed ? 0 : -1}
-              aria-label={`重命名 ${thread.title}`}
-              onClick={() => runThreadAction(onRename)}
-            >重命名</button>
-          ) : null}
-          {onTogglePin ? (
-            <button
-              type="button"
-              tabIndex={actionsRevealed ? 0 : -1}
-              aria-label={`${pinned ? "取消置顶" : "置顶"} ${thread.title}`}
-              onClick={() => runAction(onTogglePin)}
-            >{pinned ? "取消置顶" : "置顶"}</button>
-          ) : null}
-          {onArchive ? (
-            <button
-              type="button"
-              className="archive-action"
-              tabIndex={actionsRevealed ? 0 : -1}
-              aria-label={`归档 ${thread.title}`}
-              onClick={() => runAction(onArchive)}
-            >归档</button>
-          ) : null}
-          {onUnarchive ? (
-            <button
-              type="button"
-              tabIndex={actionsRevealed ? 0 : -1}
-              aria-label={`取消归档 ${thread.title}`}
-              onClick={() => runAction(onUnarchive)}
-            >取消归档</button>
-          ) : null}
-          {onDelete ? (
-            <button
-              type="button"
-              className="delete-action"
-              tabIndex={actionsRevealed ? 0 : -1}
-              aria-label={`删除 ${thread.title}`}
-              onClick={() => runThreadAction(onDelete)}
-            >删除</button>
-          ) : null}
-        </div>
-      ) : null}
       <div className="task-row-content">
         <button
           type="button"
@@ -470,12 +557,24 @@ function ConversationRow({
             className="task-row-more"
             aria-label={`对话操作 ${thread.title}`}
             aria-expanded={actionsRevealed}
-            onClick={() => onRevealActions(!actionsRevealed)}
+            onClick={(event) => onRevealActions(
+              !actionsRevealed,
+              !actionsRevealed ? menuAnchor(event.currentTarget) : undefined,
+            )}
           >•••</button>
         ) : null}
       </div>
     </div>
   );
+}
+
+function menuAnchor(element: HTMLElement): ThreadActionAnchor {
+  const rect = element.getBoundingClientRect();
+  const estimatedHeight = 286;
+  return {
+    top: Math.max(12, Math.min(rect.bottom + 8, window.innerHeight - estimatedHeight - 12)),
+    right: Math.max(12, window.innerWidth - rect.right),
+  };
 }
 
 export function projectsFromThreads(threads: CodexThread[], directCwd?: string) {

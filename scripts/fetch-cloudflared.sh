@@ -12,7 +12,11 @@ esac
 work=$(mktemp -d "${TMPDIR:-/tmp}/codex-remote-cloudflared.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 CURL_OPTIONS=(-fsSL --proto '=https' --tlsv1.2 --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)
-/usr/bin/curl "${CURL_OPTIONS[@]}" \
+API_CURL_OPTIONS=("${CURL_OPTIONS[@]}" --header "Accept: application/vnd.github+json" --header "X-GitHub-Api-Version: 2022-11-28")
+if [[ -n "${GH_TOKEN:-}" ]]; then
+  API_CURL_OPTIONS+=(--header "Authorization: Bearer $GH_TOKEN")
+fi
+/usr/bin/curl "${API_CURL_OPTIONS[@]}" \
   https://api.github.com/repos/cloudflare/cloudflared/releases/latest -o "$work/release.json"
 metadata=$(/usr/bin/python3 - "$work/release.json" "$ASSET" <<'PY'
 import json, sys

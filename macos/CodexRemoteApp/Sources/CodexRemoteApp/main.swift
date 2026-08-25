@@ -79,68 +79,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func configureWindow() {
-    window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 640), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+    window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 660), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
     window.title = "Codex Remote"
     window.titlebarAppearsTransparent = true
     window.backgroundColor = .windowBackgroundColor
     window.isReleasedWhenClosed = false
-    window.minSize = NSSize(width: 700, height: 610)
+    window.minSize = NSSize(width: 780, height: 640)
     window.center()
     guard let content = window.contentView else { return }
 
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.alignment = .width
-    stack.spacing = 16
-    stack.translatesAutoresizingMaskIntoConstraints = false
+    let root = NSView()
+    root.translatesAutoresizingMaskIntoConstraints = false
+    content.addSubview(root)
 
-    let iconView = NSImageView(image: appBrandIcon(size: 48))
+    let iconView = NSImageView(image: appBrandIcon(size: 44))
     iconView.imageScaling = .scaleProportionallyUpOrDown
-    iconView.widthAnchor.constraint(equalToConstant: 48).isActive = true
-    iconView.heightAnchor.constraint(equalToConstant: 48).isActive = true
+    iconView.widthAnchor.constraint(equalToConstant: 44).isActive = true
+    iconView.heightAnchor.constraint(equalToConstant: 44).isActive = true
     let title = NSTextField(labelWithString: "Codex Remote")
-    title.font = .systemFont(ofSize: 24, weight: .semibold)
+    title.font = .systemFont(ofSize: 22, weight: .semibold)
+    title.alignment = .left
     let subtitle = NSTextField(wrappingLabelWithString: "Manage secure access to the Codex Desktop sessions on this Mac.")
     subtitle.textColor = .secondaryLabelColor
     subtitle.font = .systemFont(ofSize: 12.5)
+    subtitle.alignment = .left
     let titleStack = NSStackView(views: [title, subtitle])
     titleStack.orientation = .vertical
     titleStack.alignment = .leading
-    titleStack.spacing = 4
+    titleStack.spacing = 3
     let header = NSStackView(views: [iconView, titleStack])
     header.orientation = .horizontal
     header.alignment = .centerY
-    header.spacing = 14
+    header.spacing = 12
+    header.translatesAutoresizingMaskIntoConstraints = false
 
     toggle.target = self
     toggle.action = #selector(toggleRemote)
+    toggle.title = "Enable remote access"
+    toggle.setButtonType(.switch)
     hostField.placeholderString = "Private IPv4 address"
     passwordField.placeholderString = "Required for Web and app access"
     connectionMode.addItems(withTitles: ["Private network", "Public HTTPS (experimental)"])
 
     addressField.isEditable = false
     addressField.isSelectable = true
-    addressField.font = .monospacedSystemFont(ofSize: 12.5, weight: .medium)
+    addressField.isBordered = false
+    addressField.drawsBackground = false
+    addressField.font = .monospacedSystemFont(ofSize: 12.5, weight: .semibold)
     addressField.lineBreakMode = .byTruncatingMiddle
     let addressTitle = NSTextField(labelWithString: "Current access address")
-    addressTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+    addressTitle.font = .systemFont(ofSize: 12, weight: .medium)
+    addressTitle.textColor = .secondaryLabelColor
+    addressTitle.alignment = .left
     let copyAddress = NSButton(title: "Copy", target: self, action: #selector(copyRemoteAddress))
     let openRemote = NSButton(title: "Open Remote", target: self, action: #selector(openBrowser))
     openRemote.bezelStyle = .rounded
     let addressActions = NSStackView(views: [copyAddress, openRemote])
     addressActions.orientation = .horizontal
     addressActions.spacing = 8
-    let addressRow = NSStackView(views: [addressField, addressActions])
-    addressRow.orientation = .horizontal
-    addressRow.alignment = .centerY
-    addressRow.spacing = 10
-    addressField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let addressDetails = NSStackView(views: [addressTitle, addressField])
+    addressDetails.orientation = .vertical
+    addressDetails.alignment = .leading
+    addressDetails.spacing = 4
+    addressDetails.setContentHuggingPriority(.defaultLow, for: .horizontal)
     addressActions.setContentHuggingPriority(.required, for: .horizontal)
-    let addressContent = NSStackView(views: [addressTitle, addressRow])
-    addressContent.orientation = .vertical
-    addressContent.alignment = .width
-    addressContent.spacing = 8
+    let addressContent = NSStackView(views: [addressDetails, addressActions])
+    addressContent.orientation = .horizontal
+    addressContent.alignment = .centerY
+    addressContent.spacing = 16
     let addressCard = card(content: addressContent)
+    addressCard.translatesAutoresizingMaskIntoConstraints = false
 
     let save = NSButton(title: "Save Settings", target: self, action: #selector(saveSettings))
     save.keyEquivalent = "\r"
@@ -153,53 +161,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let settingsTitle = NSTextField(labelWithString: "Connection")
     settingsTitle.font = .systemFont(ofSize: 16, weight: .semibold)
+    settingsTitle.alignment = .left
+    let settingsHelp = NSTextField(wrappingLabelWithString: "Choose how this Mac is reached and protect it with a login token.")
+    settingsHelp.font = .systemFont(ofSize: 11.5)
+    settingsHelp.textColor = .secondaryLabelColor
+    settingsHelp.alignment = .left
     let tokenTitle = NSTextField(labelWithString: "Authentication token")
     tokenTitle.font = .systemFont(ofSize: 12, weight: .medium)
+    tokenTitle.alignment = .left
     let modeTitle = NSTextField(labelWithString: "Network mode")
     modeTitle.font = .systemFont(ofSize: 12, weight: .medium)
+    modeTitle.alignment = .left
     let hostTitle = NSTextField(labelWithString: "Bind address")
     hostTitle.font = .systemFont(ofSize: 12, weight: .medium)
+    hostTitle.alignment = .left
+    let saveSpacer = NSView()
+    saveSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let saveRow = NSStackView(views: [saveSpacer, save])
+    saveRow.orientation = .horizontal
+    saveRow.alignment = .centerY
     let settingsStack = NSStackView(views: [
       settingsTitle,
+      settingsHelp,
       toggle,
       labelled(modeTitle, connectionMode),
       labelled(hostTitle, hostField),
       labelled(tokenTitle, passwordField),
-      save,
+      saveRow,
     ])
     settingsStack.orientation = .vertical
-    settingsStack.alignment = .width
-    settingsStack.spacing = 11
+    settingsStack.alignment = .leading
+    settingsStack.spacing = 12
+    for control in [connectionMode, hostField, passwordField, saveRow] {
+      control.widthAnchor.constraint(equalTo: settingsStack.widthAnchor).isActive = true
+    }
     let settingsCard = card(content: settingsStack)
+    settingsCard.translatesAutoresizingMaskIntoConstraints = false
 
     let pairingTitle = NSTextField(labelWithString: "Connect a mobile device")
     pairingTitle.font = .systemFont(ofSize: 16, weight: .semibold)
+    pairingTitle.alignment = .left
+    let pairingHelp = NSTextField(wrappingLabelWithString: "Scan a one-time code in the Codex Remote mobile app.")
+    pairingHelp.font = .systemFont(ofSize: 11.5)
+    pairingHelp.textColor = .secondaryLabelColor
+    pairingHelp.alignment = .left
     pairingImageView.imageScaling = .scaleProportionallyUpOrDown
     pairingImageView.isHidden = true
     pairingImageView.wantsLayer = true
     pairingImageView.layer?.backgroundColor = NSColor.white.cgColor
     pairingImageView.layer?.cornerRadius = 12
-    pairingImageView.widthAnchor.constraint(equalToConstant: 176).isActive = true
-    pairingImageView.heightAnchor.constraint(equalToConstant: 176).isActive = true
+    pairingImageView.widthAnchor.constraint(equalToConstant: 184).isActive = true
+    pairingImageView.heightAnchor.constraint(equalToConstant: 184).isActive = true
     pairingPlaceholder.textColor = .secondaryLabelColor
     pairingPlaceholder.alignment = .center
     pairingPlaceholder.maximumNumberOfLines = 3
+    pairingPlaceholder.translatesAutoresizingMaskIntoConstraints = false
     pairingAddressLabel.isHidden = true
     pairingAddressLabel.alignment = .center
     pairingAddressLabel.maximumNumberOfLines = 2
     pairingAddressLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
-    let pairingStack = NSStackView(views: [pairingTitle, pairingImageView, pairingPlaceholder, pairingAddressLabel, pairing])
+    let pairingStage = NSView()
+    pairingStage.addSubview(pairingImageView)
+    pairingStage.addSubview(pairingPlaceholder)
+    pairingImageView.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      pairingStage.heightAnchor.constraint(equalToConstant: 190),
+      pairingImageView.centerXAnchor.constraint(equalTo: pairingStage.centerXAnchor),
+      pairingImageView.centerYAnchor.constraint(equalTo: pairingStage.centerYAnchor),
+      pairingPlaceholder.centerXAnchor.constraint(equalTo: pairingStage.centerXAnchor),
+      pairingPlaceholder.centerYAnchor.constraint(equalTo: pairingStage.centerYAnchor),
+      pairingPlaceholder.widthAnchor.constraint(lessThanOrEqualTo: pairingStage.widthAnchor, constant: -22),
+    ])
+    let pairingStack = NSStackView(views: [pairingTitle, pairingHelp, pairingStage, pairingAddressLabel, pairing])
     pairingStack.orientation = .vertical
-    pairingStack.alignment = .centerX
-    pairingStack.spacing = 11
+    pairingStack.alignment = .width
+    pairingStack.spacing = 10
+    pairing.alignment = .center
     let pairingCard = card(content: pairingStack)
-
-    let columns = NSStackView(views: [settingsCard, pairingCard])
-    columns.orientation = .horizontal
-    columns.alignment = .top
-    columns.spacing = 16
-    columns.distribution = .fillEqually
-    settingsCard.heightAnchor.constraint(equalTo: pairingCard.heightAnchor).isActive = true
+    pairingCard.translatesAutoresizingMaskIntoConstraints = false
 
     statusLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
     statusLabel.textColor = .secondaryLabelColor
@@ -209,14 +248,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     footer.orientation = .horizontal
     footer.alignment = .centerY
     footer.spacing = 10
+    footer.translatesAutoresizingMaskIntoConstraints = false
 
-    [header, addressCard, columns, footer].forEach(stack.addArrangedSubview)
-    content.addSubview(stack)
+    [header, addressCard, settingsCard, pairingCard, footer].forEach(root.addSubview)
     NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 26),
-      stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -26),
-      stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-      stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -22),
+      root.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+      root.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+      root.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+      root.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+
+      header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+      header.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
+      header.topAnchor.constraint(equalTo: root.topAnchor),
+
+      addressCard.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+      addressCard.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+      addressCard.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
+      addressCard.heightAnchor.constraint(equalToConstant: 86),
+
+      settingsCard.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+      settingsCard.topAnchor.constraint(equalTo: addressCard.bottomAnchor, constant: 16),
+      settingsCard.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -16),
+      settingsCard.widthAnchor.constraint(equalTo: root.widthAnchor, multiplier: 0.57),
+
+      pairingCard.leadingAnchor.constraint(equalTo: settingsCard.trailingAnchor, constant: 16),
+      pairingCard.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+      pairingCard.topAnchor.constraint(equalTo: settingsCard.topAnchor),
+      pairingCard.bottomAnchor.constraint(equalTo: settingsCard.bottomAnchor),
+
+      footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+      footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+      footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+      footer.heightAnchor.constraint(greaterThanOrEqualToConstant: 30),
     ])
   }
 
@@ -224,9 +287,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let box = NSBox()
     box.boxType = .custom
     box.borderWidth = 1
-    box.cornerRadius = 14
-    box.borderColor = .separatorColor
-    box.fillColor = .controlBackgroundColor
+    box.cornerRadius = 16
+    box.borderColor = NSColor.separatorColor.withAlphaComponent(0.58)
+    box.fillColor = NSColor.controlBackgroundColor.withAlphaComponent(0.78)
     let container = NSView()
     content.translatesAutoresizingMaskIntoConstraints = false
     container.addSubview(content)
@@ -243,25 +306,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private func labelled(_ title: NSTextField, _ control: NSView) -> NSView {
     let stack = NSStackView(views: [title, control])
     stack.orientation = .vertical
-    stack.alignment = .width
+    stack.alignment = .leading
     stack.spacing = 5
+    control.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     return stack
   }
 
   private func menuBarIcon() -> NSImage? {
-    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-      let paths = self.connectionMarkPaths(in: rect.insetBy(dx: 1.7, dy: 1.7))
-      NSColor.labelColor.setStroke()
-      for path in paths {
-        path.lineWidth = 1.7
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
-        path.stroke()
-      }
-      return true
-    }
+    guard let source = NSApplication.shared.applicationIconImage,
+          let image = alphaFromApplicationIcon(source, pixelSize: 64) else { return nil }
+    image.size = NSSize(width: 18, height: 18)
     image.isTemplate = true
     image.accessibilityDescription = "Codex Remote"
+    return image
+  }
+
+  private func alphaFromApplicationIcon(_ source: NSImage, pixelSize: Int) -> NSImage? {
+    guard let bitmap = NSBitmapImageRep(
+      bitmapDataPlanes: nil,
+      pixelsWide: pixelSize,
+      pixelsHigh: pixelSize,
+      bitsPerSample: 8,
+      samplesPerPixel: 4,
+      hasAlpha: true,
+      isPlanar: false,
+      colorSpaceName: .deviceRGB,
+      bytesPerRow: 0,
+      bitsPerPixel: 0
+    ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    NSColor.clear.setFill()
+    NSRect(x: 0, y: 0, width: pixelSize, height: pixelSize).fill()
+    source.draw(
+      in: NSRect(x: 0, y: 0, width: pixelSize, height: pixelSize),
+      from: .zero,
+      operation: .sourceOver,
+      fraction: 1
+    )
+    NSGraphicsContext.restoreGraphicsState()
+
+    for y in 0..<pixelSize {
+      for x in 0..<pixelSize {
+        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+        let luminance = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
+        let symbolAlpha = min(1, max(0, (luminance - 0.42) / 0.36)) * color.alphaComponent
+        bitmap.setColor(NSColor(white: 0, alpha: symbolAlpha), atX: x, y: y)
+      }
+    }
+
+    let image = NSImage(size: NSSize(width: pixelSize, height: pixelSize))
+    image.addRepresentation(bitmap)
     return image
   }
 
@@ -271,31 +367,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let image = (source.copy() as? NSImage) ?? source
     image.size = NSSize(width: size, height: size)
     return image
-  }
-
-  private func connectionMarkPaths(in rect: NSRect) -> [NSBezierPath] {
-    func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
-      NSPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
-    }
-    func rotated(_ source: NSPoint, by degrees: CGFloat) -> NSPoint {
-      let radians = degrees * .pi / 180
-      let center = NSPoint(x: rect.midX, y: rect.midY)
-      let dx = source.x - center.x
-      let dy = source.y - center.y
-      return NSPoint(
-        x: center.x + dx * cos(radians) - dy * sin(radians),
-        y: center.y + dx * sin(radians) + dy * cos(radians)
-      )
-    }
-    func segment(rotation: CGFloat) -> NSBezierPath {
-      let path = NSBezierPath()
-      path.move(to: rotated(point(0.5, 0.94), by: rotation))
-      path.line(to: rotated(point(0.88, 0.72), by: rotation))
-      path.line(to: rotated(point(0.88, 0.29), by: rotation))
-      path.line(to: rotated(point(0.66, 0.12), by: rotation))
-      return path
-    }
-    return [segment(rotation: 0), segment(rotation: 120), segment(rotation: 240)]
   }
 
   private func loadConfiguration() {
