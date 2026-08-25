@@ -16,6 +16,7 @@ export interface CodexRemoteNativePlugin {
   stopMonitoring(options: { connectionId?: string }): Promise<void>;
   getLaunchTarget(): Promise<MobileThreadTarget | Record<string, never>>;
   scanConnection(): Promise<{ value: string }>;
+  openExternalUrl(options: { url: string }): Promise<void>;
   addListener(
     eventName: "openThread",
     listener: (target: MobileThreadTarget) => void,

@@ -15,6 +15,14 @@ const thread: CodexThread = {
 };
 
 describe("TaskList", () => {
+  it("uses the mobile Remote navigation shell with bottom actions", () => {
+    const { container } = render(<TaskList threads={[thread]} onSelect={vi.fn()} onNew={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "Remote" })).toBeVisible();
+    expect(container.querySelector(".task-nav-footer")).toContainElement(screen.getByRole("searchbox"));
+    expect(container.querySelector(".task-nav-footer")).toContainElement(screen.getByRole("button", { name: "新对话" }));
+  });
+
   it("opens a selected task", async () => {
     const onSelect = vi.fn();
     render(<TaskList threads={[thread]} onSelect={onSelect} onNew={vi.fn()} />);

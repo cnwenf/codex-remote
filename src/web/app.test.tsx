@@ -48,9 +48,9 @@ describe("App", () => {
     useCodexMock.mockReturnValue(codexState());
   });
 
-  it("renders the local Codex client heading", () => {
+  it("renders the Remote product heading", () => {
     render(<App />);
-    expect(screen.getByRole("heading", { name: "Codex Remote" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Remote" })).toBeVisible();
     expect(document.querySelector(".brand-mark img")).toBeVisible();
   });
 

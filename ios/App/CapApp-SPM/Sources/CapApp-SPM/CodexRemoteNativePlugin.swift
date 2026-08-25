@@ -24,6 +24,7 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "stopMonitoring", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getLaunchTarget", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "scanConnection", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "openExternalUrl", returnType: CAPPluginReturnPromise),
     ]
 
     public override func load() {
@@ -103,6 +104,20 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             }
             presenter.present(scanner, animated: true)
+        }
+    }
+
+    @objc public func openExternalUrl(_ call: CAPPluginCall) {
+        guard
+            let value = call.getString("url"),
+            let url = URL(string: value),
+            url.scheme?.lowercased() == "https"
+        else { call.reject("external-url-insecure"); return }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:]) { opened in
+                if opened { call.resolve() }
+                else { call.reject("external-url-open-failed") }
+            }
         }
     }
 

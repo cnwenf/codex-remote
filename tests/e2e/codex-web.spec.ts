@@ -1,5 +1,47 @@
 import { expect, test } from "@playwright/test";
 
+test("follows the system theme and keeps mobile navigation actions in thumb reach", async ({ page }, testInfo) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+
+  const lightTheme = await page.evaluate(() => ({
+    scheme: getComputedStyle(document.documentElement).colorScheme,
+    canvas: getComputedStyle(document.body).backgroundColor,
+  }));
+  expect(lightTheme.scheme).toContain("light");
+
+  const footer = page.locator(".task-nav-footer");
+  await expect(footer).toBeVisible();
+  if (testInfo.project.name === "chrome-mobile") {
+    const footerBox = await footer.boundingBox();
+    expect(footerBox).not.toBeNull();
+    expect(footerBox!.y + footerBox!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  }
+
+  await page.emulateMedia({ colorScheme: "dark" });
+  const darkTheme = await page.evaluate(() => ({
+    scheme: getComputedStyle(document.documentElement).colorScheme,
+    canvas: getComputedStyle(document.body).backgroundColor,
+  }));
+  expect(darkTheme.scheme).toContain("dark");
+  expect(darkTheme.canvas).not.toBe(lightTheme.canvas);
+
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  const headerRadius = await page.locator(".task-header").evaluate((element) => (
+    Number.parseFloat(getComputedStyle(element).borderTopLeftRadius)
+  ));
+  expect(headerRadius).toBeGreaterThan(20);
+  if (process.env.CODEX_REMOTE_CAPTURE) {
+    await page.screenshot({
+      path: `artifacts/theme-dark-${testInfo.project.name}.png`,
+      fullPage: false,
+    });
+  }
+});
+
 test("keeps the browser signed in after a reload", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");

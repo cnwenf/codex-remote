@@ -133,7 +133,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
       <header className="topbar">
         <div className="brand-lockup">
           <BrandMark compact />
-          <h1>Codex Remote</h1>
+          <h1>Remote</h1>
         </div>
         {remote ? (
           <button type="button" className="manage-connections-button" onClick={remote.onManageConnections}>

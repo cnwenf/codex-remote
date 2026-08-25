@@ -19,11 +19,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     .appendingPathComponent("Library/Application Support/Codex Remote", isDirectory: true)
   private var passwordField = NSSecureTextField()
   private var hostField = NSTextField()
+  private var addressField = NSTextField()
   private var statusLabel = NSTextField(labelWithString: "Stopped")
   private var toggle = NSButton(checkboxWithTitle: "Remote enabled", target: nil, action: nil)
   private var connectionMode = NSPopUpButton()
+  private var pairingImageView = NSImageView()
+  private var pairingPlaceholder = NSTextField(wrappingLabelWithString: "Generate a one-time QR code, then scan it with the iPhone or Android app.")
+  private var pairingAddressLabel = NSTextField(wrappingLabelWithString: "")
   private var updateController: UpdateController!
-  private let pairingPanelRetainer = PairingPanelRetainer()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -37,17 +40,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     if ProcessInfo.processInfo.environment["CODEX_REMOTE_UI_PREVIEW"] == "pairing" {
       toggle.state = .off
       showSettings()
-      presentPairingWindow(payload: "codex-remote-preview", baseURL: "http://private-mac.local:4321")
+      presentPairingInManagementWindow(payload: "codex-remote-preview", baseURL: "http://private-mac.local:4321")
+      return
+    }
+    if ProcessInfo.processInfo.environment["CODEX_REMOTE_UI_PREVIEW"] == "management" {
+      toggle.state = .off
+      statusLabel.stringValue = "Ready to configure"
+      showSettings()
       return
     }
     #endif
     if toggle.state == .on { startGateway() }
+    if ProcessInfo.processInfo.environment["CODEX_REMOTE_BACKGROUND_LAUNCH"] != "1" {
+      showSettings()
+    }
   }
 
   func applicationWillTerminate(_ notification: Notification) { stopGateway() }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-    openBrowser()
+    showSettings()
     return false
   }
 
@@ -67,26 +79,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func configureWindow() {
-    window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 500), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+    window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 640), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
     window.title = "Codex Remote"
     window.titlebarAppearsTransparent = true
     window.backgroundColor = .windowBackgroundColor
+    window.isReleasedWhenClosed = false
+    window.minSize = NSSize(width: 700, height: 610)
     window.center()
     guard let content = window.contentView else { return }
 
     let stack = NSStackView()
     stack.orientation = .vertical
     stack.alignment = .width
-    stack.spacing = 18
+    stack.spacing = 16
     stack.translatesAutoresizingMaskIntoConstraints = false
 
-    let iconView = NSImageView(image: appBrandIcon(size: 52))
+    let iconView = NSImageView(image: appBrandIcon(size: 48))
     iconView.imageScaling = .scaleProportionallyUpOrDown
-    iconView.widthAnchor.constraint(equalToConstant: 52).isActive = true
-    iconView.heightAnchor.constraint(equalToConstant: 52).isActive = true
+    iconView.widthAnchor.constraint(equalToConstant: 48).isActive = true
+    iconView.heightAnchor.constraint(equalToConstant: 48).isActive = true
     let title = NSTextField(labelWithString: "Codex Remote")
-    title.font = .systemFont(ofSize: 22, weight: .semibold)
-    let subtitle = NSTextField(wrappingLabelWithString: "Private, lightweight access to the Codex Desktop sessions on this Mac.")
+    title.font = .systemFont(ofSize: 24, weight: .semibold)
+    let subtitle = NSTextField(wrappingLabelWithString: "Manage secure access to the Codex Desktop sessions on this Mac.")
     subtitle.textColor = .secondaryLabelColor
     subtitle.font = .systemFont(ofSize: 12.5)
     let titleStack = NSStackView(views: [title, subtitle])
@@ -101,8 +115,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     toggle.target = self
     toggle.action = #selector(toggleRemote)
     hostField.placeholderString = "Private IPv4 address"
-    passwordField.placeholderString = "Web login password"
+    passwordField.placeholderString = "Required for Web and app access"
     connectionMode.addItems(withTitles: ["Private network", "Public HTTPS (experimental)"])
+
+    addressField.isEditable = false
+    addressField.isSelectable = true
+    addressField.font = .monospacedSystemFont(ofSize: 12.5, weight: .medium)
+    addressField.lineBreakMode = .byTruncatingMiddle
+    let addressTitle = NSTextField(labelWithString: "Current access address")
+    addressTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+    let copyAddress = NSButton(title: "Copy", target: self, action: #selector(copyRemoteAddress))
+    let openRemote = NSButton(title: "Open Remote", target: self, action: #selector(openBrowser))
+    openRemote.bezelStyle = .rounded
+    let addressActions = NSStackView(views: [copyAddress, openRemote])
+    addressActions.orientation = .horizontal
+    addressActions.spacing = 8
+    let addressRow = NSStackView(views: [addressField, addressActions])
+    addressRow.orientation = .horizontal
+    addressRow.alignment = .centerY
+    addressRow.spacing = 10
+    addressField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    addressActions.setContentHuggingPriority(.required, for: .horizontal)
+    let addressContent = NSStackView(views: [addressTitle, addressRow])
+    addressContent.orientation = .vertical
+    addressContent.alignment = .width
+    addressContent.spacing = 8
+    let addressCard = card(content: addressContent)
+
     let save = NSButton(title: "Save Settings", target: self, action: #selector(saveSettings))
     save.keyEquivalent = "\r"
     save.bezelStyle = .rounded
@@ -110,53 +149,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let version = NSTextField(labelWithString: "Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")")
     version.textColor = .tertiaryLabelColor
     version.font = .systemFont(ofSize: 11.5)
-    let pairing = NSButton(title: "Show Pairing QR", target: self, action: #selector(showPairingQR))
+    let pairing = NSButton(title: "Get Link QR Code", target: self, action: #selector(showPairingQR))
 
+    let settingsTitle = NSTextField(labelWithString: "Connection")
+    settingsTitle.font = .systemFont(ofSize: 16, weight: .semibold)
+    let tokenTitle = NSTextField(labelWithString: "Authentication token")
+    tokenTitle.font = .systemFont(ofSize: 12, weight: .medium)
+    let modeTitle = NSTextField(labelWithString: "Network mode")
+    modeTitle.font = .systemFont(ofSize: 12, weight: .medium)
+    let hostTitle = NSTextField(labelWithString: "Bind address")
+    hostTitle.font = .systemFont(ofSize: 12, weight: .medium)
     let settingsStack = NSStackView(views: [
+      settingsTitle,
       toggle,
-      labelled("Connection", connectionMode),
-      labelled("Address", hostField),
-      labelled("Password", passwordField),
+      labelled(modeTitle, connectionMode),
+      labelled(hostTitle, hostField),
+      labelled(tokenTitle, passwordField),
+      save,
     ])
     settingsStack.orientation = .vertical
     settingsStack.alignment = .width
-    settingsStack.spacing = 13
-    settingsStack.translatesAutoresizingMaskIntoConstraints = false
-    let settingsCard = NSBox()
-    settingsCard.boxType = .custom
-    settingsCard.borderWidth = 1
-    settingsCard.cornerRadius = 14
-    settingsCard.borderColor = .separatorColor
-    settingsCard.fillColor = .controlBackgroundColor
-    settingsCard.contentView = settingsStack
+    settingsStack.spacing = 11
+    let settingsCard = card(content: settingsStack)
 
-    let actions = NSStackView(views: [save, pairing, update])
-    actions.orientation = .horizontal
-    actions.alignment = .centerY
-    actions.spacing = 8
-    actions.distribution = .fillEqually
+    let pairingTitle = NSTextField(labelWithString: "Connect a mobile device")
+    pairingTitle.font = .systemFont(ofSize: 16, weight: .semibold)
+    pairingImageView.imageScaling = .scaleProportionallyUpOrDown
+    pairingImageView.isHidden = true
+    pairingImageView.wantsLayer = true
+    pairingImageView.layer?.backgroundColor = NSColor.white.cgColor
+    pairingImageView.layer?.cornerRadius = 12
+    pairingImageView.widthAnchor.constraint(equalToConstant: 176).isActive = true
+    pairingImageView.heightAnchor.constraint(equalToConstant: 176).isActive = true
+    pairingPlaceholder.textColor = .secondaryLabelColor
+    pairingPlaceholder.alignment = .center
+    pairingPlaceholder.maximumNumberOfLines = 3
+    pairingAddressLabel.isHidden = true
+    pairingAddressLabel.alignment = .center
+    pairingAddressLabel.maximumNumberOfLines = 2
+    pairingAddressLabel.font = .monospacedSystemFont(ofSize: 10.5, weight: .medium)
+    let pairingStack = NSStackView(views: [pairingTitle, pairingImageView, pairingPlaceholder, pairingAddressLabel, pairing])
+    pairingStack.orientation = .vertical
+    pairingStack.alignment = .centerX
+    pairingStack.spacing = 11
+    let pairingCard = card(content: pairingStack)
+
+    let columns = NSStackView(views: [settingsCard, pairingCard])
+    columns.orientation = .horizontal
+    columns.alignment = .top
+    columns.spacing = 16
+    columns.distribution = .fillEqually
+    settingsCard.heightAnchor.constraint(equalTo: pairingCard.heightAnchor).isActive = true
 
     statusLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
     statusLabel.textColor = .secondaryLabelColor
-    [header, settingsCard, statusLabel, actions, version].forEach(stack.addArrangedSubview)
+    let footerSpacer = NSView()
+    footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let footer = NSStackView(views: [statusLabel, footerSpacer, version, update])
+    footer.orientation = .horizontal
+    footer.alignment = .centerY
+    footer.spacing = 10
+
+    [header, addressCard, columns, footer].forEach(stack.addArrangedSubview)
     content.addSubview(stack)
     NSLayoutConstraint.activate([
-      stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
-      stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
-      stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 28),
-      settingsStack.leadingAnchor.constraint(equalTo: settingsCard.leadingAnchor, constant: 18),
-      settingsStack.trailingAnchor.constraint(equalTo: settingsCard.trailingAnchor, constant: -18),
-      settingsStack.topAnchor.constraint(equalTo: settingsCard.topAnchor, constant: 18),
-      settingsStack.bottomAnchor.constraint(equalTo: settingsCard.bottomAnchor, constant: -18),
+      stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 26),
+      stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -26),
+      stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+      stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -22),
     ])
   }
 
-  private func labelled(_ title: String, _ field: NSTextField) -> NSView {
-    let row = NSStackView(views: [NSTextField(labelWithString: title), field]); row.orientation = .horizontal; row.spacing = 12; field.widthAnchor.constraint(equalToConstant: 300).isActive = true; return row
+  private func card(content: NSView) -> NSBox {
+    let box = NSBox()
+    box.boxType = .custom
+    box.borderWidth = 1
+    box.cornerRadius = 14
+    box.borderColor = .separatorColor
+    box.fillColor = .controlBackgroundColor
+    let container = NSView()
+    content.translatesAutoresizingMaskIntoConstraints = false
+    container.addSubview(content)
+    NSLayoutConstraint.activate([
+      content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+      content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+      content.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+      content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+    ])
+    box.contentView = container
+    return box
   }
 
-  private func labelled(_ title: String, _ control: NSView) -> NSView {
-    let row = NSStackView(views: [NSTextField(labelWithString: title), control]); row.orientation = .horizontal; row.spacing = 12; control.widthAnchor.constraint(equalToConstant: 300).isActive = true; return row
+  private func labelled(_ title: NSTextField, _ control: NSView) -> NSView {
+    let stack = NSStackView(views: [title, control])
+    stack.orientation = .vertical
+    stack.alignment = .width
+    stack.spacing = 5
+    return stack
   }
 
   private func menuBarIcon() -> NSImage? {
@@ -214,6 +303,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     hostField.stringValue = config?["BindHost"] as? String ?? "127.0.0.1"
     toggle.state = (config?["RemoteEnabled"] as? Bool ?? true) ? .on : .off
     connectionMode.selectItem(at: (config?["ConnectionMode"] as? String) == "public" ? 1 : 0)
+    passwordField.stringValue = (try? String(contentsOf: support.appendingPathComponent("token"), encoding: .utf8)
+      .trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+    refreshAccessAddress()
   }
 
   @objc private func saveSettings() {
@@ -224,11 +316,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     let config: NSDictionary = ["BindHost": hostField.stringValue, "Port": 4321, "RemoteEnabled": toggle.state == .on, "ConnectionMode": connectionMode.indexOfSelectedItem == 1 ? "public" : "private"]
     config.write(to: support.appendingPathComponent("config.plist"), atomically: true)
+    pairingImageView.image = nil
+    pairingImageView.isHidden = true
+    pairingPlaceholder.isHidden = false
+    pairingAddressLabel.isHidden = true
     restartGateway()
   }
 
-  @objc private func toggleRemote() { saveSettings(); if toggle.state == .on { startGateway() } else { stopGateway() } }
-  @objc private func showSettings() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+  @objc private func toggleRemote() { saveSettings() }
+  @objc private func showSettings() {
+    refreshAccessAddress()
+    window.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+  }
+  @objc private func copyRemoteAddress() {
+    refreshAccessAddress()
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(addressField.stringValue, forType: .string)
+    statusLabel.stringValue = "Access address copied"
+  }
   @objc private func openBrowser() {
     let value = effectiveRemoteURL()
     guard let url = URL(string: value) else { return }
@@ -240,6 +346,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     try? version.write(to: support.appendingPathComponent("update-ready"), atomically: true, encoding: .utf8)
   }
   private func restartGateway() { stopGateway(); if toggle.state == .on { startGateway() } }
+  private func refreshAccessAddress() { addressField.stringValue = effectiveRemoteURL() }
   private func startGateway() {
     guard gateway == nil else { return }
     let generation = serviceGeneration
@@ -259,7 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     do {
       try process.run(); gateway = process
       if isPublic { startTunnel() }
-      else { statusLabel.stringValue = "Running at \(effectiveRemoteURL())" }
+      else { statusLabel.stringValue = "Remote is running"; refreshAccessAddress() }
     } catch { statusLabel.stringValue = "Failed: \(error.localizedDescription)" }
   }
   private func stopGateway() {
@@ -270,6 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     gateway?.terminationHandler = nil
     gateway?.terminate(); gateway = nil
     statusLabel.stringValue = "Stopped"
+    refreshAccessAddress()
   }
 
   private func gatewayDidExit(_ process: Process, generation: Int) {
@@ -324,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     publicURL = url
     tunnelRestartAttempt = 0
     statusLabel.stringValue = "Running at \(url)"
+    refreshAccessAddress()
   }
 
   private func tunnelDidExit(_ process: Process, generation: Int) {
@@ -348,6 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     tunnel?.terminationHandler = nil
     tunnel?.terminate(); tunnel = nil; tunnelOutput = nil; publicURL = nil
     tunnelLogBuffer = ""
+    refreshAccessAddress()
   }
 
   @objc private func showPairingQR() {
@@ -370,30 +480,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in self?.statusLabel.stringValue = "Could not create pairing code" }
         return
       }
-      Task { @MainActor in self?.presentPairingWindow(payload: payload, baseURL: baseURL) }
+      Task { @MainActor in self?.presentPairingInManagementWindow(payload: payload, baseURL: baseURL) }
     }.resume()
   }
 
-  private func presentPairingWindow(payload: String, baseURL: String) {
+  private func presentPairingInManagementWindow(payload: String, baseURL: String) {
     guard let image = qrImage(payload) else { statusLabel.stringValue = "Could not render pairing code"; return }
-    let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
-    panel.title = "Pair Codex Remote"
-    panel.titlebarAppearsTransparent = true
-    let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .centerX; stack.spacing = 12; stack.translatesAutoresizingMaskIntoConstraints = false
-    let heading = NSTextField(labelWithString: "Scan to connect")
-    heading.font = .systemFont(ofSize: 22, weight: .semibold)
-    let imageView = NSImageView(image: image); imageView.widthAnchor.constraint(equalToConstant: 310).isActive = true; imageView.heightAnchor.constraint(equalToConstant: 310).isActive = true
-    imageView.wantsLayer = true
-    imageView.layer?.backgroundColor = NSColor.white.cgColor
-    imageView.layer?.cornerRadius = 18
-    let address = NSTextField(wrappingLabelWithString: baseURL); address.alignment = .center; address.maximumNumberOfLines = 2
-    address.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
-    let note = NSTextField(wrappingLabelWithString: "Scan in the iPhone or Android app. The code expires in 5 minutes and works once."); note.textColor = .secondaryLabelColor; note.alignment = .center
-    stack.addArrangedSubview(heading); stack.addArrangedSubview(imageView); stack.addArrangedSubview(address); stack.addArrangedSubview(note)
-    panel.contentView?.addSubview(stack)
-    NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 24)])
-    pairingPanelRetainer.retain(panel)
-    panel.center(); panel.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    pairingImageView.image = image
+    pairingImageView.isHidden = false
+    pairingPlaceholder.isHidden = true
+    pairingAddressLabel.stringValue = baseURL
+    pairingAddressLabel.isHidden = false
+    statusLabel.stringValue = "Pairing code expires in 5 minutes and works once"
+    showSettings()
   }
 
   private func qrImage(_ value: String) -> NSImage? {

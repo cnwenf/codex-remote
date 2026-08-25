@@ -1,6 +1,8 @@
 import { App as CapacitorApp } from "@capacitor/app";
+import { Capacitor } from "@capacitor/core";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { useEffect, useMemo, useState } from "react";
+import packageInfo from "../../package.json";
 import { App, type NativeRemoteSession } from "../web/app";
 import { CapacitorConnectionPersistence } from "./capacitor-persistence";
 import { ConnectionForm } from "./connection-form";
@@ -10,6 +12,7 @@ import { parseMobileDeepLink, type MobileThreadTarget } from "./deep-link";
 import { CodexRemoteNative } from "./native-bridge";
 import { exchangePairing } from "./pairing";
 import type { RemoteConnection, RemoteConnectionInput } from "./types";
+import { findMobileUpdate, type MobilePlatform, type MobileUpdateStatus } from "./app-update";
 
 type MobileView = "connections" | "form" | "remote";
 
@@ -25,6 +28,8 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [pendingTarget, setPendingTarget] = useState<MobileThreadTarget>();
+  const [currentVersion, setCurrentVersion] = useState(packageInfo.version);
+  const [updateStatus, setUpdateStatus] = useState<MobileUpdateStatus>({ state: "idle" });
 
   useEffect(() => {
     let disposed = false;
@@ -69,6 +74,10 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
       void notificationListener.then((listener) => listener?.remove());
     };
   }, [store]);
+
+  useEffect(() => {
+    void CapacitorApp.getInfo().then((info) => setCurrentVersion(info.version)).catch(() => undefined);
+  }, []);
 
   async function reloadConnections() {
     setConnections(await store.list());
@@ -145,6 +154,25 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
     }
   }
 
+  async function checkUpdate() {
+    const platform = Capacitor.getPlatform();
+    if (platform !== "android" && platform !== "ios") return;
+    setUpdateStatus({ state: "checking" });
+    try {
+      setUpdateStatus(await findMobileUpdate(currentVersion, platform as MobilePlatform));
+    } catch {
+      setUpdateStatus({ state: "error", message: "检查失败，请稍后重试" });
+    }
+  }
+
+  async function downloadUpdate(url: string) {
+    try {
+      await CodexRemoteNative.openExternalUrl({ url });
+    } catch {
+      setUpdateStatus({ state: "error", message: "无法打开下载页面" });
+    }
+  }
+
   if (view === "remote" && active) {
     return <App key={`${active.connectionId}:${active.requestedThreadId ?? ""}`} remote={active} />;
   }
@@ -169,6 +197,10 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
       onNew={() => { setEditing(undefined); setError(undefined); setView("form"); }}
       onEdit={(connection) => { setEditing(connection); setError(undefined); setView("form"); }}
       onRemove={(connection) => void remove(connection)}
+      currentVersion={currentVersion}
+      updateStatus={updateStatus}
+      onCheckUpdate={() => void checkUpdate()}
+      onDownloadUpdate={(url) => void downloadUpdate(url)}
     />
   );
 }

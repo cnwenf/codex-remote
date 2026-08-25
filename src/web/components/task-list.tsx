@@ -116,23 +116,9 @@ export function TaskList({
       <div className="section-heading">
         <div>
           <p className="eyebrow">Codex</p>
-          <h2>对话</h2>
+          <h2>Remote</h2>
         </div>
-        <button className="icon-button" type="button" onClick={onNew} aria-label="新对话">
-          <span aria-hidden="true">＋</span>
-        </button>
       </div>
-
-      <label className="search-field">
-        <span className="visually-hidden">搜索对话</span>
-        <span aria-hidden="true">⌕</span>
-        <input
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="搜索对话"
-        />
-      </label>
 
       <div className="task-list" data-testid="task-list-scroll">
         {filtered.length === 0 ? (
@@ -269,6 +255,21 @@ export function TaskList({
               ) : null}
           </section>
         ) : null}
+      </div>
+      <div className="task-nav-footer">
+        <label className="search-field">
+          <span className="visually-hidden">搜索对话</span>
+          <span className="search-icon" aria-hidden="true" />
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索聊天"
+          />
+        </label>
+        <button className="icon-button" type="button" onClick={onNew} aria-label="新对话">
+          <span className="compose-icon" aria-hidden="true" />
+        </button>
       </div>
       {dialog ? (
         <div className="thread-dialog-backdrop" onPointerDown={(event) => {

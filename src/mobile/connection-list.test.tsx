@@ -1,9 +1,20 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ConnectionList } from "./connection-list";
 
 describe("ConnectionList", () => {
+  it("uses the native-style Remote connection header", () => {
+    const { container } = render(
+      <ConnectionList connections={[]} onNew={vi.fn()} onScan={vi.fn()} onOpen={vi.fn()} onEdit={vi.fn()} onRemove={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Remote" })).toBeVisible();
+    expect(container.querySelector(".mobile-remote-header")).toBeInTheDocument();
+    const actions = container.querySelector(".mobile-remote-actions") as HTMLElement;
+    expect(actions).toContainElement(within(actions).getByRole("button", { name: "扫码添加" }));
+  });
+
   it("offers a first connection and opens or edits an existing connection", async () => {
     const onNew = vi.fn();
     const onOpen = vi.fn();
@@ -30,5 +41,35 @@ describe("ConnectionList", () => {
     expect(onOpen).toHaveBeenCalledWith(connection);
     await userEvent.click(screen.getByRole("button", { name: "修改" }));
     expect(onEdit).toHaveBeenCalledWith(connection);
+  });
+
+  it("shows the installed version and exposes mobile update actions", async () => {
+    const onCheckUpdate = vi.fn();
+    const onDownloadUpdate = vi.fn();
+    const common = {
+      connections: [],
+      onNew: vi.fn(),
+      onScan: vi.fn(),
+      onOpen: vi.fn(),
+      onEdit: vi.fn(),
+      onRemove: vi.fn(),
+      currentVersion: "0.4.1",
+      onCheckUpdate,
+      onDownloadUpdate,
+    };
+
+    const { rerender } = render(<ConnectionList {...common} updateStatus={{ state: "idle" }} />);
+    expect(screen.getByText("版本 0.4.1")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "检查更新" }));
+    expect(onCheckUpdate).toHaveBeenCalledOnce();
+
+    rerender(
+      <ConnectionList
+        {...common}
+        updateStatus={{ state: "available", latestVersion: "0.4.2", downloadUrl: "https://example.test/app.apk" }}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "下载 0.4.2" }));
+    expect(onDownloadUpdate).toHaveBeenCalledWith("https://example.test/app.apk");
   });
 });

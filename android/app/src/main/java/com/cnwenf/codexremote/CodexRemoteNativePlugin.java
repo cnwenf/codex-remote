@@ -105,4 +105,18 @@ public class CodexRemoteNativePlugin extends Plugin {
             .addOnCanceledListener(() -> call.reject("pairing-scan-cancelled"))
             .addOnFailureListener(error -> call.reject("pairing-scan-failed", error));
     }
+
+    @PluginMethod
+    public void openExternalUrl(PluginCall call) {
+        String value = call.getString("url");
+        if (value == null || value.isEmpty()) { call.reject("external-url-required"); return; }
+        Uri uri = Uri.parse(value);
+        if (!"https".equalsIgnoreCase(uri.getScheme())) { call.reject("external-url-insecure"); return; }
+        try {
+            getActivity().startActivity(new Intent(Intent.ACTION_VIEW, uri));
+            call.resolve();
+        } catch (Exception error) {
+            call.reject("external-url-open-failed", error);
+        }
+    }
 }

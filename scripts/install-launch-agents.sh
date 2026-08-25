@@ -33,6 +33,8 @@ render() {
 }
 
 render "$APP_PLIST" local.codex-remote.app false "$APP_PATH/Contents/MacOS/Codex Remote"
+/usr/bin/plutil -insert EnvironmentVariables -json '{}' "$APP_PLIST"
+/usr/bin/plutil -insert EnvironmentVariables.CODEX_REMOTE_BACKGROUND_LAUNCH -string 1 "$APP_PLIST"
 render "$DESKTOP_PLIST" local.codex-remote.desktop true \
   "$APP_PATH/Contents/Resources/launch-codex-desktop.sh"
 

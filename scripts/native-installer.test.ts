@@ -1,7 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..");
@@ -35,27 +33,23 @@ describe("native installer contract", () => {
     expect(appSource).toContain("tunnelDidExit");
   });
 
-  it("creates one-time pairing QR codes without embedding the password", () => {
+  it("renders one-time pairing QR codes inside the management window without embedding the password", () => {
     expect(appSource).toContain("/api/mobile/pairing");
     expect(appSource).toContain("CIQRCodeGenerator");
+    expect(appSource).toContain("pairingImageView.image = image");
+    expect(appSource).toContain("pairingPlaceholder.isHidden = true");
+    expect(appSource).not.toContain("NSPanel(contentRect:");
   });
 
-  it("retains the pairing panel until the user closes it", () => {
-    const temporary = mkdtempSync(join(tmpdir(), "codex-remote-pairing-panel-"));
-    const binary = join(temporary, "pairing-panel-lifetime-test");
-    try {
-      execFileSync("swiftc", [
-        "-parse-as-library",
-        join(root, "macos/CodexRemoteApp/Sources/CodexRemoteApp/PairingPanelRetainer.swift"),
-        join(root, "scripts/pairing-panel-lifetime.test.swift"),
-        "-o",
-        binary,
-      ]);
-      execFileSync(binary);
-    } finally {
-      rmSync(temporary, { recursive: true, force: true });
-    }
-  }, 20_000);
+  it("keeps every Remote setting and action on one native management page", () => {
+    expect(appSource).toContain('labelWithString: "Current access address"');
+    expect(appSource).toContain('title: "Copy"');
+    expect(appSource).toContain('title: "Open Remote"');
+    expect(appSource).toContain('labelWithString: "Connection"');
+    expect(appSource).toContain('labelWithString: "Authentication token"');
+    expect(appSource).toContain('title: "Get Link QR Code"');
+    expect(appSource).toContain('title: "Check for Updates"');
+  });
 
   it("never puts the password in launch agents or command arguments", () => {
     expect(agents).not.toMatch(/token|password|CODEX_WEB_TOKEN/i);
@@ -102,9 +96,19 @@ describe("native installer contract", () => {
     expect(gatewayLauncher).toContain('"$RESOURCES/gateway/index.mjs"');
   });
 
-  it("opens the Remote Web page when the running Dock app is clicked", () => {
-    expect(appSource).toContain("applicationShouldHandleReopen");
-    expect(appSource).toContain("openBrowser()");
+  it("opens the native management window when the running Dock app is clicked", () => {
+    const reopenHandler = appSource.match(
+      /func applicationShouldHandleReopen[\s\S]*?\{([\s\S]*?)\n  \}/,
+    )?.[1];
+
+    expect(reopenHandler).toContain("showSettings()\n");
+    expect(reopenHandler).not.toContain("openBrowser()\n");
+  });
+
+  it("opens the management window on a cold user launch but stays hidden at login", () => {
+    expect(agents).toContain("CODEX_REMOTE_BACKGROUND_LAUNCH");
+    expect(appSource).toContain('environment["CODEX_REMOTE_BACKGROUND_LAUNCH"] != "1"');
+    expect(appSource).toContain("showSettings()\n");
   });
 
   it("ships an in-app rollback updater instead of only opening Releases", () => {
