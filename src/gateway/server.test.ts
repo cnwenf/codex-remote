@@ -77,6 +77,19 @@ class ReadOnlyTransport extends FakeTransport {
   }
 }
 
+class MutableSessionTransport extends FakeTransport {
+  readonly requiresInitialize = false;
+  live = false;
+
+  getSessionInfo() {
+    return {
+      transport: this.live ? "desktop-live" as const : "desktop-cold" as const,
+      readOnly: !this.live,
+      appServerVersion: "0.148.0-alpha.15",
+    };
+  }
+}
+
 function protocols(token: string) {
   return ["codex-local", `token.${Buffer.from(token).toString("base64url")}`];
 }
@@ -204,6 +217,34 @@ describe("gateway server", () => {
       readOnly: false,
       appServerVersion: "0.148.0-alpha.15",
     });
+    socket.close();
+    await once(socket, "close");
+    await gateway.stop();
+  });
+
+  it("periodically reconciles bridge capabilities for resumed mobile controllers", async () => {
+    const transport = new MutableSessionTransport();
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      transport,
+      sessionSyncIntervalMs: 10,
+    });
+    const address = await gateway.start();
+    const socket = await connect(address, "test-token", `http://127.0.0.1:${address.port}`);
+    await expect(nextJson(socket)).resolves.toMatchObject({
+      type: "session",
+      transport: "desktop-cold",
+      readOnly: true,
+    });
+
+    transport.live = true;
+    await expect(nextJson(socket)).resolves.toMatchObject({
+      type: "session",
+      transport: "desktop-live",
+      readOnly: false,
+    });
+
     socket.close();
     await once(socket, "close");
     await gateway.stop();
@@ -348,7 +389,6 @@ describe("gateway server", () => {
         return {
           data: [
             { id: "desktop-active", title: "Desktop active", status: { type: "active" } },
-            { id: "live-active", title: "Live active", status: { type: "idle" } },
           ],
         };
       },
@@ -371,7 +411,7 @@ describe("gateway server", () => {
       });
       expect((await running.json() as any).threads).toMatchObject([
         { id: "desktop-active", status: "running" },
-        { id: "live-active", status: "running" },
+        { id: "live-active", title: "Untitled task", status: "running" },
       ]);
 
       transport.emit({
@@ -383,7 +423,7 @@ describe("gateway server", () => {
       });
       expect((await completed.json() as any).threads).toMatchObject([
         { id: "desktop-active", status: "running" },
-        { id: "live-active", status: "idle" },
+        { id: "live-active", title: "Untitled task", status: "idle" },
       ]);
     } finally {
       await gateway.stop();
@@ -402,7 +442,6 @@ describe("gateway server", () => {
         return {
           data: [
             { id: "one", title: "One", status: { type: "idle" } },
-            { id: "two", title: "Two", status: { type: "idle" } },
           ],
         };
       },
@@ -421,8 +460,14 @@ describe("gateway server", () => {
       const first = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
         headers: { authorization: `Bearer ${token}` },
       });
-      expect((await first.json() as any).threads.filter((thread: any) => thread.status === "running"))
+      const firstThreads = (await first.json() as any).threads;
+      expect(firstThreads.filter((thread: any) => thread.status === "running"))
         .toHaveLength(2);
+      expect(firstThreads).toContainEqual(expect.objectContaining({
+        id: "two",
+        title: "Untitled task",
+        status: "running",
+      }));
 
       transport.threads = [
         { id: "one", status: { type: "idle" } },
@@ -638,6 +683,26 @@ describe("gateway server", () => {
       expect(await readFile(imageInput?.path as string)).toEqual(png);
       expect((await stat(imageInput?.path as string)).mode & 0o777).toBe(0o600);
 
+      socket.send(JSON.stringify({
+        type: "rpc",
+        payload: {
+          id: 92,
+          method: "desktop/queue/add",
+          params: {
+            threadId: "thread-1",
+            text: "Inspect this next",
+            input: [
+              { type: "text", text: "Inspect this next" },
+              { type: "remoteImage", id: uploaded.id },
+            ],
+          },
+        },
+      }));
+      const queued = await waitForSentMethod(transport, "desktop/queue/add");
+      const queuedImage = (queued as { params: { input: Array<Record<string, unknown>> } })
+        .params.input[1];
+      expect(queuedImage).toEqual({ type: "localImage", path: join(uploadDir, `${uploaded.id}.png`) });
+
       const rendered = await fetch(
         `http://127.0.0.1:${address.port}/api/images/${uploaded.id}`,
         { headers: { cookie: cookie as string } },
@@ -655,6 +720,52 @@ describe("gateway server", () => {
     } finally {
       await gateway.stop();
       await rm(uploadDir, { recursive: true, force: true });
+    }
+  });
+
+  it("imports a Desktop-local image before broadcasting its live user message", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-remote-live-images-"));
+    const sourceDir = await mkdtemp(join(tmpdir(), "codex-remote-desktop-image-"));
+    const source = join(sourceDir, "desktop.png");
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+    await writeFile(source, png);
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({ port: 0, token, allowedOrigins: [origin], uploadDir, transport });
+    const address = await gateway.start();
+    try {
+      const socket = await connect(address, token, origin);
+      await nextJson(socket);
+      transport.emit({
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "desktop-image",
+            type: "userMessage",
+            content: [{ type: "text", text: `看图\n<image name=[Image #1] path=\"${source}\">\n</image>` }],
+          },
+        },
+      });
+
+      const event = await nextJson(socket);
+      expect(event).toMatchObject({
+        type: "rpc",
+        payload: {
+          method: "item/started",
+          params: { item: { imageIds: [expect.stringMatching(/^[0-9a-f-]{36}$/)] } },
+        },
+      });
+      const imageId = event.payload.params.item.imageIds[0] as string;
+      expect(await readFile(join(uploadDir, `${imageId}.png`))).toEqual(png);
+      socket.close();
+      await once(socket, "close");
+    } finally {
+      await gateway.stop();
+      await rm(uploadDir, { recursive: true, force: true });
+      await rm(sourceDir, { recursive: true, force: true });
     }
   });
 

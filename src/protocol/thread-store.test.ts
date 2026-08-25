@@ -242,6 +242,95 @@ describe("reduceCodexState", () => {
     });
   });
 
+  it("collapses duplicate authoritative confirmations before an assistant reply", () => {
+    const first = reduceCodexState(initialCodexState, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          id: "desktop-live-user",
+          type: "userMessage",
+          content: [{ type: "text", text: "继续完成这个任务" }],
+          imageIds: ["uploaded-image"],
+        },
+      },
+    });
+    const duplicated = reduceCodexState(first, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-2",
+        item: {
+          id: "desktop-persisted-user",
+          type: "user_message",
+          content: [{ type: "text", text: "继续完成这个任务" }],
+        },
+      },
+    });
+
+    expect(duplicated.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
+    expect(duplicated.threads.t1.turns["turn-2"].itemOrder).toEqual(["desktop-persisted-user"]);
+    expect(duplicated.threads.t1.turns["turn-2"].items["desktop-persisted-user"]).toMatchObject({
+      text: "继续完成这个任务",
+      imageIds: ["uploaded-image"],
+    });
+  });
+
+  it("keeps equal user messages when an assistant reply separates them", () => {
+    const first = reduceCodexState(initialCodexState, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: { id: "user-1", type: "userMessage", content: [{ type: "text", text: "再试一次" }] },
+      },
+    });
+    const replied = reduceCodexState(first, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: { id: "agent-1", type: "agentMessage", content: [{ type: "text", text: "已经处理" }] },
+      },
+    });
+    const repeated = reduceCodexState(replied, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-2",
+        item: { id: "user-2", type: "userMessage", content: [{ type: "text", text: "再试一次" }] },
+      },
+    });
+
+    expect(repeated.threads.t1.turns["turn-1"].itemOrder).toEqual(["user-1", "agent-1"]);
+    expect(repeated.threads.t1.turns["turn-2"].itemOrder).toEqual(["user-2"]);
+  });
+
+  it("renders a Desktop image event immediately without exposing its local path envelope", () => {
+    const next = reduceCodexState(initialCodexState, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          id: "desktop-image",
+          type: "userMessage",
+          content: [{
+            type: "text",
+            text: "# Files mentioned by the user:\n\nprivate.png\n\n## My request:\n看看这张图\n<image name=[Image #1] path=\"/private/image.png\">\n</image>",
+          }],
+          imageIds: ["imported-image"],
+        },
+      },
+    });
+
+    expect(next.threads.t1.turns["turn-1"].items["desktop-image"]).toMatchObject({
+      text: "看看这张图",
+      imageIds: ["imported-image"],
+    });
+  });
+
   it("updates thread status from notifications", () => {
     const next = reduceCodexState(initialCodexState, {
       method: "thread/status/changed",

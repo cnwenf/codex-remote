@@ -28,6 +28,10 @@ class FakeBrowserSocket implements BrowserSocket {
   serverSend(payload: unknown) {
     this.onmessage?.({ data: JSON.stringify(payload) });
   }
+
+  fail() {
+    this.onerror?.();
+  }
 }
 
 afterEach(() => {
@@ -66,6 +70,22 @@ describe("CodexSocket", () => {
     await socket.connect("");
 
     expect(protocols).toEqual(["codex-local"]);
+  });
+
+  it("releases a failed initial socket so login can retry immediately", async () => {
+    const sockets: FakeBrowserSocket[] = [];
+    const socket = new CodexSocket(() => {
+      const next = new FakeBrowserSocket(sockets.length > 0);
+      sockets.push(next);
+      return next;
+    });
+
+    const initial = socket.connect("", "ws://127.0.0.1/rpc");
+    sockets[0].fail();
+    await expect(initial).rejects.toThrow("codex-socket-connect-failed");
+
+    await expect(socket.connect("secret", "ws://127.0.0.1/rpc")).resolves.toBeUndefined();
+    expect(sockets).toHaveLength(2);
   });
 
   it("creates a cookie session without exposing the token in the URL", async () => {

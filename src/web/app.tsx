@@ -3,6 +3,7 @@ import { createBrowserSession, remoteSocketUrl } from "./api/socket";
 import { ApprovalSheet, type ApprovalResolution } from "./components/approval-sheet";
 import { BrandMark } from "./components/brand-mark";
 import { Composer } from "./components/composer";
+import { QueuedFollowUps } from "./components/queued-follow-ups";
 import { ConversationViewport } from "./components/conversation-viewport";
 import { DiffViewer } from "./components/diff-viewer";
 import { NewConversation } from "./components/new-conversation";
@@ -300,10 +301,15 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               </ConversationViewport>
               <div className={`conversation-controls ${composerExpanded ? "controls-expanded" : "controls-collapsed"}`}>
                 <TodoListDock todoList={codex.selectedThread.todoList} />
+                <QueuedFollowUps
+                  messages={codex.selectedQueuedMessages ?? []}
+                  onSteer={codex.steerQueuedMessage}
+                />
                 <Composer
                 draftKey={codex.selectedThread.id}
                 onSend={codex.sendInstruction}
                 running={codex.selectedThread.status === "running"}
+                runningMode={codex.selectedThread.desktopMirror ? "queue" : "steer"}
                 onStop={codex.selectedThread.status === "running" ? codex.interrupt : undefined}
                 models={codex.creationOptions.models}
                 permissions={codex.creationOptions.permissions}

@@ -12,7 +12,12 @@ import { parseMobileDeepLink, type MobileThreadTarget } from "./deep-link";
 import { CodexRemoteNative } from "./native-bridge";
 import { beginScannedPairing } from "./pair-connection";
 import type { RemoteConnection, RemoteConnectionInput } from "./types";
-import { findMobileUpdate, type MobilePlatform, type MobileUpdateStatus } from "./app-update";
+import {
+  findMobileUpdate,
+  type MobilePlatform,
+  type MobileUpdateArtifact,
+  type MobileUpdateStatus,
+} from "./app-update";
 
 type MobileView = "connections" | "form" | "remote";
 
@@ -78,6 +83,30 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
   useEffect(() => {
     void CapacitorApp.getInfo().then((info) => setCurrentVersion(info.version)).catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const listener = CodexRemoteNative.addListener("updateDownloadProgress", (event) => {
+      setUpdateStatus((current) => {
+        const latestVersion = "latestVersion" in current ? current.latestVersion : "";
+        if (event.state === "downloading") {
+          return { state: "downloading", latestVersion, progress: Math.max(0, Math.min(100, event.progress ?? 0)) };
+        }
+        if (event.state === "installing") return { state: "installing", latestVersion };
+        return { state: "error", message: event.message || "下载失败，请重试" };
+      });
+    }).catch(() => undefined);
+    return () => { void listener.then((handle) => handle?.remove()); };
+  }, []);
+
+  useEffect(() => {
+    if (view !== "form") return;
+    const listener = CapacitorApp.addListener("backButton", () => {
+      setError(undefined);
+      setEditing(undefined);
+      setView("connections");
+    }).catch(() => undefined);
+    return () => { void listener.then((handle) => handle?.remove()); };
+  }, [view]);
 
   async function reloadConnections() {
     setConnections(await store.list());
@@ -163,11 +192,26 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
     }
   }
 
-  async function downloadUpdate(url: string) {
+  async function downloadUpdate(artifact: MobileUpdateArtifact) {
+    if (Capacitor.getPlatform() !== "android") {
+      try {
+        await CodexRemoteNative.openExternalUrl({ url: artifact.downloadUrl });
+      } catch {
+        setUpdateStatus({ state: "error", message: "无法打开下载页面" });
+      }
+      return;
+    }
+    setUpdateStatus({ state: "downloading", latestVersion: artifact.latestVersion, progress: 0 });
     try {
-      await CodexRemoteNative.openExternalUrl({ url });
+      await CodexRemoteNative.downloadAndInstallUpdate({
+        url: artifact.downloadUrl,
+        checksumUrl: artifact.checksumUrl || "",
+        version: artifact.latestVersion,
+      });
     } catch {
-      setUpdateStatus({ state: "error", message: "无法打开下载页面" });
+      setUpdateStatus((current) => current.state === "error"
+        ? current
+        : { state: "error", message: "下载失败，请重试" });
     }
   }
 

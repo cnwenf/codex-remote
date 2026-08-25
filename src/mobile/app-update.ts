@@ -2,8 +2,16 @@ export type MobilePlatform = "android" | "ios";
 
 export type MobileUpdateStatus =
   | { state: "idle" | "checking" | "current" }
-  | { state: "available"; latestVersion: string; downloadUrl: string }
+  | ({ state: "available" } & MobileUpdateArtifact)
+  | { state: "downloading"; latestVersion: string; progress: number }
+  | { state: "installing"; latestVersion: string }
   | { state: "error"; message: string };
+
+export type MobileUpdateArtifact = {
+  latestVersion: string;
+  downloadUrl: string;
+  checksumUrl?: string;
+};
 
 type GitHubRelease = {
   tag_name?: unknown;
@@ -31,10 +39,20 @@ export async function findMobileUpdate(
   const asset = platform === "android" ? release.assets?.find((candidate) => (
     typeof candidate.name === "string" && candidate.name.toLowerCase().endsWith(".apk")
   )) : undefined;
+  const checksumAsset = platform === "android" && typeof asset?.name === "string"
+    ? release.assets?.find((candidate) => candidate.name === `${asset.name}.sha256`)
+    : undefined;
   const downloadUrl = platform === "android" && typeof asset?.browser_download_url === "string"
     ? asset.browser_download_url
     : typeof release.html_url === "string" ? release.html_url : "";
   if (!downloadUrl.startsWith("https://")) throw new Error("update-download-invalid");
+  if (platform === "android") {
+    const checksumUrl = typeof checksumAsset?.browser_download_url === "string"
+      ? checksumAsset.browser_download_url
+      : "";
+    if (!checksumUrl.startsWith("https://")) throw new Error("update-checksum-invalid");
+    return { state: "available", latestVersion, downloadUrl, checksumUrl };
+  }
   return { state: "available", latestVersion, downloadUrl };
 }
 

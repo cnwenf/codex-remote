@@ -17,6 +17,15 @@ export function sameUserInput(
   return normalizeAttachedUserInput(leftText) === normalizeAttachedUserInput(rightText);
 }
 
+export function displayUserInput(value: string) {
+  const marker = requestMarkerPattern.exec(value);
+  const request = marker ? value.slice((marker.index ?? 0) + marker[0].length) : value;
+  return request
+    .replace(imageEnvelopePattern, "")
+    .replace(standaloneImageTagPattern, "")
+    .trim();
+}
+
 function normalizeAttachedUserInput(value: string) {
   const marker = requestMarkerPattern.exec(value);
   const request = marker ? value.slice((marker.index ?? 0) + marker[0].length) : value;

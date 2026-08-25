@@ -11,6 +11,7 @@ describe("ConnectionList", () => {
 
     expect(screen.getByRole("heading", { name: "Remote" })).toBeVisible();
     expect(container.querySelector(".mobile-remote-header")).toBeInTheDocument();
+    expect(container.querySelector(".mobile-overflow-button")).not.toBeInTheDocument();
     const actions = container.querySelector(".mobile-remote-actions") as HTMLElement;
     expect(actions).toContainElement(within(actions).getByRole("button", { name: "扫码添加" }));
   });
@@ -59,18 +60,40 @@ describe("ConnectionList", () => {
     };
 
     const { rerender } = render(<ConnectionList {...common} updateStatus={{ state: "idle" }} />);
-    expect(screen.getByText("版本 0.4.1")).toBeVisible();
+    const header = screen.getByRole("banner");
+    expect(within(header).getByText("v0.4.1")).toBeVisible();
+    expect(screen.queryByLabelText("客户端更新")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "检查更新" }));
     expect(onCheckUpdate).toHaveBeenCalledOnce();
 
     rerender(
       <ConnectionList
         {...common}
-        updateStatus={{ state: "available", latestVersion: "0.4.2", downloadUrl: "https://example.test/app.apk" }}
+        updateStatus={{
+          state: "available",
+          latestVersion: "0.4.2",
+          downloadUrl: "https://example.test/app.apk",
+          checksumUrl: "https://example.test/app.apk.sha256",
+        }}
       />,
     );
     await userEvent.click(screen.getByRole("button", { name: "下载 0.4.2" }));
-    expect(onDownloadUpdate).toHaveBeenCalledWith("https://example.test/app.apk");
+    expect(onDownloadUpdate).toHaveBeenCalledWith({
+      latestVersion: "0.4.2",
+      downloadUrl: "https://example.test/app.apk",
+      checksumUrl: "https://example.test/app.apk.sha256",
+    });
+
+    rerender(<ConnectionList {...common} updateStatus={{ state: "downloading", latestVersion: "0.4.2", progress: 43 }} />);
+    expect(screen.getByRole("progressbar", { name: "正在下载 0.4.2" })).toHaveAttribute("aria-valuenow", "43");
+    expect(screen.getByText("43%")).toBeVisible();
+
+    rerender(<ConnectionList {...common} updateStatus={{ state: "current" }} />);
+    expect(screen.getByText("已是最新版本")).toBeVisible();
+
+    rerender(<ConnectionList {...common} updateStatus={{ state: "error", message: "安装包校验失败" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("安装包校验失败");
+    expect(screen.getByRole("button", { name: "检查更新" })).toHaveTextContent("重试更新");
   });
 
   it("shows pairing progress and failure in the connection list", () => {

@@ -38,6 +38,13 @@ export type PermissionOption = {
   description?: string;
 };
 
+export type QueuedFollowUp = {
+  id: string;
+  text: string;
+  createdAt?: number;
+  cwd?: string;
+};
+
 export type CreateThreadOptions = {
   cwd?: string;
   model?: string;
@@ -74,6 +81,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const [archivedThreadsLoading, setArchivedThreadsLoading] = useState(false);
   const [pinnedSectionId, setPinnedSectionId] = useState<string>();
   const [pendingRequests, setPendingRequests] = useState<RpcRequest[]>([]);
+  const [queuedByThread, setQueuedByThread] = useState<Record<string, QueuedFollowUp[]>>({});
   const [creationOptions, setCreationOptions] = useState(emptyCreationOptions);
   const [desktopStateAvailable, setDesktopStateAvailable] = useState(false);
   const [transportMode, setTransportMode] = useState<TransportMode>();
@@ -486,6 +494,26 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
 
   const clearSelection = useCallback(() => setSelectedThreadId(undefined), []);
 
+  const refreshQueuedMessages = useCallback(async (threadId: string) => {
+    if (!desktopControlAvailable) return;
+    const result = await socket.request("desktop/queue/list", { threadId });
+    const messages = normalizeQueuedMessages(asRecord(result).messages);
+    setQueuedByThread((current) => ({ ...current, [threadId]: messages }));
+  }, [desktopControlAvailable, socket]);
+
+  useEffect(() => {
+    if (connection !== "ready" || !selectedThreadId || !selectedDesktopMirror || !desktopControlAvailable) return;
+    let refreshing = false;
+    const timer = window.setInterval(() => {
+      if (refreshing) return;
+      refreshing = true;
+      void refreshQueuedMessages(selectedThreadId)
+        .catch(() => undefined)
+        .finally(() => { refreshing = false; });
+    }, 2_000);
+    return () => window.clearInterval(timer);
+  }, [connection, desktopControlAvailable, refreshQueuedMessages, selectedDesktopMirror, selectedThreadId]);
+
   const createThread = useCallback(
     async (options: CreateThreadOptions = {}) => {
       const params: Record<string, unknown> = {};
@@ -528,6 +556,25 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       ];
       if (input.length === 0) throw new Error("请输入消息或添加图片");
       if (thread?.status === "running") {
+        if (thread.desktopMirror) {
+          const result = await socket.request("desktop/queue/add", {
+            threadId: selectedThreadId,
+            text,
+            input,
+            cwd: thread.cwd,
+          });
+          const [message] = normalizeQueuedMessages([asRecord(result).message]);
+          if (message) {
+            setQueuedByThread((current) => ({
+              ...current,
+              [selectedThreadId]: [
+                ...(current[selectedThreadId] ?? []).filter((item) => item.id !== message.id),
+                message,
+              ],
+            }));
+          }
+          return;
+        }
         const turnId = thread.activeTurnId ?? thread.turnOrder.at(-1);
         const itemId = `web-steer-${Date.now()}-${optimisticItemSequence.current++}`;
         if (turnId) {
@@ -592,6 +639,20 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     },
     [desktopControlAvailable, remoteApi.baseUrl, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
   );
+
+  const steerQueuedMessage = useCallback(async (messageId: string) => {
+    if (!selectedThreadId) throw new Error("Select a task first");
+    const thread = state.threads[selectedThreadId];
+    await socket.request("desktop/queue/steer", {
+      threadId: selectedThreadId,
+      messageId,
+      expectedTurnId: thread?.activeTurnId,
+    });
+    setQueuedByThread((current) => ({
+      ...current,
+      [selectedThreadId]: (current[selectedThreadId] ?? []).filter((message) => message.id !== messageId),
+    }));
+  }, [selectedThreadId, socket, state.threads]);
 
   const updateSelectedThreadSettings = useCallback((settings: CreateThreadOptions) => {
     if (!selectedThreadId) return;
@@ -664,6 +725,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       selectedThreadError:
         threadLoadError?.threadId === selectedThreadId ? threadLoadError?.message : undefined,
       selectedThread: selectedThreadId ? state.threads[selectedThreadId] : undefined,
+      selectedQueuedMessages: selectedThreadId ? queuedByThread[selectedThreadId] ?? [] : [],
       selectedThreadHistory: selectedThreadId
         ? threadHistory[selectedThreadId] ?? emptyThreadHistory
         : emptyThreadHistory,
@@ -685,6 +747,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       createThread,
       updateSelectedThreadSettings,
       sendInstruction,
+      steerQueuedMessage,
       interrupt,
       resolveRequest,
     }),
@@ -716,7 +779,9 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       clearSelection,
       selectedThreadId,
       sendInstruction,
+      steerQueuedMessage,
       state,
+      queuedByThread,
       threadHistory,
       transportMode,
       transportReadOnly,
@@ -1291,6 +1356,22 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown) {
   return typeof value === "string" ? value : undefined;
+}
+
+function normalizeQueuedMessages(value: unknown): QueuedFollowUp[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const record = asRecord(item);
+    const id = stringValue(record.id);
+    const text = stringValue(record.text);
+    if (!id || text === undefined) return [];
+    return [{
+      id,
+      text,
+      createdAt: typeof record.createdAt === "number" ? record.createdAt : undefined,
+      cwd: stringValue(record.cwd),
+    }];
+  });
 }
 
 function numberValue(value: unknown) {

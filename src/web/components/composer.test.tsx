@@ -96,6 +96,11 @@ describe("Composer", () => {
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
   });
 
+  it("labels the running Desktop action as queue", () => {
+    render(<Composer onSend={vi.fn()} running runningMode="queue" expanded />);
+    expect(screen.getByRole("button", { name: "排队" })).toBeVisible();
+  });
+
   it("supports selecting and pasting multiple images and keeps them until send succeeds", async () => {
     const onSend = vi.fn().mockResolvedValue(undefined);
     render(<Composer onSend={onSend} running={false} expanded />);

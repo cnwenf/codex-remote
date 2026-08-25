@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
+import type { MobileTask } from "../mobile/types";
 import { RpcRouter } from "../protocol/rpc-router";
 import {
   isRpcRequest,
@@ -62,7 +63,9 @@ type GatewayOptions = {
   uploadDir?: string;
   defaultCwd?: string;
   heartbeatIntervalMs?: number;
+  sessionSyncIntervalMs?: number;
   mobileStatusSyncIntervalMs?: number;
+  onTransportDiagnostic?(diagnostic: { category: string; message: string }): void;
   transport: CodexTransport;
   desktopState?: {
     request(method: string, params: unknown): unknown;
@@ -90,6 +93,7 @@ export function createGateway(options: GatewayOptions) {
     source: "event" | "sync";
     updatedAt: number;
   }>();
+  const syncedMobileThreads = new Map<string, MobileTask>();
   const pendingInternalRequests = new Map<string, {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
@@ -97,6 +101,7 @@ export function createGateway(options: GatewayOptions) {
   }>();
   let nextInternalRequestId = 1;
   let mobileStatusSyncTimer: ReturnType<typeof setInterval> | undefined;
+  let sessionSyncTimer: ReturnType<typeof setInterval> | undefined;
   const pairingStore = new PairingStore();
   let allowedOrigins = new Set([
     ...(options.allowedOrigins ?? []),
@@ -293,6 +298,7 @@ export function createGateway(options: GatewayOptions) {
       await options.transport.start(
         (message) => routeTransportMessage(message),
         (diagnostic) => {
+          options.onTransportDiagnostic?.(diagnostic);
           if (controllers.size === 0) return;
           broadcastEnvelope({
             type: "diagnostic",
@@ -325,6 +331,17 @@ export function createGateway(options: GatewayOptions) {
         options.mobileStatusSyncIntervalMs ?? DEFAULT_MOBILE_STATUS_SYNC_INTERVAL_MS,
       );
       mobileStatusSyncTimer.unref();
+      sessionSyncTimer = setInterval(() => {
+        const sessionInfo = options.transport.getSessionInfo?.();
+        if (!sessionInfo || controllers.size === 0) return;
+        broadcastEnvelope({
+          type: "session",
+          state: "ready",
+          ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
+          ...sessionInfo,
+        });
+      }, options.sessionSyncIntervalMs ?? 5_000);
+      sessionSyncTimer.unref();
 
       await new Promise<void>((resolveListen, rejectListen) => {
         httpServer.once("error", rejectListen);
@@ -364,6 +381,7 @@ export function createGateway(options: GatewayOptions) {
     async stop() {
       clearInterval(heartbeatTimer);
       if (mobileStatusSyncTimer) clearInterval(mobileStatusSyncTimer);
+      if (sessionSyncTimer) clearInterval(sessionSyncTimer);
       for (const pending of pendingInternalRequests.values()) {
         clearTimeout(pending.timeout);
         pending.reject(new Error("gateway-stopping"));
@@ -383,6 +401,7 @@ export function createGateway(options: GatewayOptions) {
   };
 
   function routeTransportMessage(message: RpcMessage) {
+    message = enrichDesktopImageMessage(message, imageStore);
     if ("id" in message && !("method" in message) && message.id === INITIALIZE_ID) {
       if (message.error) initializeReject?.(new Error("app-server-initialize-failed"));
       else initializeResolve?.();
@@ -439,6 +458,14 @@ export function createGateway(options: GatewayOptions) {
         source: "event",
         updatedAt: Date.now(),
       });
+      if (!syncedMobileThreads.has(threadId)) {
+        syncedMobileThreads.set(threadId, {
+          id: threadId,
+          title: "Untitled task",
+          status: "running",
+          updatedAt: Date.now(),
+        });
+      }
       return;
     }
     if (message.method === "turn/completed") {
@@ -446,11 +473,14 @@ export function createGateway(options: GatewayOptions) {
       const completedTurnId = optionalString(turn.id) ?? optionalString(params.turnId);
       const active = liveThreadActivity.get(threadId);
       if (!active?.turnId || !completedTurnId || active.turnId === completedTurnId) {
+        const completedStatus = optionalString(turn.status) === "failed" ? "error" : "idle";
         liveThreadActivity.set(threadId, {
-          status: optionalString(turn.status) === "failed" ? "error" : "idle",
+          status: completedStatus,
           source: "event",
           updatedAt: Date.now(),
         });
+        const cached = syncedMobileThreads.get(threadId);
+        if (cached) syncedMobileThreads.set(threadId, { ...cached, status: completedStatus });
       }
       return;
     }
@@ -477,7 +507,9 @@ export function createGateway(options: GatewayOptions) {
     try {
       const value = await requestTransport("thread/list", { limit: 100, sortKey: "updated_at" });
       const now = Date.now();
-      for (const thread of projectMobileStatus(value, now).threads) {
+      const projected = projectMobileStatus(value, now).threads;
+      const seen = new Set(projected.map((thread) => thread.id));
+      for (const thread of projected) {
         if (thread.status === "unknown") continue;
         const current = liveThreadActivity.get(thread.id);
         if (
@@ -490,6 +522,14 @@ export function createGateway(options: GatewayOptions) {
           source: "sync",
           updatedAt: now,
         });
+        syncedMobileThreads.set(thread.id, thread);
+      }
+      for (const threadId of [...syncedMobileThreads.keys()]) {
+        if (seen.has(threadId)) continue;
+        const live = liveThreadActivity.get(threadId);
+        if (live?.source === "event" && now - live.updatedAt < LIVE_EVENT_GRACE_MS) continue;
+        syncedMobileThreads.delete(threadId);
+        liveThreadActivity.delete(threadId);
       }
     } catch {
       // The Desktop bridge can briefly be unavailable; the next interval retries.
@@ -633,12 +673,29 @@ export function createGateway(options: GatewayOptions) {
     }
     try {
       const value = await options.desktopState.request("desktopState/listThreads", {});
+      const generatedAt = Date.now();
+      const statusOverrides = new Map(
+        [...liveThreadActivity].map(([threadId, activity]) => [threadId, activity.status] as const),
+      );
+      const desktop = projectMobileStatus(value, generatedAt, statusOverrides);
+      const threadsById = new Map(desktop.threads.map((thread) => [thread.id, thread]));
+      for (const cached of syncedMobileThreads.values()) {
+        const current = threadsById.get(cached.id);
+        threadsById.set(cached.id, current ? {
+          ...cached,
+          ...current,
+          status: statusOverrides.get(cached.id) ?? cached.status,
+        } : {
+          ...cached,
+          status: statusOverrides.get(cached.id) ?? cached.status,
+        });
+      }
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify(projectMobileStatus(
-        value,
-        Date.now(),
-        new Map([...liveThreadActivity].map(([threadId, activity]) => [threadId, activity.status])),
-      )));
+      response.end(JSON.stringify({
+        version: desktop.version,
+        generatedAt,
+        threads: [...threadsById.values()].slice(0, 100),
+      }));
     } catch {
       response.writeHead(503).end();
     }
@@ -779,6 +836,45 @@ export function createGateway(options: GatewayOptions) {
       });
     }
   }
+}
+
+function enrichDesktopImageMessage(message: RpcMessage, imageStore: ImageUploadStore): RpcMessage {
+  if (
+    !("method" in message) ||
+    (message.method !== "item/started" && message.method !== "item/completed")
+  ) return message;
+  const params = recordValue(message.params);
+  const item = recordValue(params.item);
+  const itemType = optionalString(item.type)?.replace(/[_-]/g, "").toLowerCase();
+  if (itemType !== "usermessage") return message;
+  const text = optionalString(item.text) ?? (Array.isArray(item.content)
+    ? item.content.map((entry) => optionalString(recordValue(entry).text) ?? "").join("\n")
+    : "");
+  const paths = [
+    ...(Array.isArray(item.local_images) ? item.local_images.flatMap((value) => (
+      typeof value === "string" ? [value] : []
+    )) : []),
+    ...[...text.matchAll(/<image\b[^>]*\bpath=(?:"([^"]+)"|'([^']+)')[^>]*>/gi)]
+      .map((match) => match[1] ?? match[2])
+      .filter((value): value is string => Boolean(value)),
+  ];
+  const imageIds = [...new Set([
+    ...(Array.isArray(item.imageIds) ? item.imageIds.flatMap((value) => (
+      typeof value === "string" ? [value] : []
+    )) : []),
+    ...paths.flatMap((path) => {
+      const id = imageStore.referenceForPath(path);
+      return id ? [id] : [];
+    }),
+  ])];
+  if (imageIds.length === 0) return message;
+  return {
+    ...message,
+    params: {
+      ...params,
+      item: { ...item, imageIds },
+    },
+  };
 }
 
 function listen(
@@ -1004,7 +1100,12 @@ function optionalString(value: unknown) {
 }
 
 function resolveRemoteImages(message: RpcMessage, store: ImageUploadStore): RpcMessage {
-  if (!isRpcRequest(message) || (message.method !== "turn/start" && message.method !== "turn/steer")) {
+  if (
+    !isRpcRequest(message) ||
+    (message.method !== "turn/start" &&
+      message.method !== "turn/steer" &&
+      message.method !== "desktop/queue/add")
+  ) {
     return message;
   }
   if (!message.params || typeof message.params !== "object") return message;

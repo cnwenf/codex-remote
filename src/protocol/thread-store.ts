@@ -1,6 +1,6 @@
 import type { RpcMessage } from "./types";
 import { permissionStateFromProtocol, type PermissionState } from "./permissions";
-import { sameUserInput } from "./user-message-identity";
+import { displayUserInput, sameUserInput } from "./user-message-identity";
 
 export type ThreadStatus = "running" | "idle" | "error" | "unknown";
 export type TurnStatus = "inProgress" | "completed" | "interrupted" | "failed" | "unknown";
@@ -291,24 +291,32 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     return updateThread(state, threadId, (thread) => {
       const turnId = resolveTurnId(thread, params);
       const itemType = stringValue(item.type) ?? thread.turns[turnId]?.items[itemId]?.type ?? "item";
-      const text = itemText(item);
+      const rawText = itemText(item);
+      const text = isUserMessageType(itemType) ? displayUserInput(rawText) : rawText;
       const optimisticMatch = isUserMessageType(itemType)
         ? findMatchingOptimisticUserMessage(thread, text, itemId)
         : undefined;
-      const baseThread = optimisticMatch
-        ? removeItemFromTurn(thread, optimisticMatch.turnId, optimisticMatch.item.id)
+      const confirmedDuplicate = isUserMessageType(itemType) && !optimisticMatch
+        ? findRecentConfirmedUserMessage(thread, text, itemId, stringArray(item.imageIds).length > 0)
+        : undefined;
+      const reconciledMatch = optimisticMatch ?? confirmedDuplicate;
+      const baseThread = reconciledMatch
+        ? removeItemFromTurn(thread, reconciledMatch.turnId, reconciledMatch.item.id)
         : thread;
       return updateTurn(baseThread, turnId, (turn) => {
         const previous = turn.items[itemId];
         const resolvedText = text || previous?.text || "";
         const nextItems = { ...turn.items };
+        const imageIds = [...new Set([
+          ...(previous?.imageIds ?? []),
+          ...(reconciledMatch?.item.imageIds ?? []),
+          ...stringArray(item.imageIds),
+        ])];
         nextItems[itemId] = {
           id: itemId,
           type: itemType,
           text: resolvedText,
-          ...(previous?.imageIds || optimisticMatch?.item.imageIds
-            ? { imageIds: previous?.imageIds ?? optimisticMatch?.item.imageIds }
-            : {}),
+          ...(imageIds.length > 0 ? { imageIds } : {}),
           status: message.method === "item/completed"
             ? stringValue(item.status) ?? "completed"
             : stringValue(item.status) ?? "running",
@@ -400,6 +408,32 @@ function findMatchingOptimisticUserMessage(
   return undefined;
 }
 
+function findRecentConfirmedUserMessage(
+  thread: CodexThread,
+  text: string,
+  authoritativeId: string,
+  incomingHasImages: boolean,
+) {
+  if (thread.turnOrder.some((turnId) => thread.turns[turnId]?.items[authoritativeId])) return undefined;
+  for (const turnId of [...thread.turnOrder].reverse()) {
+    const turn = thread.turns[turnId];
+    for (const itemId of [...(turn?.itemOrder ?? [])].reverse()) {
+      const candidate = turn.items[itemId];
+      if (!candidate) continue;
+      if (isUserMessageType(candidate.type)) {
+        return sameUserInput(
+          candidate.text,
+          text,
+          Boolean(candidate.imageIds?.length),
+          incomingHasImages,
+        ) ? { turnId, item: candidate } : undefined;
+      }
+      if (candidate.type.toLocaleLowerCase().includes("agentmessage")) return undefined;
+    }
+  }
+  return undefined;
+}
+
 function removeItemFromTurn(thread: CodexThread, turnId: string, itemId: string): CodexThread {
   const turn = thread.turns[turnId];
   if (!turn?.items[itemId]) return thread;
@@ -428,6 +462,10 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown) {
   return typeof value === "string" ? value : undefined;
+}
+
+function stringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
 function numberValue(value: unknown) {

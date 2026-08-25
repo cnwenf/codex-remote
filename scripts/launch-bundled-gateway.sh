@@ -7,6 +7,7 @@ APP_PATH=${CODEX_DESKTOP_APP_PATH:-/Applications/ChatGPT.app}
 CDP_ENDPOINT=http://127.0.0.1:9229
 TOKEN_FILE=${ACCESS_TOKEN_FILE:-$HOME/Library/Application Support/Codex Remote/token}
 PID_FILE=${CODEX_REMOTE_GATEWAY_PID_FILE:-$HOME/Library/Application Support/Codex Remote/gateway.pid}
+DIAGNOSTIC_FILE=${CODEX_REMOTE_DIAGNOSTIC_FILE:-$HOME/Library/Logs/Codex Remote/gateway-diagnostics.log}
 
 if [[ -f "$PID_FILE" ]]; then
   OLD_PID=$(<"$PID_FILE")
@@ -47,5 +48,6 @@ exec env \
   ADDITIONAL_BIND_HOSTS="$ADDITIONAL_HOSTS" ALLOWED_ORIGINS="$ORIGINS" \
   CODEX_DESKTOP_CDP_ENDPOINT="$CDP_ENDPOINT" \
   CODEX_DESKTOP_APP_SERVER_VERSION="$CODEX_VERSION" \
+  CODEX_REMOTE_DIAGNOSTIC_FILE="$DIAGNOSTIC_FILE" \
   STATIC_DIR="$RESOURCES/web" \
   "$RESOURCES/bin/node" "$RESOURCES/gateway/index.mjs"

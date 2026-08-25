@@ -1,5 +1,5 @@
 import type { RemoteConnection } from "./types";
-import type { MobileUpdateStatus } from "./app-update";
+import type { MobileUpdateArtifact, MobileUpdateStatus } from "./app-update";
 
 export function ConnectionList({
   connections,
@@ -22,17 +22,67 @@ export function ConnectionList({
   currentVersion?: string;
   updateStatus?: MobileUpdateStatus;
   onCheckUpdate?(): void;
-  onDownloadUpdate?(url: string): void;
+  onDownloadUpdate?(artifact: MobileUpdateArtifact): void;
 }) {
   return (
     <main className="mobile-connections">
       <header className="mobile-remote-header">
         <span className="mobile-header-spacer" aria-hidden="true" />
         <h1>Remote</h1>
-        <button type="button" className="mobile-overflow-button" onClick={onNew} aria-label="新建连接">
-          <span aria-hidden="true">•••</span>
-        </button>
+        {currentVersion && updateStatus && onCheckUpdate && onDownloadUpdate ? (
+          updateStatus.state === "available" ? (
+            <button
+              type="button"
+              className="mobile-header-update"
+              aria-label={`下载 ${updateStatus.latestVersion}`}
+              onClick={() => onDownloadUpdate({
+                latestVersion: updateStatus.latestVersion,
+                downloadUrl: updateStatus.downloadUrl,
+                checksumUrl: updateStatus.checksumUrl,
+              })}
+            >
+              <small>v{currentVersion}</small>
+              <strong>下载 {updateStatus.latestVersion}</strong>
+            </button>
+          ) : updateStatus.state === "downloading" ? (
+            <div
+              className="mobile-header-update mobile-header-download-progress"
+              role="progressbar"
+              aria-label={`正在下载 ${updateStatus.latestVersion}`}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={updateStatus.progress}
+            >
+              <small>v{updateStatus.latestVersion}</small>
+              <strong>{updateStatus.progress}%</strong>
+              <span style={{ "--download-progress": `${updateStatus.progress}%` } as React.CSSProperties} />
+            </div>
+          ) : updateStatus.state === "installing" ? (
+            <div className="mobile-header-update" aria-live="polite">
+              <small>v{updateStatus.latestVersion}</small>
+              <strong>准备安装…</strong>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="mobile-header-update"
+              aria-label={updateStatus.state === "checking" ? "检查中" : "检查更新"}
+              disabled={updateStatus.state === "checking"}
+              onClick={onCheckUpdate}
+            >
+              <small>v{currentVersion}</small>
+              <strong>{updateStatus.state === "checking"
+                ? "检查中…"
+                : updateStatus.state === "error" ? "重试更新" : "检查更新"}</strong>
+            </button>
+          )
+        ) : <span className="mobile-header-spacer" aria-hidden="true" />}
       </header>
+      {updateStatus?.state === "current" ? (
+        <p className="mobile-update-feedback" role="status">已是最新版本</p>
+      ) : updateStatus?.state === "error" ? (
+        <p className="mobile-update-feedback mobile-update-error" role="status">{updateStatus.message}</p>
+      ) : null}
       <div className="mobile-remote-actions" aria-label="连接操作">
         <button type="button" className="connection-scan-button" onClick={onScan}>
           <span className="scan-icon" aria-hidden="true" />扫码添加
@@ -72,23 +122,6 @@ export function ConnectionList({
             ))}
           </ul>
         )}
-        {currentVersion && updateStatus && onCheckUpdate && onDownloadUpdate ? (
-          <section className="mobile-update-card" aria-label="客户端更新">
-            <div>
-              <strong>版本 {currentVersion}</strong>
-              <small>{updateMessage(updateStatus)}</small>
-            </div>
-            {updateStatus.state === "available" ? (
-              <button type="button" onClick={() => onDownloadUpdate(updateStatus.downloadUrl)}>
-                下载 {updateStatus.latestVersion}
-              </button>
-            ) : (
-              <button type="button" disabled={updateStatus.state === "checking"} onClick={onCheckUpdate}>
-                {updateStatus.state === "checking" ? "检查中…" : "检查更新"}
-              </button>
-            )}
-          </section>
-        ) : null}
       </section>
     </main>
   );
@@ -98,11 +131,4 @@ function ConnectionPairingStatus({ status }: { status: RemoteConnection["pairing
   if (status === "pending") return <small className="connection-pairing-status pairing">正在配对…</small>;
   if (status === "error") return <small className="connection-pairing-status error">连接不可用，请重新扫码</small>;
   return null;
-}
-
-function updateMessage(status: MobileUpdateStatus) {
-  if (status.state === "current") return "已是最新版本";
-  if (status.state === "available") return `发现新版本 ${status.latestVersion}`;
-  if (status.state === "error") return status.message;
-  return "从 GitHub Releases 获取更新";
 }

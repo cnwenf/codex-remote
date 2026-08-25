@@ -33,6 +33,9 @@ const CLIENT_METHODS = Object.freeze([
   "desktop/listPinnedThreads",
   "desktop/setThreadPinned",
   "desktop/setPinnedThreadsOrder",
+  "desktop/queue/list",
+  "desktop/queue/add",
+  "desktop/queue/steer",
 ] as const);
 
 const SERVER_REQUESTS = Object.freeze([

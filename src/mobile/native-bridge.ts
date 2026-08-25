@@ -1,6 +1,12 @@
 import { registerPlugin } from "@capacitor/core";
 import type { MobileThreadTarget } from "./deep-link";
 
+export type UpdateDownloadProgress = {
+  state: "downloading" | "installing" | "error";
+  progress?: number;
+  message?: string;
+};
+
 export type MonitorConnection = {
   connectionId: string;
   name: string;
@@ -17,9 +23,18 @@ export interface CodexRemoteNativePlugin {
   getLaunchTarget(): Promise<MobileThreadTarget | Record<string, never>>;
   scanConnection(): Promise<{ value: string }>;
   openExternalUrl(options: { url: string }): Promise<void>;
+  downloadAndInstallUpdate(options: {
+    url: string;
+    checksumUrl: string;
+    version: string;
+  }): Promise<void>;
   addListener(
     eventName: "openThread",
     listener: (target: MobileThreadTarget) => void,
+  ): Promise<{ remove(): Promise<void> }>;
+  addListener(
+    eventName: "updateDownloadProgress",
+    listener: (progress: UpdateDownloadProgress) => void,
   ): Promise<{ remove(): Promise<void> }>;
 }
 

@@ -52,7 +52,7 @@ describe("native installer contract", () => {
     try {
       writeFileSync(apk, "fixture");
       writeFileSync(fingerprint, `${expected}\n`);
-      writeFileSync(fakeApksigner, `#!/bin/sh\nprintf 'Signer #1 certificate SHA-256 digest: %s\\n' "$FAKE_ANDROID_CERT"\n`);
+      writeFileSync(fakeApksigner, `#!/bin/sh\nprintf '  Signer #1 certificate SHA-256 digest: %s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/../&:/g;s/:$//')" >&2\n`);
       chmodSync(fakeApksigner, 0o755);
 
       expect(execFileSync("/bin/bash", [join(root, "scripts/verify-android-signing.sh"), apk, fingerprint], {

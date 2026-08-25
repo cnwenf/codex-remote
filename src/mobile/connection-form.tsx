@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent, type TouchEvent } from "react";
 import type { RemoteConnection, RemoteConnectionInput } from "./types";
 
 export function ConnectionForm({
@@ -17,14 +17,37 @@ export function ConnectionForm({
   const [name, setName] = useState(connection?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(connection?.baseUrl ?? "");
   const [token, setToken] = useState("");
+  const swipeOrigin = useRef<{ x: number; y: number } | null>(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     await onSave({ id: connection?.id, name, baseUrl, token: token || undefined });
   }
 
+  function beginSwipe(event: TouchEvent) {
+    const touch = event.touches[0];
+    swipeOrigin.current = touch && touch.clientX <= 40
+      ? { x: touch.clientX, y: touch.clientY }
+      : null;
+  }
+
+  function finishSwipe(event: TouchEvent) {
+    const origin = swipeOrigin.current;
+    swipeOrigin.current = null;
+    const touch = event.changedTouches[0];
+    if (!origin || !touch) return;
+    const horizontal = touch.clientX - origin.x;
+    const vertical = Math.abs(touch.clientY - origin.y);
+    if (horizontal >= 72 && vertical <= Math.max(48, horizontal * 0.5)) onCancel();
+  }
+
   return (
-    <form className="mobile-connection-form" onSubmit={(event) => void submit(event)}>
+    <form
+      className="mobile-connection-form"
+      onSubmit={(event) => void submit(event)}
+      onTouchStart={beginSwipe}
+      onTouchEnd={finishSwipe}
+    >
       <header>
         <p className="eyebrow">CODEX REMOTE</p>
         <h2>{connection ? "修改连接" : "新建连接"}</h2>

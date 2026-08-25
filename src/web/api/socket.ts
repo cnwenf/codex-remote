@@ -110,6 +110,10 @@ export class CodexSocket {
       }
     }).then(() => {
       if (reconnecting) this.reconnectAttempt = 0;
+    }).catch((cause: unknown) => {
+      if (this.socket === socket) this.socket = undefined;
+      if (socket.readyState !== 3) socket.close(1000, "connect-failed");
+      throw cause;
     });
   }
 

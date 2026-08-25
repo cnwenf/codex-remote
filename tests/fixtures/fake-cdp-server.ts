@@ -70,7 +70,8 @@ export class FakeCdpServer {
       }
       this.websocketServer.handleUpgrade(request, socket, head, (websocket) => {
         (websocket as WebSocket & { fakeOwner?: boolean }).fakeOwner =
-          request.url === "/devtools/page/codex-avatar-overlay";
+          request.url === "/devtools/page/codex-avatar-overlay" ||
+          (request.url === "/devtools/page/codex" && this.socket != null);
         this.websocketServer.emit("connection", websocket, request);
       });
     });
@@ -78,6 +79,10 @@ export class FakeCdpServer {
       const owner = (socket as WebSocket & { fakeOwner?: boolean }).fakeOwner === true;
       if (owner) this.ownerSocket = socket;
       else this.socket = socket;
+      socket.on("close", () => {
+        if (owner && this.ownerSocket === socket) this.ownerSocket = undefined;
+        if (!owner && this.socket === socket) this.socket = undefined;
+      });
       socket.on("message", (raw) => {
         const request = JSON.parse(raw.toString()) as CdpRequest;
         (owner ? this.ownerRequests : this.requests).push(request);

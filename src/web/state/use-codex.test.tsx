@@ -882,16 +882,15 @@ describe("useCodex", () => {
       json: async () => ({ id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 }),
     });
     vi.stubGlobal("fetch", fetchMock);
-    let steering: Promise<void>;
-    act(() => { steering = result.current.sendInstruction("Continue from the phone", [image]); });
+    let queueing: Promise<void>;
+    act(() => { queueing = result.current.sendInstruction("Continue from the phone", [image]); });
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(fake.sent.length).toBeGreaterThan(2));
-    const steerRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(steerRequest).toMatchObject({
-      method: "turn/steer",
+    const queueRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(queueRequest).toMatchObject({
+      method: "desktop/queue/add",
       params: {
         threadId: "t1",
-        expectedTurnId: "turn-1",
         cwd: "/tmp/project",
         input: [
           { type: "text", text: "Continue from the phone" },
@@ -899,17 +898,28 @@ describe("useCodex", () => {
         ],
       },
     });
-    expect(Object.values(result.current.selectedThread!.turns["turn-1"].items)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "userMessage",
-          text: "Continue from the phone",
-          imageIds: ["upload-1"],
-        }),
-      ]),
-    );
-    fake.serverSend({ type: "rpc", payload: { id: steerRequest.id, result: {} } });
-    await act(() => steering);
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: queueRequest.id,
+        result: { message: { id: "queued-1", text: "Continue from the phone", createdAt: 1 } },
+      },
+    });
+    await act(() => queueing);
+    expect(result.current.selectedQueuedMessages).toEqual([
+      expect.objectContaining({ id: "queued-1", text: "Continue from the phone" }),
+    ]);
+
+    let promoting: Promise<void>;
+    act(() => { promoting = result.current.steerQueuedMessage("queued-1"); });
+    const promoteRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(promoteRequest).toMatchObject({
+      method: "desktop/queue/steer",
+      params: { threadId: "t1", messageId: "queued-1", expectedTurnId: "turn-1" },
+    });
+    fake.serverSend({ type: "rpc", payload: { id: promoteRequest.id, result: { messageId: "queued-1" } } });
+    await act(() => promoting);
+    expect(result.current.selectedQueuedMessages).toEqual([]);
     vi.unstubAllGlobals();
   });
 
@@ -962,19 +972,24 @@ describe("useCodex", () => {
     fake.serverSend({ type: "rpc", payload: { id: resume.id, result: {} } });
     await act(() => selection);
 
-    let steering: Promise<void>;
-    act(() => { steering = result.current.sendInstruction("Visible steer"); });
-    const steer = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(steer.method).toBe("turn/steer");
-    fake.serverSend({ type: "rpc", payload: { id: steer.id, result: {} } });
-    await act(() => steering);
+    let queueing: Promise<void>;
+    act(() => { queueing = result.current.sendInstruction("Visible queued follow-up"); });
+    const queue = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(queue.method).toBe("desktop/queue/add");
+    fake.serverSend({ type: "rpc", payload: { id: queue.id, result: { message: { id: "queued-1", text: "Visible queued follow-up" } } } });
+    await act(() => queueing);
 
+    const beforePoll = fake.sent.length;
     await act(() => new Promise((resolve) => setTimeout(resolve, 2_100)));
-    const poll = JSON.parse(fake.sent.at(-1) as string).payload;
+    const pollRequests = fake.sent.slice(beforePoll).map((entry) => JSON.parse(entry).payload);
+    const poll = pollRequests.find((request) => request.method === "desktopState/readThread");
     expect(poll).toMatchObject({
       method: "desktopState/readThread",
       params: { threadId: "t1", history: { limitTurns: 1 } },
     });
+    const queuePoll = pollRequests.find((request) => request.method === "desktop/queue/list");
+    expect(queuePoll).toMatchObject({ method: "desktop/queue/list", params: { threadId: "t1" } });
+    fake.serverSend({ type: "rpc", payload: { id: queuePoll.id, result: { messages: [] } } });
     fake.serverSend({
       type: "rpc",
       payload: {

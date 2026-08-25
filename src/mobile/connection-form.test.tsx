@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ConnectionForm } from "./connection-form";
@@ -20,5 +20,16 @@ describe("ConnectionForm", () => {
       baseUrl: "http://192.168.1.20:4321",
       token: "a-private-password",
     });
+  });
+
+  it("returns to the connection list after a deliberate left-edge swipe", () => {
+    const onCancel = vi.fn();
+    const { container } = render(<ConnectionForm onSave={vi.fn(async () => undefined)} onCancel={onCancel} />);
+    const form = container.querySelector("form") as HTMLFormElement;
+
+    fireEvent.touchStart(form, { touches: [{ clientX: 12, clientY: 240 }] });
+    fireEvent.touchEnd(form, { changedTouches: [{ clientX: 118, clientY: 250 }] });
+
+    expect(onCancel).toHaveBeenCalledOnce();
   });
 });

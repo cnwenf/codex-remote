@@ -27,6 +27,9 @@ describe("protocol capabilities", () => {
     expect(isAllowedClientMethod(result, "thread/name/set")).toBe(true);
     expect(isAllowedClientMethod(result, "thread/metadata/update")).toBe(true);
     expect(isAllowedClientMethod(result, "turn/steer")).toBe(true);
+    expect(isAllowedClientMethod(result, "desktop/queue/list")).toBe(true);
+    expect(isAllowedClientMethod(result, "desktop/queue/add")).toBe(true);
+    expect(isAllowedClientMethod(result, "desktop/queue/steer")).toBe(true);
     expect(isAllowedClientMethod(result, "shell/arbitrary")).toBe(false);
   });
 

@@ -1,10 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { AppServerTransport } from "./app-server-transport";
 import { parseAdditionalBindHosts } from "./bind-hosts";
 import { resolveCodexBinary } from "./codex-binary";
 import { DesktopBridgeTransport } from "./desktop-bridge-transport";
+import { acquireDesktopBridgeLock } from "./desktop-bridge-lock";
 import { DesktopCdpClient } from "./desktop-cdp-client";
 import { DesktopState } from "./desktop-state";
 import { createGateway } from "./server";
@@ -26,6 +27,15 @@ const desktopAppServerVersion = process.env.CODEX_DESKTOP_APP_SERVER_VERSION;
 if (desktopCdpEndpoint && !desktopAppServerVersion) {
   throw new Error("CODEX_DESKTOP_APP_SERVER_VERSION is required with CODEX_DESKTOP_CDP_ENDPOINT");
 }
+
+const desktopBridgeLock = desktopCdpEndpoint
+  ? acquireDesktopBridgeLock(
+      process.env.CODEX_DESKTOP_BRIDGE_LOCK_FILE ??
+        join(homedir(), "Library", "Application Support", "Codex Remote", "desktop-bridge.lock"),
+    )
+  : undefined;
+const diagnosticFile = process.env.CODEX_REMOTE_DIAGNOSTIC_FILE;
+if (diagnosticFile) mkdirSync(dirname(diagnosticFile), { recursive: true, mode: 0o700 });
 
 const transport = desktopCdpEndpoint
   ? new DesktopBridgeTransport({
@@ -52,9 +62,19 @@ const gateway = createGateway({
   defaultCwd: process.cwd(),
   desktopState: new DesktopState(join(codexHome, "state_5.sqlite")),
   transport,
+  onTransportDiagnostic: diagnosticFile ? (diagnostic) => {
+    appendFileSync(
+      diagnosticFile,
+      `${new Date().toISOString()} ${diagnostic.category} ${diagnostic.message}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+  } : undefined,
 });
 
-const address = await gateway.start();
+const address = await gateway.start().catch((cause: unknown) => {
+  desktopBridgeLock?.release();
+  throw cause;
+});
 const listeningAddresses = [address.address, ...additionalHosts]
   .map((listeningHost) => `${listeningHost}:${address.port}`)
   .join(", ");
@@ -65,7 +85,8 @@ async function stop() {
   if (stopping) return;
   stopping = true;
   await gateway.stop();
-  process.exitCode = 0;
+  desktopBridgeLock?.release();
+  process.exit(0);
 }
 
 process.once("SIGINT", stop);

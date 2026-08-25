@@ -35,11 +35,13 @@ public class CodexRemoteMonitorService extends Service {
     private static final String PREFS = "codex_remote_monitor";
     static final String CHANNEL_RUNNING = "codex_remote_running";
     static final String CHANNEL_COMPLETED = "codex_remote_completed";
+    static final String GROUP_RUNNING = "codex_remote_running_threads";
     static final int ONGOING_ID = 1001;
     static final long POLL_MS = 15_000;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Map<String, String> previous = new HashMap<>();
+    private final Set<String> notifiedRunning = new HashSet<>();
     private String connectionId;
     private String connectionName;
     private String baseUrl;
@@ -120,6 +122,7 @@ public class CodexRemoteMonitorService extends Service {
     private void update(JSONArray threads) throws Exception {
         List<String> titles = new ArrayList<>();
         List<String> ids = new ArrayList<>();
+        Set<String> currentRunning = new HashSet<>();
         Map<String, String> current = new HashMap<>();
         for (int index = 0; index < threads.length(); index++) {
             JSONObject thread = threads.getJSONObject(index);
@@ -130,6 +133,8 @@ public class CodexRemoteMonitorService extends Service {
             if ("running".equals(status)) {
                 ids.add(id);
                 titles.add(title);
+                currentRunning.add(id);
+                notifyRunning(id, title);
             }
             if ("running".equals(previous.get(id)) && ("idle".equals(status) || "error".equals(status))) {
                 notifyCompleted(id, title, "error".equals(status));
@@ -138,10 +143,16 @@ public class CodexRemoteMonitorService extends Service {
         previous.clear();
         previous.putAll(current);
         persistPreviousStates();
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        for (String oldId : new HashSet<>(notifiedRunning)) {
+            if (!currentRunning.contains(oldId)) manager.cancel(runningNotificationId(oldId));
+        }
+        notifiedRunning.clear();
+        notifiedRunning.addAll(currentRunning);
         String title = titles.isEmpty() ? "没有运行中的对话" : titles.size() + " 个对话运行中";
         String body = titles.isEmpty() ? (connectionName == null ? "Codex Remote" : connectionName) : joinTitles(titles);
         String firstId = ids.isEmpty() ? null : ids.get(0);
-        getSystemService(NotificationManager.class).notify(ONGOING_ID, ongoing(title, body, firstId));
+        manager.notify(ONGOING_ID, ongoing(title, body, firstId));
     }
 
     private Notification ongoing(String title, String body, @Nullable String threadId) {
@@ -153,8 +164,29 @@ public class CodexRemoteMonitorService extends Service {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setGroup(GROUP_RUNNING)
+            .setGroupSummary(true)
             .setContentIntent(openIntent(threadId, ONGOING_ID))
             .build();
+    }
+
+    private void notifyRunning(String threadId, String title) {
+        int notificationId = runningNotificationId(threadId);
+        Notification notification = new NotificationCompat.Builder(this, CHANNEL_RUNNING)
+            .setSmallIcon(R.drawable.ic_stat_codex_remote)
+            .setContentTitle(title)
+            .setContentText(connectionName == null ? "对话运行中" : connectionName + " · 对话运行中")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setGroup(GROUP_RUNNING)
+            .setContentIntent(openIntent(threadId, notificationId))
+            .build();
+        getSystemService(NotificationManager.class).notify(notificationId, notification);
+    }
+
+    static int runningNotificationId(String threadId) {
+        return 10_000 + Math.floorMod(threadId.hashCode(), 9_000);
     }
 
     private void notifyCompleted(String threadId, String title, boolean failed) {

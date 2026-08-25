@@ -21,22 +21,24 @@ describe("DesktopCdpClient", () => {
 
     expect(server.requests.map((request) => request.method)).toEqual([
       "Runtime.enable",
+      "Runtime.removeBinding",
       "Runtime.addBinding",
       "Runtime.evaluate",
     ]);
     expect(server.requests[1]?.params).toEqual({ name: "__codexLocalDesktopEvent" });
-    expect(String(server.requests[2]?.params?.expression)).toContain("mcp-notification");
-    expect(String(server.requests[2]?.params?.expression))
-      .toContain("__codexLocalDesktopNotificationListenerInstalled");
-    expect(String(server.requests[2]?.params?.expression)).toContain("fetch-response");
-    expect(String(server.requests[2]?.params?.expression)).toContain("pinned-threads-updated");
-    expect(String(server.requests[2]?.params?.expression))
+    expect(server.requests[2]?.params).toEqual({ name: "__codexLocalDesktopEvent" });
+    expect(String(server.requests[3]?.params?.expression)).toContain("mcp-notification");
+    expect(String(server.requests[3]?.params?.expression))
+      .toContain("removeEventListener");
+    expect(String(server.requests[3]?.params?.expression)).toContain("fetch-response");
+    expect(String(server.requests[3]?.params?.expression)).toContain("pinned-threads-updated");
+    expect(String(server.requests[3]?.params?.expression))
       .toContain("__codexRemoteVisibleSettingsHelperVersion");
-    expect(String(server.requests[2]?.params?.expression))
+    expect(String(server.requests[3]?.params?.expression))
       .toContain("__codexRemoteVisibleAgentMessageObserverVersion");
-    expect(String(server.requests[2]?.params?.expression))
+    expect(String(server.requests[3]?.params?.expression))
       .toContain('[data-markdown-text-style="assistant-message"]');
-    expect(String(server.requests[2]?.params?.expression))
+    expect(String(server.requests[3]?.params?.expression))
       .toContain("desktop-visible-agent-message");
     await client.stop();
   });
@@ -68,7 +70,7 @@ describe("DesktopCdpClient", () => {
     await client.stop();
   });
 
-  it("uses an auxiliary Desktop renderer to call the current thread owner", async () => {
+  it("uses a second main-renderer connection to call the current thread owner", async () => {
     server = new FakeCdpServer();
     const endpoint = await server.start();
     const client = new DesktopCdpClient({ endpoint });
@@ -90,6 +92,10 @@ describe("DesktopCdpClient", () => {
     ]);
     expect(String(server.ownerRequests[1]?.params?.expression))
       .toContain("__codexRemoteRequestThreadOwnerVersion");
+    expect(String(server.ownerRequests[1]?.params?.expression))
+      .toContain("coordination.requestThreadFollower({ hostId: 'local', request: { method, params } })");
+    expect(String(server.ownerRequests[1]?.params?.expression))
+      .not.toContain("coordination.findThreadOwner");
     expect(server.ownerRequests.at(-1)?.params?.arguments).toEqual([
       { value: "thread-follower-update-thread-settings" },
       { value: { conversationId: "thread-1", threadSettings: { model: "gpt-test" } } },
@@ -101,6 +107,48 @@ describe("DesktopCdpClient", () => {
     expect(visibleSync?.params?.arguments).toEqual([{
       value: { conversationId: "thread-1", threadSettings: { model: "gpt-test" } },
     }]);
+    await client.stop();
+  });
+
+  it("broadcasts queued follow-ups through Desktop client coordination without an owner request", async () => {
+    server = new FakeCdpServer();
+    const endpoint = await server.start();
+    const client = new DesktopCdpClient({ endpoint });
+    await client.start(() => undefined, () => undefined);
+
+    await client.broadcastQueuedFollowUps("thread-1", [{ id: "queued-1", text: "Run next" }]);
+
+    expect(String(server.ownerRequests[1]?.params?.expression))
+      .toContain("coordination.threadQueuedFollowUpsChanged");
+    expect(String(server.ownerRequests.at(-1)?.params?.functionDeclaration))
+      .toContain("__codexRemoteBroadcastQueuedFollowUps");
+    expect(server.ownerRequests.at(-1)?.params?.arguments).toEqual([
+      { value: "thread-1" },
+      { value: [{ id: "queued-1", text: "Run next" }] },
+    ]);
+    await client.stop();
+  });
+
+  it("promotes a visible queued follow-up through Desktop's native queue action", async () => {
+    server = new FakeCdpServer();
+    const endpoint = await server.start();
+    const client = new DesktopCdpClient({ endpoint });
+    await client.start(() => undefined, () => undefined);
+
+    await expect(client.promoteQueuedFollowUp("thread-1", "queued-1", "Run next"))
+      .resolves.toBe(true);
+
+    const request = server.requests.at(-1);
+    expect(request?.method).toBe("Runtime.callFunctionOn");
+    expect(String(request?.params?.functionDeclaration)).toContain("调整方向");
+    expect(String(request?.params?.functionDeclaration)).toContain("conversationId");
+    expect(String(request?.params?.functionDeclaration)).not.toContain("setTimeout");
+    expect(request?.params?.awaitPromise).toBe(false);
+    expect(request?.params?.arguments).toEqual([
+      { value: "thread-1" },
+      { value: "queued-1" },
+      { value: "Run next" },
+    ]);
     await client.stop();
   });
 

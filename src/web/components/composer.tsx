@@ -21,6 +21,7 @@ type ComposerProps = {
   draftKey?: string;
   onSend: (text: string, images: File[]) => Promise<void> | void;
   running: boolean;
+  runningMode?: "queue" | "steer";
   onStop?: () => Promise<void> | void;
   disabled?: boolean;
   models?: ModelOption[];
@@ -37,6 +38,7 @@ export function Composer({
   draftKey,
   onSend,
   running,
+  runningMode = "steer",
   onStop,
   disabled,
   models = [],
@@ -168,7 +170,9 @@ export function Composer({
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         onFocus={() => setExpanded(true)}
-        placeholder={running ? "Add guidance while Codex works" : "What should Codex do next?"}
+        placeholder={running
+          ? runningMode === "queue" ? "发送后排队，当前任务完成后执行" : "Add guidance while Codex works"
+          : "What should Codex do next?"}
         rows={isExpanded ? 3 : 1}
         disabled={disabled}
       />
@@ -292,7 +296,7 @@ export function Composer({
           type="submit"
           disabled={(!text.trim() && images.length === 0) || busy || disabled}
         >
-          {busy ? "Working…" : running ? "Steer" : "Send"}
+          {busy ? "Working…" : running ? runningMode === "queue" ? "排队" : "Steer" : "Send"}
         </button>
       </div>
       {isExpanded && error ? <p className="inline-error" role="alert">{error}</p> : null}

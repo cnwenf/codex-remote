@@ -26,8 +26,12 @@ if [[ -z "$apksigner" || ! -x "$apksigner" ]]; then
   exit 1
 fi
 
-verify_output=$("$apksigner" verify --print-certs "$apk_path")
-actual=$(printf '%s\n' "$verify_output" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1 | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+verify_output=$("$apksigner" verify --print-certs "$apk_path" 2>&1)
+actual=$(printf '%s\n' "$verify_output" \
+  | sed -n 's/.*Signer #1 certificate SHA-256 digest:[[:space:]]*//p' \
+  | head -1 \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr -d '[:space:]:')
 expected=$(tr '[:upper:]' '[:lower:]' < "$expected_file" | tr -d '[:space:]')
 
 if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then

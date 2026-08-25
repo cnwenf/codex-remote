@@ -18,10 +18,12 @@ import {
 export interface DesktopBridgeClient {
   start(
     onMessage: (message: unknown) => void,
-    onDisconnect: () => void,
+    onDisconnect: (cause?: Error) => void,
   ): Promise<void>;
   sendDesktopMessage(message: unknown): Promise<void>;
   requestThreadOwner(method: string, params: unknown): Promise<unknown>;
+  broadcastQueuedFollowUps(conversationId: string, messages: unknown[]): Promise<void>;
+  promoteQueuedFollowUp(conversationId: string, messageId: string, text: string): Promise<boolean>;
   stop(): Promise<void>;
 }
 
@@ -30,6 +32,8 @@ type DesktopBridgeTransportOptions = {
   appServerVersion: string;
   hostId?: string;
   reconnectDelayMs?: number;
+  appServerProbeIntervalMs?: number;
+  appServerDisconnectGraceMs?: number;
 };
 
 type DesktopEnvelope = {
@@ -52,6 +56,21 @@ type DesktopEnvelope = {
   text?: unknown;
 };
 
+type QueueRequest = Extract<RpcMessage, { id: string | number; method: string }>;
+
+type PendingQueueRead = {
+  request: QueueRequest;
+  operation: "list" | "add" | "steer";
+};
+
+type PendingQueueWrite = {
+  request: QueueRequest;
+  operation: "add" | "steer";
+  threadId: string;
+  messages: Record<string, unknown>[];
+  message: Record<string, unknown>;
+};
+
 const HOST_ROUTES: Readonly<Record<string, string>> = Object.freeze({
   "desktop/listPinnedThreads": "list-pinned-threads",
   "desktop/setThreadPinned": "set-thread-pinned",
@@ -64,10 +83,15 @@ export class DesktopBridgeTransport implements CodexTransport {
   private onDiagnostic?: (diagnostic: TransportDiagnostic) => void;
   private pendingServerRequests = new Map<string, string>();
   private pendingHostRequests = new Map<string, string | number>();
+  private pendingQueueReads = new Map<string, PendingQueueRead>();
+  private pendingQueueWrites = new Map<string, PendingQueueWrite>();
   private capabilities: ProtocolCapabilities;
   private bridgeState: "stopped" | "live" | "read-only" = "stopped";
   private readonly hostId: string;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private appServerProbeTimer?: ReturnType<typeof setTimeout>;
+  private appServerDisconnectTimer?: ReturnType<typeof setTimeout>;
+  private appServerProbeRequestIds = new Set<string>();
   private reconnecting = false;
 
   constructor(private readonly options: DesktopBridgeTransportOptions) {
@@ -104,7 +128,7 @@ export class DesktopBridgeTransport implements CodexTransport {
     this.onDiagnostic = onDiagnostic;
     await this.options.client.start(
       (message) => this.receiveDesktopMessage(message),
-      () => this.markDisconnected(true),
+      (cause) => this.markDisconnected(true, cause),
     );
     this.bridgeState = "live";
   }
@@ -118,6 +142,15 @@ export class DesktopBridgeTransport implements CodexTransport {
       const hostRoute = HOST_ROUTES[message.method];
       if (hostRoute) {
         this.sendHostRequest(message.id, hostRoute, message.params);
+        return;
+      }
+      if (
+        message.method === "desktop/queue/list" ||
+        message.method === "desktop/queue/add" ||
+        message.method === "desktop/queue/steer"
+      ) {
+        const operation = message.method.slice("desktop/queue/".length) as PendingQueueRead["operation"];
+        this.sendQueueRead(message, operation);
         return;
       }
       const ownerRequest = createOwnerRequest(message);
@@ -138,9 +171,16 @@ export class DesktopBridgeTransport implements CodexTransport {
   async stop(): Promise<void> {
     this.bridgeState = "stopped";
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.appServerProbeTimer) clearTimeout(this.appServerProbeTimer);
+    if (this.appServerDisconnectTimer) clearTimeout(this.appServerDisconnectTimer);
     this.reconnectTimer = undefined;
+    this.appServerProbeTimer = undefined;
+    this.appServerDisconnectTimer = undefined;
+    this.appServerProbeRequestIds.clear();
     this.pendingServerRequests.clear();
     this.pendingHostRequests.clear();
+    this.pendingQueueReads.clear();
+    this.pendingQueueWrites.clear();
     await this.options.client.stop();
   }
 
@@ -175,6 +215,20 @@ export class DesktopBridgeTransport implements CodexTransport {
     }
     if (value.hostId !== this.hostId) return;
     if (value.type === "mcp-response" && isRpcMessage(value.message)) {
+      this.clearAppServerDisconnectVerification();
+      if (this.bridgeState === "read-only" && isRpcResponse(value.message)) {
+        // Desktop can briefly emit a disconnected state while the App Server is
+        // already answering again. A valid response is authoritative evidence
+        // that the bridge is writable, even when Desktop remapped the request id.
+        this.markConnected();
+      }
+      if (
+        isRpcResponse(value.message) &&
+        this.appServerProbeRequestIds.has(String(value.message.id))
+      ) {
+        this.markConnected();
+        return;
+      }
       this.onMessage?.(value.message);
       return;
     }
@@ -199,8 +253,12 @@ export class DesktopBridgeTransport implements CodexTransport {
       return;
     }
     if (value.type === "codex-app-server-connection-changed") {
-      if (value.state === "connected") this.markConnected();
-      else this.markDisconnected(false);
+      if (value.state === "connected") {
+        this.clearAppServerDisconnectVerification();
+        this.markConnected();
+      } else {
+        this.scheduleAppServerDisconnectVerification();
+      }
       return;
     }
   }
@@ -268,6 +326,18 @@ export class DesktopBridgeTransport implements CodexTransport {
 
   private receiveHostResponse(response: DesktopEnvelope) {
     if (typeof response.requestId !== "string") return;
+    const queueRead = this.pendingQueueReads.get(response.requestId);
+    if (queueRead) {
+      this.pendingQueueReads.delete(response.requestId);
+      this.receiveQueueState(response, queueRead);
+      return;
+    }
+    const queueWrite = this.pendingQueueWrites.get(response.requestId);
+    if (queueWrite) {
+      this.pendingQueueWrites.delete(response.requestId);
+      void this.receiveQueueWrite(response, queueWrite);
+      return;
+    }
     const rpcId = this.pendingHostRequests.get(response.requestId);
     if (rpcId === undefined) return;
     this.pendingHostRequests.delete(response.requestId);
@@ -292,6 +362,225 @@ export class DesktopBridgeTransport implements CodexTransport {
       this.onMessage?.({
         id: rpcId,
         error: { code: -32700, message: "Desktop host response was malformed" },
+      });
+    }
+  }
+
+  private sendQueueRead(request: QueueRequest, operation: PendingQueueRead["operation"]) {
+    const params = asRecord(request.params);
+    if (typeof params.threadId !== "string") {
+      this.onMessage?.({ id: request.id, error: { code: -32602, message: "threadId is required" } });
+      return;
+    }
+    if (operation === "add" && (typeof params.text !== "string" || !params.text.trim())) {
+      this.onMessage?.({ id: request.id, error: { code: -32602, message: "text is required" } });
+      return;
+    }
+    if (operation === "steer" && typeof params.messageId !== "string") {
+      this.onMessage?.({ id: request.id, error: { code: -32602, message: "messageId is required" } });
+      return;
+    }
+    const requestId = randomUUID();
+    this.pendingQueueReads.set(requestId, { request, operation });
+    this.dispatch({
+      type: "fetch",
+      requestId,
+      method: "POST",
+      url: "vscode://codex/get-global-state",
+      body: JSON.stringify({ key: "queued-follow-ups" }),
+      reportUploadProgress: false,
+    });
+  }
+
+  private receiveQueueState(response: DesktopEnvelope, pending: PendingQueueRead) {
+    if (
+      response.responseType !== "success" ||
+      typeof response.status !== "number" ||
+      response.status < 200 ||
+      response.status >= 300
+    ) {
+      this.onMessage?.({ id: pending.request.id, error: { code: -32002, message: "Desktop queue read failed" } });
+      return;
+    }
+    let state: Record<string, unknown>;
+    try {
+      const body = typeof response.bodyJsonString === "string"
+        ? asRecord(JSON.parse(response.bodyJsonString))
+        : {};
+      state = asRecord(body.value);
+    } catch {
+      this.onMessage?.({ id: pending.request.id, error: { code: -32700, message: "Desktop queue state was malformed" } });
+      return;
+    }
+    const params = asRecord(pending.request.params);
+    const threadId = String(params.threadId);
+    const messages = sanitizeQueueMessages(state[threadId]);
+    if (pending.operation === "list") {
+      this.onMessage?.({ id: pending.request.id, result: { messages } });
+      return;
+    }
+    if (pending.operation === "steer") {
+      const messageId = String(params.messageId);
+      const message = messages.find((item) => item.id === messageId);
+      if (!message) {
+        this.onMessage?.({ id: pending.request.id, error: { code: -32004, message: "Queued message not found" } });
+        return;
+      }
+      void this.promoteVisibleQueuedMessage(
+        pending.request,
+        threadId,
+        messageId,
+        message,
+        state,
+        messages,
+      );
+      return;
+    }
+    const text = String(params.text).trim();
+    const cwd = typeof params.cwd === "string" && params.cwd ? params.cwd : null;
+    const input = Array.isArray(params.input) ? params.input : [];
+    const imageAttachments = input.flatMap((item) => {
+      const record = asRecord(item);
+      return record.type === "localImage" && typeof record.path === "string"
+        ? [{ src: record.path }]
+        : [];
+    });
+    const message = {
+      id: randomUUID(),
+      text,
+      context: {
+        prompt: text,
+        addedFiles: [],
+        fileAttachments: [],
+        ideContext: null,
+        imageAttachments,
+        workspaceRoots: cwd ? [cwd] : [],
+      },
+      cwd,
+      createdAt: Date.now(),
+    };
+    const nextState = { ...state, [threadId]: [...messages, message] };
+    this.sendQueueWrite(
+      pending.request,
+      "add",
+      threadId,
+      nextState,
+      [...messages, message],
+      message,
+    );
+  }
+
+  private async promoteVisibleQueuedMessage(
+    request: QueueRequest,
+    threadId: string,
+    messageId: string,
+    message: Record<string, unknown>,
+    state: Record<string, unknown>,
+    messages: Record<string, unknown>[],
+  ) {
+    const text = typeof message.text === "string" ? message.text : "";
+    try {
+      if (await this.options.client.promoteQueuedFollowUp(threadId, messageId, text)) {
+        this.onMessage?.({ id: request.id, result: { messageId } });
+        return;
+      }
+    } catch {
+      // A hidden or remounting Desktop thread cannot expose its queue action.
+    }
+    const remaining = messages.filter((item) => item.id !== messageId);
+    const nextState = { ...state };
+    if (remaining.length > 0) nextState[threadId] = remaining;
+    else delete nextState[threadId];
+    this.sendQueueWrite(request, "steer", threadId, nextState, remaining, message);
+  }
+
+  private sendQueueWrite(
+    request: QueueRequest,
+    operation: PendingQueueWrite["operation"],
+    threadId: string,
+    state: Record<string, unknown>,
+    messages: Record<string, unknown>[],
+    message: Record<string, unknown>,
+  ) {
+    const requestId = randomUUID();
+    this.pendingQueueWrites.set(requestId, { request, operation, threadId, messages, message });
+    this.dispatch({
+      type: "fetch",
+      requestId,
+      method: "POST",
+      url: "vscode://codex/set-global-state",
+      body: JSON.stringify({ key: "queued-follow-ups", value: state }),
+      reportUploadProgress: false,
+    });
+  }
+
+  private async receiveQueueWrite(response: DesktopEnvelope, pending: PendingQueueWrite) {
+    if (
+      response.responseType !== "success" ||
+      typeof response.status !== "number" ||
+      response.status < 200 ||
+      response.status >= 300
+    ) {
+      this.onMessage?.({
+        id: pending.request.id,
+        error: { code: -32002, message: "Desktop queue update failed" },
+      });
+      return;
+    }
+    try {
+      await this.options.client.broadcastQueuedFollowUps(pending.threadId, pending.messages);
+    } catch (cause) {
+      this.onMessage?.({
+        id: pending.request.id,
+        error: {
+          code: -32003,
+          message: cause instanceof Error ? cause.message : "Desktop queue broadcast failed",
+        },
+      });
+      return;
+    }
+    if (pending.operation === "add") {
+      this.onMessage?.({ id: pending.request.id, result: { message: pending.message } });
+      return;
+    }
+    await this.promoteQueuedMessage(pending.request, pending.threadId, pending.message);
+  }
+
+  private async promoteQueuedMessage(
+    request: QueueRequest,
+    threadId: string,
+    message: Record<string, unknown>,
+  ) {
+    const text = typeof message.text === "string" ? message.text : "";
+    const context = asRecord(message.context);
+    const imageInput = Array.isArray(context.imageAttachments)
+      ? context.imageAttachments.flatMap((attachment) => {
+          const record = asRecord(attachment);
+          return typeof record.src === "string" ? [{ type: "localImage", path: record.src }] : [];
+        })
+      : [];
+    try {
+      await this.options.client.requestThreadOwner(
+        "thread-follower-steer-turn",
+        {
+          conversationId: threadId,
+          input: [
+            ...(text ? [{ type: "text", text, text_elements: [] }] : []),
+            ...imageInput,
+          ],
+          restoreMessage: message,
+          attachments: [],
+          clientUserMessageId: randomUUID(),
+        },
+      );
+      this.onMessage?.({ id: request.id, result: { messageId: message.id } });
+    } catch (cause) {
+      this.onMessage?.({
+        id: request.id,
+        error: {
+          code: -32003,
+          message: cause instanceof Error ? cause.message : "Desktop queue promotion failed",
+        },
       });
     }
   }
@@ -326,24 +615,54 @@ export class DesktopBridgeTransport implements CodexTransport {
     }
   }
 
-  private markDisconnected(shouldReconnect: boolean) {
+  private markDisconnected(shouldReconnect: boolean, cause?: Error) {
     if (this.isStopped()) return;
+    this.clearAppServerDisconnectVerification();
     if (this.bridgeState === "live") {
       this.bridgeState = "read-only";
       this.pendingServerRequests.clear();
       this.pendingHostRequests.clear();
+      this.pendingQueueReads.clear();
+      this.pendingQueueWrites.clear();
       this.onDiagnostic?.({
         category: "protocol",
-        message: "Desktop bridge disconnected; Desktop threads are read-only",
+        message: cause
+          ? `Desktop bridge disconnected (${cause.message}); Desktop threads are read-only`
+          : "Desktop bridge disconnected; Desktop threads are read-only",
       });
     }
-    if (shouldReconnect) this.scheduleReconnect();
+    if (shouldReconnect) {
+      this.clearAppServerProbe();
+      this.scheduleReconnect();
+    } else {
+      this.scheduleAppServerProbe();
+    }
   }
 
   private markConnected() {
+    this.clearAppServerDisconnectVerification();
     if (this.bridgeState !== "read-only" || !this.capabilities.compatible) return;
+    this.clearAppServerProbe();
     this.bridgeState = "live";
     this.onDiagnostic?.({ category: "protocol", message: "Desktop bridge reconnected" });
+  }
+
+  private scheduleAppServerDisconnectVerification() {
+    if (this.isStopped() || this.appServerDisconnectTimer) return;
+    const delay = this.options.appServerDisconnectGraceMs ?? 1_500;
+    if (delay <= 0) {
+      this.markDisconnected(false);
+      return;
+    }
+    this.appServerDisconnectTimer = setTimeout(() => {
+      this.appServerDisconnectTimer = undefined;
+      this.markDisconnected(false);
+    }, delay);
+  }
+
+  private clearAppServerDisconnectVerification() {
+    if (this.appServerDisconnectTimer) clearTimeout(this.appServerDisconnectTimer);
+    this.appServerDisconnectTimer = undefined;
   }
 
   private scheduleReconnect() {
@@ -361,7 +680,7 @@ export class DesktopBridgeTransport implements CodexTransport {
     try {
       await this.options.client.start(
         (message) => this.receiveDesktopMessage(message),
-        () => this.markDisconnected(true),
+        (cause) => this.markDisconnected(true, cause),
       );
       connected = true;
     } catch {
@@ -375,7 +694,52 @@ export class DesktopBridgeTransport implements CodexTransport {
       return;
     }
     this.bridgeState = "live";
+    this.clearAppServerProbe();
     this.onDiagnostic?.({ category: "protocol", message: "Desktop bridge reconnected" });
+  }
+
+  private scheduleAppServerProbe() {
+    if (
+      this.bridgeState !== "read-only" ||
+      this.appServerProbeTimer
+    ) return;
+    this.appServerProbeTimer = setTimeout(() => {
+      this.appServerProbeTimer = undefined;
+      void this.probeAppServer();
+    }, this.options.appServerProbeIntervalMs ?? 2_000);
+  }
+
+  private async probeAppServer() {
+    if (this.bridgeState !== "read-only") return;
+    const requestId = `codex-remote-probe-${randomUUID()}`;
+    this.appServerProbeRequestIds.add(requestId);
+    while (this.appServerProbeRequestIds.size > 5) {
+      const oldest = this.appServerProbeRequestIds.values().next().value;
+      if (typeof oldest === "string") this.appServerProbeRequestIds.delete(oldest);
+    }
+    try {
+      await this.options.client.sendDesktopMessage({
+        type: "mcp-request",
+        hostId: this.hostId,
+        priority: "background",
+        source: "remote_control",
+        request: { id: requestId, method: "thread/list", params: { limit: 1 } },
+      });
+    } catch {
+      this.appServerProbeRequestIds.delete(requestId);
+      this.markDisconnected(true);
+      return;
+    }
+    this.appServerProbeTimer = setTimeout(() => {
+      this.appServerProbeTimer = undefined;
+      this.scheduleAppServerProbe();
+    }, this.options.appServerProbeIntervalMs ?? 2_000);
+  }
+
+  private clearAppServerProbe() {
+    if (this.appServerProbeTimer) clearTimeout(this.appServerProbeTimer);
+    this.appServerProbeTimer = undefined;
+    this.appServerProbeRequestIds.clear();
   }
 
   private isStopped() {
@@ -477,6 +841,23 @@ function isRpcMessage(value: unknown): value is RpcMessage {
   if ("method" in record && typeof record.method !== "string") return false;
   if ("id" in record) return typeof record.id === "number" || typeof record.id === "string";
   return typeof record.method === "string";
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function sanitizeQueueMessages(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => (
+    item !== null &&
+    typeof item === "object" &&
+    !Array.isArray(item) &&
+    typeof (item as Record<string, unknown>).id === "string" &&
+    typeof (item as Record<string, unknown>).text === "string"
+  ));
 }
 
 function rpcKey(id: string | number) {

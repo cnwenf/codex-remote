@@ -5,6 +5,9 @@ import { DesktopBridgeTransport, type DesktopBridgeClient } from "./desktop-brid
 class FakeBridgeClient implements DesktopBridgeClient {
   sent: unknown[] = [];
   ownerRequests: Array<{ method: string; params: unknown }> = [];
+  queueBroadcasts: Array<{ conversationId: string; messages: unknown[] }> = [];
+  queuePromotions: Array<{ conversationId: string; messageId: string; text: string }> = [];
+  queuePromotionResult = true;
   ownerRequestResult: unknown = { method: "thread-follower-update-thread-settings", result: { ok: true } };
   ownerRequestError?: Error;
   startCalls = 0;
@@ -27,6 +30,15 @@ class FakeBridgeClient implements DesktopBridgeClient {
     return this.ownerRequestResult;
   }
 
+  async broadcastQueuedFollowUps(conversationId: string, messages: unknown[]) {
+    this.queueBroadcasts.push({ conversationId, messages });
+  }
+
+  async promoteQueuedFollowUp(conversationId: string, messageId: string, text: string) {
+    this.queuePromotions.push({ conversationId, messageId, text });
+    return this.queuePromotionResult;
+  }
+
   async stop() {}
 }
 
@@ -37,6 +49,7 @@ function createStartedTransport() {
   const transport = new DesktopBridgeTransport({
     client,
     appServerVersion: "0.148.0-alpha.15",
+    appServerDisconnectGraceMs: 0,
   });
   return transport.start(
     (message) => messages.push(message),
@@ -186,6 +199,140 @@ describe("DesktopBridgeTransport", () => {
 
     client.onMessage?.({ type: "pinned-threads-updated" });
     expect(messages).toContainEqual({ method: "desktop/pins/updated", params: {} });
+    await transport.stop();
+  });
+
+  it("reads Desktop's authoritative queued follow-ups", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    transport.send({ id: 15, method: "desktop/queue/list", params: { threadId: "thread-1" } });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const fetchRequest = client.sent[0] as Record<string, unknown>;
+    expect(fetchRequest).toMatchObject({
+      type: "fetch",
+      url: "vscode://codex/get-global-state",
+      body: JSON.stringify({ key: "queued-follow-ups" }),
+    });
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: fetchRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ value: {
+        "thread-1": [{ id: "queued-1", text: "Wait for the current turn", createdAt: 7 }],
+      } }),
+    });
+    expect(messages).toContainEqual({
+      id: 15,
+      result: { messages: [{ id: "queued-1", text: "Wait for the current turn", createdAt: 7 }] },
+    });
+    await transport.stop();
+  });
+
+  it("adds a queued follow-up through Desktop global state and broadcasts it", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    client.ownerRequestResult = {
+      method: "thread-follower-set-queued-follow-ups-state",
+      result: { ok: true },
+    };
+    transport.send({
+      id: 16,
+      method: "desktop/queue/add",
+      params: {
+        threadId: "thread-1",
+        text: "Run this next",
+        cwd: "/safe/project",
+        input: [
+          { type: "text", text: "Run this next" },
+          { type: "localImage", path: "/safe/project/screen.png" },
+        ],
+      },
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const fetchRequest = client.sent[0] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: fetchRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ value: {} }),
+    });
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    const writeRequest = client.sent[1] as Record<string, unknown>;
+    expect(writeRequest).toMatchObject({
+      type: "fetch",
+      url: "vscode://codex/set-global-state",
+    });
+    const writeBody = JSON.parse(String(writeRequest.body));
+    expect(writeBody).toMatchObject({
+      key: "queued-follow-ups",
+      value: {
+        "thread-1": [{
+          id: expect.any(String),
+          text: "Run this next",
+          cwd: "/safe/project",
+          createdAt: expect.any(Number),
+          context: {
+            prompt: "Run this next",
+            addedFiles: [],
+            fileAttachments: [],
+            imageAttachments: [{ src: "/safe/project/screen.png" }],
+            workspaceRoots: ["/safe/project"],
+          },
+        }],
+      },
+    });
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: writeRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ success: true }),
+    });
+    await vi.waitFor(() => expect(client.queueBroadcasts).toHaveLength(1));
+    expect(client.queueBroadcasts[0]).toMatchObject({
+      conversationId: "thread-1",
+      messages: [expect.objectContaining({ text: "Run this next" })],
+    });
+    expect(messages).toContainEqual({
+      id: 16,
+      result: { message: expect.objectContaining({ text: "Run this next" }) },
+    });
+    expect(client.ownerRequests).toEqual([]);
+    await transport.stop();
+  });
+
+  it("promotes one queued follow-up to Desktop steer and removes it from the shared queue", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    transport.send({
+      id: 17,
+      method: "desktop/queue/steer",
+      params: { threadId: "thread-1", messageId: "queued-1", expectedTurnId: "turn-1" },
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const fetchRequest = client.sent[0] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: fetchRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ value: {
+        "thread-1": [
+          { id: "queued-1", text: "Guide now", cwd: "/safe/project", createdAt: 7, context: { prompt: "Guide now" } },
+          { id: "queued-2", text: "Keep queued", createdAt: 8 },
+        ],
+      } }),
+    });
+
+    await vi.waitFor(() => expect(client.queuePromotions).toEqual([{
+      conversationId: "thread-1",
+      messageId: "queued-1",
+      text: "Guide now",
+    }]));
+    expect(client.sent).toHaveLength(1);
+    expect(client.queueBroadcasts).toEqual([]);
+    expect(client.ownerRequests).toEqual([]);
+    expect(messages).toContainEqual({ id: 17, result: { messageId: "queued-1" } });
     await transport.stop();
   });
 
@@ -359,5 +506,92 @@ describe("DesktopBridgeTransport", () => {
     expect(diagnostics).toContain("Desktop bridge reconnected");
     expect(client.startCalls).toBe(1);
     await transport.stop();
+  });
+
+  it("actively probes the Desktop App Server until a read-only bridge recovers", async () => {
+    const client = new FakeBridgeClient();
+    const diagnostics: string[] = [];
+    const transport = new DesktopBridgeTransport({
+      client,
+      appServerVersion: "0.148.0-alpha.15",
+      appServerProbeIntervalMs: 1,
+      appServerDisconnectGraceMs: 0,
+    });
+    await transport.start(() => undefined, (diagnostic) => diagnostics.push(diagnostic.message));
+
+    client.onMessage?.({
+      type: "codex-app-server-connection-changed",
+      hostId: "local",
+      state: "disconnected",
+    });
+    await vi.waitFor(() => expect(client.sent.length).toBeGreaterThan(0));
+    const probe = client.sent.at(-1) as any;
+    expect(probe).toMatchObject({
+      type: "mcp-request",
+      hostId: "local",
+      request: { method: "thread/list", params: { limit: 1 } },
+    });
+
+    client.onMessage?.({
+      type: "mcp-response",
+      hostId: "local",
+      message: { id: probe.request.id, result: { data: [] } },
+    });
+
+    expect(transport.state).toBe("live");
+    expect(diagnostics).toContain("Desktop bridge reconnected");
+    await transport.stop();
+  });
+
+  it("treats any valid App Server response as proof that a stale disconnected event recovered", async () => {
+    const { client, diagnostics, messages, transport } = await createStartedTransport();
+
+    client.onMessage?.({
+      type: "codex-app-server-connection-changed",
+      hostId: "local",
+      state: "disconnected",
+    });
+    expect(transport.state).toBe("read-only");
+
+    client.onMessage?.({
+      type: "mcp-response",
+      hostId: "local",
+      message: { id: "gateway-internal-3", result: { data: [] } },
+    });
+
+    expect(transport.state).toBe("live");
+    expect(diagnostics).toContain("Desktop bridge reconnected");
+    expect(messages).toContainEqual({ id: "gateway-internal-3", result: { data: [] } });
+    await transport.stop();
+  });
+
+  it("does not flicker into read-only when Desktop answers during the disconnect grace period", async () => {
+    vi.useFakeTimers();
+    const client = new FakeBridgeClient();
+    const diagnostics: string[] = [];
+    const transport = new DesktopBridgeTransport({
+      client,
+      appServerVersion: "0.148.0-alpha.15",
+      appServerDisconnectGraceMs: 1_500,
+    });
+    await transport.start(() => undefined, (diagnostic) => diagnostics.push(diagnostic.message));
+
+    client.onMessage?.({
+      type: "codex-app-server-connection-changed",
+      hostId: "local",
+      state: "disconnected",
+    });
+    expect(transport.state).toBe("live");
+    client.onMessage?.({
+      type: "mcp-response",
+      hostId: "local",
+      message: { id: "gateway-internal-4", result: { data: [] } },
+    });
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(transport.state).toBe("live");
+    expect(diagnostics).not.toContain("Desktop bridge disconnected; Desktop threads are read-only");
+    await transport.stop();
+    vi.useRealTimers();
   });
 });

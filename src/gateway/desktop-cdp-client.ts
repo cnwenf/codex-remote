@@ -57,7 +57,7 @@ export class DesktopCdpClient {
   private pending = new Map<number, PendingCall>();
   private ownerPending = new Map<number, PendingCall>();
   private onDesktopMessage?: (message: unknown) => void;
-  private onDisconnect?: () => void;
+  private onDisconnect?: (cause?: Error) => void;
   private windowObjectId?: string;
   private ownerWindowObjectId?: string;
   private endpoint?: URL;
@@ -69,7 +69,7 @@ export class DesktopCdpClient {
 
   async start(
     onDesktopMessage: (message: unknown) => void,
-    onDisconnect: () => void,
+    onDisconnect: (cause?: Error) => void,
   ): Promise<void> {
     if (this.socket) throw new Error("desktop-cdp-already-started");
     const endpoint = parseLoopbackUrl(this.options.endpoint, "desktop-cdp-endpoint");
@@ -88,12 +88,23 @@ export class DesktopCdpClient {
     const socket = new WebSocket(websocketUrl, { maxPayload: 8 * 1024 * 1024 });
     this.socket = socket;
     socket.on("message", (raw) => this.handleFrame(raw.toString()));
-    socket.on("close", () => this.handleDisconnect(socket));
-    socket.on("error", () => this.handleDisconnect(socket));
+    socket.on("close", (code, reason) => this.handleDisconnect(
+      socket,
+      new Error(`desktop-cdp-closed:${code}:${reason.toString() || "no-reason"}`),
+    ));
+    socket.on("error", (cause) => this.handleDisconnect(
+      socket,
+      cause instanceof Error ? cause : new Error("desktop-cdp-error"),
+    ));
 
     try {
       await waitForOpen(socket, this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
       await this.call("Runtime.enable");
+      try {
+        await this.call("Runtime.removeBinding", { name: BINDING_NAME });
+      } catch {
+        // A fresh renderer has no previous binding to remove.
+      }
       await this.call("Runtime.addBinding", { name: BINDING_NAME });
       const installed = await this.call("Runtime.evaluate", {
         expression: listenerExpression(),
@@ -132,6 +143,78 @@ export class DesktopCdpClient {
     );
     this.threadOwnerRequestTail = request.then(() => undefined, () => undefined);
     return request;
+  }
+
+  async broadcastQueuedFollowUps(conversationId: string, messages: unknown[]): Promise<void> {
+    await this.ensureOwnerConnection();
+    if (!this.ownerWindowObjectId) throw new Error("desktop-thread-owner-unavailable");
+    const response = await this.callOwner("Runtime.callFunctionOn", {
+      objectId: this.ownerWindowObjectId,
+      functionDeclaration: `async function(conversationId, messages) {
+        return this.__codexRemoteBroadcastQueuedFollowUps(conversationId, messages);
+      }`,
+      arguments: [{ value: conversationId }, { value: messages }],
+      awaitPromise: true,
+      returnByValue: true,
+    }, 15_000);
+    throwRuntimeException(response, "desktop-queue-broadcast-failed");
+  }
+
+  async promoteQueuedFollowUp(
+    conversationId: string,
+    messageId: string,
+    text: string,
+  ): Promise<boolean> {
+    if (!this.windowObjectId) throw new Error("desktop-cdp-not-ready");
+    const response = await this.call("Runtime.callFunctionOn", {
+      objectId: this.windowObjectId,
+      functionDeclaration: `function(conversationId, messageId, text) {
+        const root = document.querySelector('button[data-composer-navigation-target="permissions"]') ||
+          document.querySelector('[data-codex-composer-root]');
+        const fiberKey = root && Object.keys(root).find((key) => key.startsWith('__reactFiber$'));
+        let fiber = fiberKey ? root[fiberKey] : null;
+        let visibleConversationId = null;
+        for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
+          if (typeof fiber.memoizedProps?.conversationId === 'string') {
+            visibleConversationId = fiber.memoizedProps.conversationId;
+            break;
+          }
+        }
+        if (visibleConversationId !== conversationId) return false;
+        const actionPattern = /^(调整方向|引导|Steer|Guide now)$/i;
+        const findAction = () => {
+          const byId = document.querySelector('[data-message-id="' + CSS.escape(messageId) + '"]');
+          const candidates = [];
+          if (byId) candidates.push(byId);
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode())) {
+            if ((node.nodeValue || '').trim() === text.trim() && node.parentElement) {
+              candidates.push(node.parentElement);
+            }
+          }
+          for (const candidate of candidates) {
+            for (let element = candidate, depth = 0; element && depth < 10; element = element.parentElement, depth += 1) {
+              const button = Array.from(element.querySelectorAll('button')).find((value) => {
+                const label = (value.innerText || value.getAttribute('aria-label') || '').trim();
+                return actionPattern.test(label);
+              });
+              if (button) return button;
+            }
+          }
+          return null;
+        };
+        const action = findAction();
+        if (!action) return false;
+        action.click();
+        return true;
+      }`,
+      arguments: [{ value: conversationId }, { value: messageId }, { value: text }],
+      awaitPromise: false,
+      returnByValue: true,
+    }, 5_000);
+    throwRuntimeException(response, "desktop-queue-promotion-failed");
+    return asRecord(response.result).value === true;
   }
 
   async inspectVisibleThreadSettings(): Promise<VisibleDesktopSettings> {
@@ -289,7 +372,10 @@ export class DesktopCdpClient {
     const endpoint = this.endpoint;
     if (!endpoint) throw new Error("desktop-thread-owner-unavailable");
     const targets = await this.discoverTargets(endpoint);
-    const target = targets.find(isCodexAuxiliaryRenderer);
+    // The avatar overlay renderer can be suspended by Electron while the main
+    // window remains active. Use a second CDP connection to the main renderer
+    // for app-host RPC so owner calls cannot hang behind a frozen overlay.
+    const target = targets.find(isCodexRenderer);
     if (!target) throw new Error("desktop-thread-owner-unavailable");
     const websocketUrl = parseLoopbackUrl(
       String(target.webSocketDebuggerUrl),
@@ -410,7 +496,7 @@ export class DesktopCdpClient {
     }
   }
 
-  private handleDisconnect(socket: WebSocket) {
+  private handleDisconnect(socket: WebSocket, cause?: Error) {
     if (this.socket !== socket) return;
     this.socket = undefined;
     this.windowObjectId = undefined;
@@ -421,7 +507,7 @@ export class DesktopCdpClient {
     this.pending.clear();
     if (this.stopping || this.disconnectNotified) return;
     this.disconnectNotified = true;
-    this.onDisconnect?.();
+    this.onDisconnect?.(cause);
   }
 
   private handleOwnerDisconnect(socket: WebSocket) {
@@ -495,25 +581,27 @@ function listenerExpression(): string {
   const settingsHelper = visibleThreadSettingsHelperExpression();
   const visibleAgentMessageObserver = visibleAgentMessageObserverExpression();
   return `(() => {
-    if (!window.__codexLocalDesktopListenerInstalled) {
-      window.__codexLocalDesktopListenerInstalled = true;
-      const allowed = new Set(${types});
-      window.addEventListener("message", (event) => {
-        const data = event.data;
-        if (data && typeof data === "object" && allowed.has(data.type)) {
-          window.${BINDING_NAME}(JSON.stringify(data));
-        }
-      });
+    if (window.__codexLocalDesktopListener) {
+      window.removeEventListener("message", window.__codexLocalDesktopListener);
     }
-    if (!window.__codexLocalDesktopNotificationListenerInstalled) {
-      window.__codexLocalDesktopNotificationListenerInstalled = true;
-      window.addEventListener("message", (event) => {
-        const data = event.data;
-        if (data && typeof data === "object" && data.type === ${notificationType}) {
-          window.${BINDING_NAME}(JSON.stringify(data));
-        }
-      });
+    const allowed = new Set(${types});
+    window.__codexLocalDesktopListener = (event) => {
+      const data = event.data;
+      if (data && typeof data === "object" && allowed.has(data.type)) {
+        window.${BINDING_NAME}(JSON.stringify(data));
+      }
+    };
+    window.addEventListener("message", window.__codexLocalDesktopListener);
+    if (window.__codexLocalDesktopNotificationListener) {
+      window.removeEventListener("message", window.__codexLocalDesktopNotificationListener);
     }
+    window.__codexLocalDesktopNotificationListener = (event) => {
+      const data = event.data;
+      if (data && typeof data === "object" && data.type === ${notificationType}) {
+        window.${BINDING_NAME}(JSON.stringify(data));
+      }
+    };
+    window.addEventListener("message", window.__codexLocalDesktopNotificationListener);
     ${visibleAgentMessageObserver}
     ${settingsHelper}
     return window;
@@ -832,8 +920,8 @@ function visibleThreadSettingsHelperExpression(): string {
 
 function ownerHelperExpression(): string {
   return `(() => {
-    if (window.__codexRemoteRequestThreadOwnerVersion !== 2) {
-      window.__codexRemoteRequestThreadOwnerVersion = 2;
+    if (window.__codexRemoteRequestThreadOwnerVersion !== 4) {
+      window.__codexRemoteRequestThreadOwnerVersion = 4;
       let coordinationPromise;
       const getCoordination = async () => {
         if (coordinationPromise) return coordinationPromise;
@@ -867,17 +955,18 @@ function ownerHelperExpression(): string {
           const coordination = await getCoordination();
           const conversationId = params?.conversationId;
           if (typeof conversationId !== 'string') throw new Error('desktop-thread-id-invalid');
-          const ownerClientId = await coordination.findThreadOwner({ hostId: 'local', conversationId });
-          if (!ownerClientId) throw new Error('desktop-thread-owner-unavailable');
-          const response = await coordination.requestThreadFollower({
-            request: { method, params },
-            targetClientId: ownerClientId,
-            timeoutMs: 5000,
-          });
-          if (response?.resultType === 'error') throw new Error(response.error || 'desktop-thread-owner-request-failed');
-          return response?.result;
+          return coordination.requestThreadFollower({ hostId: 'local', request: { method, params } });
         } catch (error) {
-          // Renderer changes can leave both the coordination port and owner id stale.
+          // Renderer changes can leave the app-host coordination port stale.
+          coordinationPromise = undefined;
+          throw error;
+        }
+      };
+      window.__codexRemoteBroadcastQueuedFollowUps = async (conversationId, messages) => {
+        try {
+          const coordination = await getCoordination();
+          return coordination.threadQueuedFollowUpsChanged({ conversationId, messages });
+        } catch (error) {
           coordinationPromise = undefined;
           throw error;
         }
