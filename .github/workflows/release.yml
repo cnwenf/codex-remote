@@ -99,12 +99,32 @@ jobs:
       - run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
       - run: pnpm install --frozen-lockfile
       - run: pnpm mobile:sync
-      - name: Build installable ARM64 debug APK
-        run: cd android && ./gradlew assembleDebug
+      - name: Prepare stable Android release signing key
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          : "${ANDROID_RELEASE_KEYSTORE_BASE64:?missing ANDROID_RELEASE_KEYSTORE_BASE64}"
+          : "${ANDROID_RELEASE_KEYSTORE_PASSWORD:?missing ANDROID_RELEASE_KEYSTORE_PASSWORD}"
+          : "${ANDROID_RELEASE_KEY_ALIAS:?missing ANDROID_RELEASE_KEY_ALIAS}"
+          : "${ANDROID_RELEASE_KEY_PASSWORD:?missing ANDROID_RELEASE_KEY_PASSWORD}"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/codex-remote-release.p12"
+          chmod 600 "$RUNNER_TEMP/codex-remote-release.p12"
+      - name: Build stable-signed ARM64 release APK
+        env:
+          ANDROID_RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/codex-remote-release.p12
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: cd android && ./gradlew assembleRelease
+      - name: Verify Android release signing identity
+        run: scripts/verify-android-signing.sh android/app/build/outputs/apk/release/app-release.apk
       - name: Package and checksum
         run: |
           mkdir -p artifacts
-          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts/Codex-Remote-android-arm64.apk
+          cp android/app/build/outputs/apk/release/app-release.apk artifacts/Codex-Remote-android-arm64.apk
           (cd artifacts && sha256sum Codex-Remote-android-arm64.apk > Codex-Remote-android-arm64.apk.sha256)
       - uses: actions/upload-artifact@v4
         with:

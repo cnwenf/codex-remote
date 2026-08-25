@@ -1,6 +1,6 @@
 {
   "name": "codex-remote",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,7 @@
     "build:mac": "scripts/build-macos-app.sh",
     "package:dmg": "scripts/package-macos-dmg.sh",
     "mobile:sync": "pnpm build && cap sync",
-    "build:android": "pnpm mobile:sync && cd android && ./gradlew assembleDebug",
+    "build:android": "pnpm mobile:sync && cd android && ./gradlew assembleRelease",
     "build:ios:sim": "pnpm mobile:sync && scripts/build-ios-simulator.sh",
     "build:ios:device": "pnpm mobile:sync && scripts/build-ios-unsigned.sh"
   },

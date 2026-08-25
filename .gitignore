@@ -7,6 +7,9 @@ test-results/
 .env
 .env.local
 *.log
+*.jks
+*.keystore
+*.p12
 .runtime/
 release/
 macos/CodexRemoteApp/.build/

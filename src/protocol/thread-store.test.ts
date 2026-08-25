@@ -188,6 +188,60 @@ describe("reduceCodexState", () => {
     });
   });
 
+  it("replaces an optimistic image steer when Desktop appends attachment markup", () => {
+    const state = {
+      ...initialCodexState,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live task",
+          status: "running" as const,
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "inProgress" as const,
+              itemOrder: ["web-steer-image"],
+              items: {
+                "web-steer-image": {
+                  id: "web-steer-image",
+                  type: "userMessage",
+                  text: "调整移动端标题布局",
+                  imageIds: ["uploaded-image"],
+                  status: "completed",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reduceCodexState(state, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-2",
+        item: {
+          id: "desktop-user-image",
+          type: "user_message",
+          content: [{
+            type: "text",
+            text: "调整移动端标题布局\n<image name=[Image #1] path=\"/private/upload.jpg\">\n</image>",
+          }],
+        },
+      },
+    });
+
+    expect(next.threads.t1.turns["turn-1"].items["web-steer-image"]).toBeUndefined();
+    expect(next.threads.t1.turns["turn-2"].items["desktop-user-image"]).toMatchObject({
+      text: expect.stringContaining("调整移动端标题布局"),
+      imageIds: ["uploaded-image"],
+    });
+  });
+
   it("updates thread status from notifications", () => {
     const next = reduceCodexState(initialCodexState, {
       method: "thread/status/changed",

@@ -1,5 +1,6 @@
 import type { RpcMessage } from "./types";
 import { permissionStateFromProtocol, type PermissionState } from "./permissions";
+import { sameUserInput } from "./user-message-identity";
 
 export type ThreadStatus = "running" | "idle" | "error" | "unknown";
 export type TurnStatus = "inProgress" | "completed" | "interrupted" | "failed" | "unknown";
@@ -381,14 +382,18 @@ function findMatchingOptimisticUserMessage(
   authoritativeId: string,
 ) {
   if (thread.turnOrder.some((turnId) => thread.turns[turnId]?.items[authoritativeId])) return undefined;
-  const expected = normalizeUserMessageText(text);
   for (const turnId of thread.turnOrder) {
     const turn = thread.turns[turnId];
     const itemId = turn?.itemOrder.find((id) => {
       const candidate = turn.items[id];
       return Boolean(candidate) && id.startsWith("web-steer-") &&
         isUserMessageType(candidate?.type) &&
-        normalizeUserMessageText(candidate?.text ?? "") === expected;
+        sameUserInput(
+          candidate?.text ?? "",
+          text,
+          Boolean(candidate?.imageIds?.length),
+          /<image\b/i.test(text),
+        );
     });
     if (itemId) return { turnId, item: turn.items[itemId] };
   }
@@ -411,10 +416,6 @@ function removeItemFromTurn(thread: CodexThread, turnId: string, itemId: string)
       },
     },
   };
-}
-
-function normalizeUserMessageText(value: string) {
-  return value.trim().replace(/\s+/g, " ");
 }
 
 function isUserMessageType(value: string | undefined) {

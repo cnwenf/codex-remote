@@ -1341,4 +1341,47 @@ describe("optimistic steer reconciliation", () => {
     expect(next).toBe(state);
     expect(next.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
   });
+
+  it("does not append a duplicate when the Desktop confirmation wraps an image message", () => {
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1", "turn-2"],
+          turns: {
+            "turn-1": { id: "turn-1", status: "inProgress", itemOrder: [], items: {} },
+            "turn-2": {
+              id: "turn-2",
+              status: "inProgress",
+              itemOrder: ["desktop-user"],
+              items: {
+                "desktop-user": {
+                  id: "desktop-user",
+                  type: "user_message",
+                  text: "# Files mentioned by the user:\n\nimage.jpg\n\n## My request:\n调整移动端标题布局\n<image name=[Image #1] path=\"/private/upload.jpg\">\n</image>",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = addOptimisticUserMessage(
+      state,
+      "t1",
+      "turn-1",
+      "web-steer-image-late",
+      "调整移动端标题布局",
+      ["uploaded-image"],
+    );
+
+    expect(next.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
+    expect(next.threads.t1.turns["turn-2"].items["desktop-user"].imageIds).toEqual(["uploaded-image"]);
+  });
 });

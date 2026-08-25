@@ -10,6 +10,7 @@ import {
   type ThreadStatus,
   type TurnStatus,
 } from "../../protocol/thread-store";
+import { sameUserInput } from "../../protocol/user-message-identity";
 import { isRpcRequest, type RpcRequest } from "../../protocol/types";
 import {
   permissionModeOptions,
@@ -1069,7 +1070,12 @@ function sameUserMessage(
   left: CodexTurn["items"][string],
   right: CodexTurn["items"][string],
 ) {
-  if (!isUserMessage(left) || !isUserMessage(right) || normalizeMessageText(left.text) !== normalizeMessageText(right.text)) {
+  if (!isUserMessage(left) || !isUserMessage(right) || !sameUserInput(
+    left.text,
+    right.text,
+    Boolean(left.imageIds?.length),
+    Boolean(right.imageIds?.length),
+  )) {
     return false;
   }
   const leftImages = left.imageIds ?? [];
@@ -1133,10 +1139,6 @@ function dedupeOptimisticUserMessages(
 
 function isUserMessage(item: CodexTurn["items"][string]) {
   return item.type.toLocaleLowerCase().includes("user");
-}
-
-function normalizeMessageText(value: string) {
-  return value.trim().replace(/\s+/g, " ");
 }
 
 function historyState(value: unknown): ThreadHistoryState {

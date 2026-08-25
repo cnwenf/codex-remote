@@ -22,6 +22,52 @@ describe("native installer contract", () => {
     expect(installer).toContain("ConnectionMode");
   });
 
+  it("publishes Android upgrades with one stable release signing identity", () => {
+    const releaseWorkflow = readFileSync(join(root, ".github/workflows/release.yml"), "utf8");
+    const androidBuild = readFileSync(join(root, "android/app/build.gradle"), "utf8");
+    const signingVerifier = readFileSync(join(root, "scripts/verify-android-signing.sh"), "utf8");
+
+    expect(releaseWorkflow).toContain("ANDROID_RELEASE_KEYSTORE_BASE64");
+    expect(releaseWorkflow).toContain("ANDROID_RELEASE_KEYSTORE_PASSWORD");
+    expect(releaseWorkflow).toContain("ANDROID_RELEASE_KEY_ALIAS");
+    expect(releaseWorkflow).toContain("ANDROID_RELEASE_KEY_PASSWORD");
+    expect(releaseWorkflow).toContain("assembleRelease");
+    expect(releaseWorkflow).toContain("verify-android-signing.sh");
+    expect(releaseWorkflow).not.toContain("assembleDebug");
+    expect(releaseWorkflow).not.toContain("app-debug.apk");
+
+    expect(androidBuild).toContain("ANDROID_RELEASE_KEYSTORE_PATH");
+    expect(androidBuild).toContain("signingConfig signingConfigs.release");
+    expect(signingVerifier).toContain("verify --print-certs");
+    expect(signingVerifier).toContain("android/release-signing-cert.sha256");
+  });
+
+  it("accepts only the pinned Android signing certificate", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "codex-remote-android-signing."));
+    const apk = join(fixture, "app.apk");
+    const fingerprint = join(fixture, "fingerprint.sha256");
+    const fakeApksigner = join(fixture, "apksigner");
+    const expected = "a".repeat(64);
+
+    try {
+      writeFileSync(apk, "fixture");
+      writeFileSync(fingerprint, `${expected}\n`);
+      writeFileSync(fakeApksigner, `#!/bin/sh\nprintf 'Signer #1 certificate SHA-256 digest: %s\\n' "$FAKE_ANDROID_CERT"\n`);
+      chmodSync(fakeApksigner, 0o755);
+
+      expect(execFileSync("/bin/bash", [join(root, "scripts/verify-android-signing.sh"), apk, fingerprint], {
+        env: { ...process.env, APKSIGNER_BIN: fakeApksigner, FAKE_ANDROID_CERT: expected },
+        encoding: "utf8",
+      })).toContain(expected);
+      expect(() => execFileSync("/bin/bash", [join(root, "scripts/verify-android-signing.sh"), apk, fingerprint], {
+        env: { ...process.env, APKSIGNER_BIN: fakeApksigner, FAKE_ANDROID_CERT: "b".repeat(64) },
+        stdio: "pipe",
+      })).toThrow();
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("packages a verified tunnel helper without enabling public mode by default", () => {
     const fetchTunnel = readFileSync(join(root, "scripts/fetch-cloudflared.sh"), "utf8");
     const releaseWorkflow = readFileSync(join(root, ".github/workflows/release.yml"), "utf8");

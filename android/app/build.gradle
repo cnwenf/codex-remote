@@ -1,6 +1,16 @@
 apply plugin: 'com.android.application'
 
 def generatedBrandResDir = layout.buildDirectory.dir('generated/brand-res')
+def releaseKeystorePath = System.getenv("ANDROID_RELEASE_KEYSTORE_PATH")
+def releaseKeystorePassword = System.getenv("ANDROID_RELEASE_KEYSTORE_PASSWORD")
+def releaseKeyAlias = System.getenv("ANDROID_RELEASE_KEY_ALIAS")
+def releaseKeyPassword = System.getenv("ANDROID_RELEASE_KEY_PASSWORD")
+def releaseSigningConfigured = [
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+].every { value -> value != null && !value.isBlank() }
 
 tasks.register('generateBrandResources', Copy) {
     from(rootProject.file('../assets/app-icon.png'))
@@ -15,8 +25,8 @@ android {
         applicationId "com.cnwenf.codexremote"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 9
-        versionName "0.4.6"
+        versionCode 10
+        versionName "0.4.7"
         ndk {
             abiFilters "arm64-v8a"
         }
@@ -27,13 +37,36 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (releaseSigningConfigured) {
+                storeFile file(releaseKeystorePath)
+                storeType "PKCS12"
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
         }
     }
     sourceSets.main.res.srcDir(generatedBrandResDir)
+}
+
+gradle.taskGraph.whenReady { graph ->
+    def releaseTaskRequested = graph.allTasks.any { task ->
+        task.project == project && task.name.toLowerCase().contains("release")
+    }
+    if (releaseTaskRequested && !releaseSigningConfigured) {
+        throw new GradleException("Android release signing is not configured. Set all ANDROID_RELEASE_* environment variables.")
+    }
 }
 
 tasks.named('preBuild').configure {
