@@ -11,6 +11,6 @@ cp -R "$OUTPUT/Codex Remote.app" "$staging/"
 ln -s /Applications "$staging/Applications"
 DMG="$OUTPUT/Codex-Remote-$MACOS_ARCH.dmg"
 rm -f "$DMG" "$DMG.sha256"
-hdiutil create -volname "Codex Remote" -srcfolder "$staging" -ov -format UDZO "$DMG"
+"$ROOT/scripts/create-macos-dmg.sh" "$staging" "$DMG"
 (cd "$OUTPUT" && shasum -a 256 "${DMG:t}" > "${DMG:t}.sha256")
 print "$DMG"

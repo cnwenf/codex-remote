@@ -1,5 +1,7 @@
-import { readFileSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..");
@@ -76,8 +78,49 @@ describe("native installer contract", () => {
   });
 
   it("ships executable install and packaging scripts", () => {
-    for (const file of ["install.sh", "scripts/build-macos-app.sh", "scripts/package-macos-dmg.sh"]) {
+    for (const file of ["install.sh", "scripts/build-macos-app.sh", "scripts/package-macos-dmg.sh", "scripts/create-macos-dmg.sh"]) {
       expect(statSync(join(root, file)).mode & 0o111).not.toBe(0);
+    }
+  });
+
+  it("retries a transient hdiutil resource-busy failure before publishing the DMG", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "codex-remote-dmg-test."));
+    const staging = join(fixture, "staging");
+    const target = join(fixture, "Codex-Remote-arm64.dmg");
+    const counter = join(fixture, "attempts");
+    const fakeHdiutil = join(fixture, "hdiutil");
+
+    try {
+      writeFileSync(
+        fakeHdiutil,
+        `#!/bin/zsh
+count=0
+[[ -f "$CODEX_REMOTE_TEST_COUNTER" ]] && count=$(<"$CODEX_REMOTE_TEST_COUNTER")
+count=$((count + 1))
+print "$count" > "$CODEX_REMOTE_TEST_COUNTER"
+if [[ "$count" == "1" ]]; then
+  print -u2 "hdiutil: create failed - Resource busy"
+  exit 1
+fi
+touch "\${@: -1}"
+`,
+      );
+      chmodSync(fakeHdiutil, 0o755);
+      execFileSync("/bin/mkdir", ["-p", staging]);
+
+      execFileSync("/bin/zsh", [join(root, "scripts/create-macos-dmg.sh"), staging, target], {
+        env: {
+          ...process.env,
+          CODEX_REMOTE_HDIUTIL_BIN: fakeHdiutil,
+          CODEX_REMOTE_DMG_RETRY_DELAY_SECONDS: "0",
+          CODEX_REMOTE_TEST_COUNTER: counter,
+        },
+      });
+
+      expect(readFileSync(counter, "utf8").trim()).toBe("2");
+      expect(statSync(target).isFile()).toBe(true);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
     }
   });
 
