@@ -316,4 +316,26 @@ describe("DesktopBridgeTransport", () => {
     expect(diagnostics).toContain("Desktop bridge reconnected");
     await transport.stop();
   });
+
+  it("returns to live when Desktop reconnects its App Server", async () => {
+    const { client, diagnostics, transport } = await createStartedTransport();
+
+    client.onMessage?.({
+      type: "codex-app-server-connection-changed",
+      hostId: "local",
+      state: "disconnected",
+    });
+    expect(transport.state).toBe("read-only");
+
+    client.onMessage?.({
+      type: "codex-app-server-connection-changed",
+      hostId: "local",
+      state: "connected",
+    });
+
+    expect(transport.state).toBe("live");
+    expect(diagnostics).toContain("Desktop bridge reconnected");
+    expect(client.startCalls).toBe(1);
+    await transport.stop();
+  });
 });

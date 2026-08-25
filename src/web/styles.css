@@ -2,19 +2,20 @@
   color-scheme: light dark;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-synthesis: none;
-  --canvas: oklch(0.965 0.008 87);
-  --surface: oklch(0.985 0.006 87);
-  --surface-muted: oklch(0.938 0.01 87);
-  --ink: oklch(0.25 0.018 65);
-  --ink-muted: oklch(0.51 0.02 65);
-  --line: oklch(0.85 0.014 80);
-  --accent: oklch(0.55 0.12 148);
-  --accent-strong: oklch(0.45 0.12 148);
-  --accent-soft: oklch(0.92 0.035 148);
-  --success: oklch(0.5 0.12 148);
+  --canvas: #f7f7f5;
+  --surface: #ffffff;
+  --surface-muted: #f1f1ef;
+  --ink: #111111;
+  --ink-muted: #6f6f69;
+  --line: #deded9;
+  --accent: #10a37f;
+  --accent-strong: #0d8f70;
+  --accent-soft: #e7f6f0;
+  --success: #10a37f;
+  --green: #10a37f;
   --warning: oklch(0.65 0.14 55);
   --danger: oklch(0.56 0.18 27);
-  --shadow: 0 18px 50px oklch(0.25 0.02 65 / 0.1);
+  --shadow: 0 12px 32px rgb(0 0 0 / 8%);
 }
 
 * { box-sizing: border-box; }
@@ -56,17 +57,26 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: var(--surface);
 }
 
-.brand-lockup { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand-lockup { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .brand-lockup h1 { margin: 0; font-size: 1rem; letter-spacing: -0.015em; }
-.brand-glyph, .connect-mark {
+.brand-mark {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
-  color: oklch(0.98 0.005 87);
-  background: var(--accent-strong);
-  font-weight: 750;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  border-radius: 15px;
+  overflow: hidden;
+  background: #000000;
+  box-shadow: 0 5px 16px rgb(0 0 0 / 12%);
+}
+.brand-mark-compact { width: 32px; height: 32px; border-radius: 10px; }
+.brand-mark img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.connect-panel > .brand-mark {
+  width: 54px;
+  height: 54px;
+  margin-bottom: 28px;
+  border-radius: 17px;
 }
 
 .connection-state {
@@ -84,7 +94,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .connect-stage { display: grid; place-items: center; padding: 24px; overflow: auto; }
 .connect-panel { width: min(100%, 410px); }
-.connect-mark { width: 46px; height: 46px; border-radius: 14px; margin-bottom: 28px; font-size: 1.2rem; }
 .eyebrow { margin: 0 0 6px; color: var(--ink-muted); font-size: 0.7rem; font-weight: 720; letter-spacing: 0.09em; text-transform: uppercase; }
 .connect-panel h2 { max-width: 16ch; margin: 0; font-size: 2rem; line-height: 1.08; letter-spacing: -0.04em; }
 .connect-copy { max-width: 40ch; margin: 16px 0 26px; color: var(--ink-muted); line-height: 1.55; }
@@ -115,7 +124,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .task-nav { height: 100%; display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 15px; padding: 22px 14px 14px max(14px, env(safe-area-inset-left)); }
 .section-heading { display: flex; align-items: end; justify-content: space-between; padding: 0 5px; }
 .section-heading h2 { margin: 0; font-size: 1.38rem; letter-spacing: -0.035em; }
-.icon-button { width: 44px; padding: 0; background: var(--ink); color: var(--surface); font-size: 1.25rem; }
+.icon-button { width: 44px; padding: 0; background: var(--ink); color: var(--surface); font-size: 1.25rem; box-shadow: 0 4px 12px rgb(0 0 0 / 10%); }
 .search-field { min-height: 44px; display: flex; align-items: center; gap: 8px; border-radius: 11px; padding: 0 12px; color: var(--ink-muted); }
 .search-field input { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--ink); background: transparent; }
 .task-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; scrollbar-gutter: stable; }
@@ -457,7 +466,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .connection-open > span:nth-child(2) { display: grid; min-width: 0; gap: 3px; }
 .connection-open strong, .connection-open small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-open small { color: var(--ink-muted); }
-.connection-icon { display: grid; width: 42px; height: 42px; place-items: center; border-radius: 12px; color: white; background: var(--accent-strong); font-weight: 800; }
+.connection-open > .brand-mark { width: 42px; height: 42px; border-radius: 12px; }
 .connection-row-actions { display: flex; justify-content: flex-end; gap: 3px; padding: 0 10px 10px; }
 .connection-row-actions button { min-height: 36px; padding: 0 10px; border: 0; border-radius: 8px; color: var(--ink-muted); background: transparent; }
 .mobile-connection-form { display: grid; gap: 18px; }
@@ -502,19 +511,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --canvas: oklch(0.19 0.012 75);
-    --surface: oklch(0.235 0.013 75);
-    --surface-muted: oklch(0.215 0.012 75);
-    --ink: oklch(0.92 0.01 85);
-    --ink-muted: oklch(0.68 0.015 80);
-    --line: oklch(0.34 0.016 75);
-    --accent: oklch(0.7 0.13 148);
-    --accent-strong: oklch(0.62 0.13 148);
-    --accent-soft: oklch(0.31 0.045 148);
-    --success: oklch(0.7 0.13 148);
+    --canvas: #171717;
+    --surface: #212121;
+    --surface-muted: #2a2a2a;
+    --ink: #ececec;
+    --ink-muted: #a6a6a0;
+    --line: #3b3b39;
+    --accent: #2dcf9f;
+    --accent-strong: #22b58c;
+    --accent-soft: #193d34;
+    --success: #2dcf9f;
+    --green: #2dcf9f;
     --warning: oklch(0.74 0.13 65);
     --danger: oklch(0.69 0.16 27);
-    --shadow: 0 18px 50px oklch(0.05 0.01 75 / 0.3);
+    --shadow: 0 14px 42px rgb(0 0 0 / 34%);
   }
 }
 

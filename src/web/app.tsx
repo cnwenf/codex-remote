@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createBrowserSession, remoteSocketUrl } from "./api/socket";
 import { ApprovalSheet, type ApprovalResolution } from "./components/approval-sheet";
+import { BrandMark } from "./components/brand-mark";
 import { Composer } from "./components/composer";
 import { ConversationViewport } from "./components/conversation-viewport";
 import { DiffViewer } from "./components/diff-viewer";
@@ -131,7 +132,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     <main className="app-root">
       <header className="topbar">
         <div className="brand-lockup">
-          <span className="brand-glyph" aria-hidden="true">C</span>
+          <BrandMark compact />
           <h1>Codex Remote</h1>
         </div>
         {remote ? (

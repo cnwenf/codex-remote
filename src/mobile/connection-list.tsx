@@ -1,4 +1,5 @@
 import type { RemoteConnection } from "./types";
+import { BrandMark } from "../web/components/brand-mark";
 
 export function ConnectionList({
   connections,
@@ -19,7 +20,7 @@ export function ConnectionList({
     <main className="mobile-connections">
       <header className="topbar">
         <div className="brand-lockup">
-          <span className="brand-glyph" aria-hidden="true">C</span>
+          <BrandMark compact />
           <h1>Codex Remote</h1>
         </div>
         <div className="connection-header-actions">
@@ -42,7 +43,7 @@ export function ConnectionList({
             {connections.map((connection) => (
               <li key={connection.id}>
                 <button type="button" className="connection-open" onClick={() => onOpen(connection)}>
-                  <span className="connection-icon" aria-hidden="true">C</span>
+                  <BrandMark compact />
                   <span><strong>{connection.name}</strong><small>{connection.baseUrl}</small></span>
                   <span aria-hidden="true">›</span>
                 </button>

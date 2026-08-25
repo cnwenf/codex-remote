@@ -51,6 +51,7 @@ describe("App", () => {
   it("renders the local Codex client heading", () => {
     render(<App />);
     expect(screen.getByRole("heading", { name: "Codex Remote" })).toBeVisible();
+    expect(document.querySelector(".brand-mark img")).toBeVisible();
   });
 
   it("does not render a redundant Desktop live connection banner", () => {

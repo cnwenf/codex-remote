@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var toggle = NSButton(checkboxWithTitle: "Remote enabled", target: nil, action: nil)
   private var connectionMode = NSPopUpButton()
   private var updateController: UpdateController!
+  private let pairingPanelRetainer = PairingPanelRetainer()
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -32,6 +33,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     updateController = UpdateController(currentVersion: version) { [weak self] message in self?.statusLabel.stringValue = message }
     writeUpdateReadiness(version: version)
+    #if DEBUG
+    if ProcessInfo.processInfo.environment["CODEX_REMOTE_UI_PREVIEW"] == "pairing" {
+      toggle.state = .off
+      showSettings()
+      presentPairingWindow(payload: "codex-remote-preview", baseURL: "http://private-mac.local:4321")
+      return
+    }
+    #endif
     if toggle.state == .on { startGateway() }
   }
 
@@ -44,9 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private func configureMenu() {
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    let symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-    let menuIcon = NSImage(systemSymbolName: "dot.radiowaves.right", accessibilityDescription: "Codex Remote")?
-      .withSymbolConfiguration(symbolConfiguration)
+    let menuIcon = menuBarIcon()
     menuIcon?.isTemplate = true
     statusItem.button?.image = menuIcon
     let menu = NSMenu()
@@ -60,26 +67,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func configureWindow() {
-    window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 370), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+    window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 500), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
     window.title = "Codex Remote"
+    window.titlebarAppearsTransparent = true
+    window.backgroundColor = .windowBackgroundColor
     window.center()
+    guard let content = window.contentView else { return }
+
     let stack = NSStackView()
     stack.orientation = .vertical
-    stack.alignment = .leading
-    stack.spacing = 14
+    stack.alignment = .width
+    stack.spacing = 18
     stack.translatesAutoresizingMaskIntoConstraints = false
+
+    let iconView = NSImageView(image: appBrandIcon(size: 52))
+    iconView.imageScaling = .scaleProportionallyUpOrDown
+    iconView.widthAnchor.constraint(equalToConstant: 52).isActive = true
+    iconView.heightAnchor.constraint(equalToConstant: 52).isActive = true
+    let title = NSTextField(labelWithString: "Codex Remote")
+    title.font = .systemFont(ofSize: 22, weight: .semibold)
+    let subtitle = NSTextField(wrappingLabelWithString: "Private, lightweight access to the Codex Desktop sessions on this Mac.")
+    subtitle.textColor = .secondaryLabelColor
+    subtitle.font = .systemFont(ofSize: 12.5)
+    let titleStack = NSStackView(views: [title, subtitle])
+    titleStack.orientation = .vertical
+    titleStack.alignment = .leading
+    titleStack.spacing = 4
+    let header = NSStackView(views: [iconView, titleStack])
+    header.orientation = .horizontal
+    header.alignment = .centerY
+    header.spacing = 14
+
     toggle.target = self
     toggle.action = #selector(toggleRemote)
     hostField.placeholderString = "Private IPv4 address"
     passwordField.placeholderString = "Web login password"
     connectionMode.addItems(withTitles: ["Private network", "Public HTTPS (experimental)"])
     let save = NSButton(title: "Save Settings", target: self, action: #selector(saveSettings))
+    save.keyEquivalent = "\r"
+    save.bezelStyle = .rounded
     let update = NSButton(title: "Check for Updates", target: self, action: #selector(checkForUpdates))
     let version = NSTextField(labelWithString: "Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")")
+    version.textColor = .tertiaryLabelColor
+    version.font = .systemFont(ofSize: 11.5)
     let pairing = NSButton(title: "Show Pairing QR", target: self, action: #selector(showPairingQR))
-    [toggle, labelled("Connection", connectionMode), labelled("Address", hostField), labelled("Password", passwordField), statusLabel, version, save, pairing, update].forEach(stack.addArrangedSubview)
-    window.contentView?.addSubview(stack)
-    NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24)])
+
+    let settingsStack = NSStackView(views: [
+      toggle,
+      labelled("Connection", connectionMode),
+      labelled("Address", hostField),
+      labelled("Password", passwordField),
+    ])
+    settingsStack.orientation = .vertical
+    settingsStack.alignment = .width
+    settingsStack.spacing = 13
+    settingsStack.translatesAutoresizingMaskIntoConstraints = false
+    let settingsCard = NSBox()
+    settingsCard.boxType = .custom
+    settingsCard.borderWidth = 1
+    settingsCard.cornerRadius = 14
+    settingsCard.borderColor = .separatorColor
+    settingsCard.fillColor = .controlBackgroundColor
+    settingsCard.contentView = settingsStack
+
+    let actions = NSStackView(views: [save, pairing, update])
+    actions.orientation = .horizontal
+    actions.alignment = .centerY
+    actions.spacing = 8
+    actions.distribution = .fillEqually
+
+    statusLabel.font = .systemFont(ofSize: 12.5, weight: .medium)
+    statusLabel.textColor = .secondaryLabelColor
+    [header, settingsCard, statusLabel, actions, version].forEach(stack.addArrangedSubview)
+    content.addSubview(stack)
+    NSLayoutConstraint.activate([
+      stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 28),
+      stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -28),
+      stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 28),
+      settingsStack.leadingAnchor.constraint(equalTo: settingsCard.leadingAnchor, constant: 18),
+      settingsStack.trailingAnchor.constraint(equalTo: settingsCard.trailingAnchor, constant: -18),
+      settingsStack.topAnchor.constraint(equalTo: settingsCard.topAnchor, constant: 18),
+      settingsStack.bottomAnchor.constraint(equalTo: settingsCard.bottomAnchor, constant: -18),
+    ])
   }
 
   private func labelled(_ title: String, _ field: NSTextField) -> NSView {
@@ -88,6 +157,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private func labelled(_ title: String, _ control: NSView) -> NSView {
     let row = NSStackView(views: [NSTextField(labelWithString: title), control]); row.orientation = .horizontal; row.spacing = 12; control.widthAnchor.constraint(equalToConstant: 300).isActive = true; return row
+  }
+
+  private func menuBarIcon() -> NSImage? {
+    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
+      let paths = self.connectionMarkPaths(in: rect.insetBy(dx: 1.7, dy: 1.7))
+      NSColor.labelColor.setStroke()
+      for path in paths {
+        path.lineWidth = 1.7
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.stroke()
+      }
+      return true
+    }
+    image.isTemplate = true
+    image.accessibilityDescription = "Codex Remote"
+    return image
+  }
+
+  private func appBrandIcon(size: CGFloat) -> NSImage {
+    let source = NSApplication.shared.applicationIconImage
+      ?? NSImage(size: NSSize(width: size, height: size))
+    let image = (source.copy() as? NSImage) ?? source
+    image.size = NSSize(width: size, height: size)
+    return image
+  }
+
+  private func connectionMarkPaths(in rect: NSRect) -> [NSBezierPath] {
+    func point(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+      NSPoint(x: rect.minX + rect.width * x, y: rect.minY + rect.height * y)
+    }
+    func rotated(_ source: NSPoint, by degrees: CGFloat) -> NSPoint {
+      let radians = degrees * .pi / 180
+      let center = NSPoint(x: rect.midX, y: rect.midY)
+      let dx = source.x - center.x
+      let dy = source.y - center.y
+      return NSPoint(
+        x: center.x + dx * cos(radians) - dy * sin(radians),
+        y: center.y + dx * sin(radians) + dy * cos(radians)
+      )
+    }
+    func segment(rotation: CGFloat) -> NSBezierPath {
+      let path = NSBezierPath()
+      path.move(to: rotated(point(0.5, 0.94), by: rotation))
+      path.line(to: rotated(point(0.88, 0.72), by: rotation))
+      path.line(to: rotated(point(0.88, 0.29), by: rotation))
+      path.line(to: rotated(point(0.66, 0.12), by: rotation))
+      return path
+    }
+    return [segment(rotation: 0), segment(rotation: 120), segment(rotation: 240)]
   }
 
   private func loadConfiguration() {
@@ -257,15 +376,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
   private func presentPairingWindow(payload: String, baseURL: String) {
     guard let image = qrImage(payload) else { statusLabel.stringValue = "Could not render pairing code"; return }
-    let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 390, height: 460), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 520), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     panel.title = "Pair Codex Remote"
-    let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .centerX; stack.spacing = 14; stack.translatesAutoresizingMaskIntoConstraints = false
-    let imageView = NSImageView(image: image); imageView.widthAnchor.constraint(equalToConstant: 300).isActive = true; imageView.heightAnchor.constraint(equalToConstant: 300).isActive = true
+    panel.titlebarAppearsTransparent = true
+    let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .centerX; stack.spacing = 12; stack.translatesAutoresizingMaskIntoConstraints = false
+    let heading = NSTextField(labelWithString: "Scan to connect")
+    heading.font = .systemFont(ofSize: 22, weight: .semibold)
+    let imageView = NSImageView(image: image); imageView.widthAnchor.constraint(equalToConstant: 310).isActive = true; imageView.heightAnchor.constraint(equalToConstant: 310).isActive = true
+    imageView.wantsLayer = true
+    imageView.layer?.backgroundColor = NSColor.white.cgColor
+    imageView.layer?.cornerRadius = 18
     let address = NSTextField(wrappingLabelWithString: baseURL); address.alignment = .center; address.maximumNumberOfLines = 2
-    let note = NSTextField(labelWithString: "Scan in the iPhone or Android app. Expires in 5 minutes and works once."); note.textColor = .secondaryLabelColor
-    stack.addArrangedSubview(imageView); stack.addArrangedSubview(address); stack.addArrangedSubview(note)
+    address.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
+    let note = NSTextField(wrappingLabelWithString: "Scan in the iPhone or Android app. The code expires in 5 minutes and works once."); note.textColor = .secondaryLabelColor; note.alignment = .center
+    stack.addArrangedSubview(heading); stack.addArrangedSubview(imageView); stack.addArrangedSubview(address); stack.addArrangedSubview(note)
     panel.contentView?.addSubview(stack)
     NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: panel.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: panel.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: panel.contentView!.topAnchor, constant: 24)])
+    pairingPanelRetainer.retain(panel)
     panel.center(); panel.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
   }
 

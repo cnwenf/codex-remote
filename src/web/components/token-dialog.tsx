@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { BrandMark } from "./brand-mark";
 
 export function TokenDialog({
   onConnect,
@@ -19,7 +20,7 @@ export function TokenDialog({
 
   return (
     <section className="connect-panel" aria-labelledby="connect-heading">
-      <div className="connect-mark" aria-hidden="true">C</div>
+      <BrandMark />
       <p className="eyebrow">Private connection</p>
       <h2 id="connect-heading">Control this Mac from your phone</h2>
       <p className="connect-copy">

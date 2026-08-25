@@ -1,5 +1,7 @@
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..");
@@ -38,6 +40,23 @@ describe("native installer contract", () => {
     expect(appSource).toContain("CIQRCodeGenerator");
   });
 
+  it("retains the pairing panel until the user closes it", () => {
+    const temporary = mkdtempSync(join(tmpdir(), "codex-remote-pairing-panel-"));
+    const binary = join(temporary, "pairing-panel-lifetime-test");
+    try {
+      execFileSync("swiftc", [
+        "-parse-as-library",
+        join(root, "macos/CodexRemoteApp/Sources/CodexRemoteApp/PairingPanelRetainer.swift"),
+        join(root, "scripts/pairing-panel-lifetime.test.swift"),
+        "-o",
+        binary,
+      ]);
+      execFileSync(binary);
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("never puts the password in launch agents or command arguments", () => {
     expect(agents).not.toMatch(/token|password|CODEX_WEB_TOKEN/i);
     expect(installer).toContain('chmod 600 "$support/token"');
@@ -68,9 +87,10 @@ describe("native installer contract", () => {
     }
   });
 
-  it("uses a point-sized monochrome symbol instead of the opaque app artwork in the menu bar", () => {
-    expect(appSource).toContain('NSImage(systemSymbolName: "dot.radiowaves.right"');
-    expect(appSource).toContain("NSImage.SymbolConfiguration(pointSize: 16");
+  it("uses the original monochrome connection mark instead of opaque app artwork in the menu bar", () => {
+    expect(appSource).toContain("menuBarIcon()");
+    expect(appSource).toContain("menuIcon?.isTemplate = true");
+    expect(appSource).not.toContain("dot.radiowaves.right");
     expect(appSource).not.toContain("MenuIcon.png");
     expect(buildScript).not.toContain("MenuIcon.png");
   });

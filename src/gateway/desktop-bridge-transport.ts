@@ -175,11 +175,10 @@ export class DesktopBridgeTransport implements CodexTransport {
       this.updateVersion(value.appServerVersion);
       return;
     }
-    if (
-      value.type === "codex-app-server-connection-changed" &&
-      value.state !== "connected"
-    ) {
-      this.markDisconnected(false);
+    if (value.type === "codex-app-server-connection-changed") {
+      if (value.state === "connected") this.markConnected();
+      else this.markDisconnected(false);
+      return;
     }
   }
 
@@ -316,6 +315,12 @@ export class DesktopBridgeTransport implements CodexTransport {
       });
     }
     if (shouldReconnect) this.scheduleReconnect();
+  }
+
+  private markConnected() {
+    if (this.bridgeState !== "read-only" || !this.capabilities.compatible) return;
+    this.bridgeState = "live";
+    this.onDiagnostic?.({ category: "protocol", message: "Desktop bridge reconnected" });
   }
 
   private scheduleReconnect() {
