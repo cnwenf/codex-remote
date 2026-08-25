@@ -1,5 +1,13 @@
 apply plugin: 'com.android.application'
 
+def generatedBrandResDir = layout.buildDirectory.dir('generated/brand-res')
+
+tasks.register('generateBrandResources', Copy) {
+    from(rootProject.file('../assets/app-icon.png'))
+    into(generatedBrandResDir.map { it.dir('drawable-nodpi') })
+    rename { 'ic_launcher_source.png' }
+}
+
 android {
     namespace = "com.cnwenf.codexremote"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +15,8 @@ android {
         applicationId "com.cnwenf.codexremote"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 8
-        versionName "0.4.5"
+        versionCode 9
+        versionName "0.4.6"
         ndk {
             abiFilters "arm64-v8a"
         }
@@ -25,6 +33,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    sourceSets.main.res.srcDir(generatedBrandResDir)
+}
+
+tasks.named('preBuild').configure {
+    dependsOn('generateBrandResources')
 }
 
 repositories {

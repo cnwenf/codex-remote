@@ -79,6 +79,8 @@ describe("App", () => {
     expect(
       screen.queryByText("已连接 Codex Desktop，本页与 Desktop 操作同一会话。"),
     ).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Desktop task", level: 1 })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Remote" })).not.toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeVisible();
   });
 

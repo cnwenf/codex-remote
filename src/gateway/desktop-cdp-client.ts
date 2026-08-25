@@ -493,6 +493,7 @@ function listenerExpression(): string {
   const types = JSON.stringify(FORWARDED_MESSAGE_TYPES);
   const notificationType = JSON.stringify(NOTIFICATION_MESSAGE_TYPE);
   const settingsHelper = visibleThreadSettingsHelperExpression();
+  const visibleAgentMessageObserver = visibleAgentMessageObserverExpression();
   return `(() => {
     if (!window.__codexLocalDesktopListenerInstalled) {
       window.__codexLocalDesktopListenerInstalled = true;
@@ -513,9 +514,73 @@ function listenerExpression(): string {
         }
       });
     }
+    ${visibleAgentMessageObserver}
     ${settingsHelper}
     return window;
   })()`;
+}
+
+function visibleAgentMessageObserverExpression(): string {
+  return `
+    if (window.__codexRemoteVisibleAgentMessageObserverVersion !== 1) {
+      window.__codexRemoteVisibleAgentMessageObserverVersion = 1;
+      window.__codexRemoteVisibleAgentMessageObserver?.disconnect();
+      if (window.__codexRemoteVisibleAgentMessageTimer) {
+        clearTimeout(window.__codexRemoteVisibleAgentMessageTimer);
+      }
+      const sentMessages = window.__codexRemoteVisibleAgentMessages instanceof Map
+        ? window.__codexRemoteVisibleAgentMessages
+        : new Map();
+      window.__codexRemoteVisibleAgentMessages = sentMessages;
+      const closestAttribute = (element, name) => {
+        for (let current = element, depth = 0; current && depth < 16; current = current.parentElement, depth += 1) {
+          const value = current.getAttribute?.(name);
+          if (value) return value;
+        }
+        return null;
+      };
+      const flushVisibleAgentMessages = () => {
+        window.__codexRemoteVisibleAgentMessageTimer = null;
+        const present = new Set();
+        document.querySelectorAll('[data-markdown-text-style="assistant-message"]').forEach((element) => {
+          const threadId = closestAttribute(element, 'data-response-annotation-conversation');
+          const contentKey = closestAttribute(element, 'data-content-search-unit-key');
+          const annotatedItemId = closestAttribute(element, 'data-response-annotation-target');
+          const separator = contentKey?.indexOf(':') ?? -1;
+          const turnId = separator > 0 ? contentKey.slice(0, separator) : null;
+          const itemId = annotatedItemId || (separator > 0 ? contentKey.slice(separator + 1) : null);
+          const text = (element.innerText || '').trim();
+          if (!threadId || !turnId || !itemId || !text) return;
+          const key = threadId + '\\u0000' + turnId + '\\u0000' + itemId;
+          present.add(key);
+          if (sentMessages.get(key) === text) return;
+          sentMessages.set(key, text);
+          window.${BINDING_NAME}(JSON.stringify({
+            type: 'desktop-visible-agent-message',
+            threadId,
+            turnId,
+            itemId,
+            text,
+          }));
+        });
+        for (const key of sentMessages.keys()) {
+          if (!present.has(key)) sentMessages.delete(key);
+        }
+      };
+      const scheduleVisibleAgentMessages = () => {
+        if (window.__codexRemoteVisibleAgentMessageTimer) return;
+        window.__codexRemoteVisibleAgentMessageTimer = setTimeout(flushVisibleAgentMessages, 50);
+      };
+      const observer = new MutationObserver(scheduleVisibleAgentMessages);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      window.__codexRemoteVisibleAgentMessageObserver = observer;
+      scheduleVisibleAgentMessages();
+    }
+  `;
 }
 
 function visibleThreadSettingsHelperExpression(): string {

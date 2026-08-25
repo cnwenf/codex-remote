@@ -32,6 +32,12 @@ describe("DesktopCdpClient", () => {
     expect(String(server.requests[2]?.params?.expression)).toContain("pinned-threads-updated");
     expect(String(server.requests[2]?.params?.expression))
       .toContain("__codexRemoteVisibleSettingsHelperVersion");
+    expect(String(server.requests[2]?.params?.expression))
+      .toContain("__codexRemoteVisibleAgentMessageObserverVersion");
+    expect(String(server.requests[2]?.params?.expression))
+      .toContain('[data-markdown-text-style="assistant-message"]');
+    expect(String(server.requests[2]?.params?.expression))
+      .toContain("desktop-visible-agent-message");
     await client.stop();
   });
 

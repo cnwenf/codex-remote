@@ -18,7 +18,7 @@ describe("TaskList", () => {
   it("uses the mobile Remote navigation shell with bottom actions", () => {
     const { container } = render(<TaskList threads={[thread]} onSelect={vi.fn()} onNew={vi.fn()} />);
 
-    expect(screen.getByRole("heading", { name: "Remote" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Remote" })).not.toBeInTheDocument();
     expect(container.querySelector(".task-nav-footer")).toContainElement(screen.getByRole("searchbox"));
     expect(container.querySelector(".task-nav-footer")).toContainElement(screen.getByRole("button", { name: "新对话" }));
   });

@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { appendFileSync, mkdirSync, mkdtempSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -450,6 +450,42 @@ describe("DesktopState", () => {
       text: "Inspect this image",
       imageIds: [uploadId],
     });
+    state.close();
+  });
+
+  it("imports Desktop-local image references into the authenticated image store", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const desktopImage = join(dirname(databasePath), "desktop-attachment.png");
+    writeFileSync(desktopImage, Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+      0x00, 0x00, 0x00, 0x00,
+    ]));
+    appendFileSync(rolloutPath, [
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "desktop-image",
+          role: "user",
+          content: [{ type: "input_text", text: "Desktop attachment" }],
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "Desktop attachment",
+          local_images: [desktopImage],
+        },
+      },
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+
+    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+    const imageId = result.thread.turns[0].items.at(-1).imageIds[0] as string;
+
+    expect(imageId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(existsSync(join(dirname(databasePath), "codex-remote", "uploads", `${imageId}.png`))).toBe(true);
     state.close();
   });
 

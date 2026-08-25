@@ -93,6 +93,35 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     });
   }
 
+  if (message.method === "desktop/visibleAgentMessage" && threadId) {
+    const itemId = stringValue(params.itemId);
+    const text = stringValue(params.text);
+    if (!itemId || text === undefined) return state;
+    return updateThread(state, threadId, (thread) => {
+      const turnId = resolveTurnId(thread, params);
+      return updateTurn(thread, turnId, (turn) => {
+        const previous = turn.items[itemId] ?? {
+          id: itemId,
+          type: "agentMessage",
+          text: "",
+        };
+        return {
+          ...turn,
+          itemOrder: appendUnique(turn.itemOrder, itemId),
+          items: {
+            ...turn.items,
+            [itemId]: {
+              ...previous,
+              type: "agentMessage",
+              text,
+              status: previous.status ?? "running",
+            },
+          },
+        };
+      });
+    });
+  }
+
   if (
     (message.method === "item/reasoning/summaryTextDelta" ||
       message.method === "item/reasoning/textDelta") &&

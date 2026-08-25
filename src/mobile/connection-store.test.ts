@@ -29,6 +29,7 @@ describe("mobile connection store", () => {
       name: "Office Mac",
       baseUrl: "http://10.20.30.40:4321",
       lastUsedAt: 1234,
+      pairingStatus: "ready",
     });
     expect(JSON.stringify(await store.list())).not.toContain("private-token");
     expect(await persistence.readSecret("connection-1")).toBe("private-token");
@@ -45,5 +46,29 @@ describe("mobile connection store", () => {
     await store.remove("connection-1");
     expect(await store.list()).toEqual([]);
     expect(await persistence.readSecret("connection-1")).toBeUndefined();
+  });
+
+  it("persists a scanned connection before pairing and records the eventual state", async () => {
+    const persistence = new InMemoryConnectionPersistence();
+    const store = new ConnectionStore(persistence, () => "scanned-mac", () => 5678);
+
+    const pending = await store.savePendingPairing({
+      name: "192.168.1.20",
+      baseUrl: "http://192.168.1.20:4321",
+    });
+
+    expect(pending.pairingStatus).toBe("pending");
+    expect(await persistence.readSecret(pending.id)).toBeUndefined();
+
+    await store.completePairing(pending.id, "paired-token");
+    expect((await store.list())[0]?.pairingStatus).toBe("ready");
+    expect((await store.credentials(pending.id)).token).toBe("paired-token");
+
+    const second = await store.savePendingPairing({
+      name: "Offline Mac",
+      baseUrl: "http://192.168.1.21:4321",
+    });
+    await store.failPairing(second.id);
+    expect((await store.list()).find((value) => value.id === second.id)?.pairingStatus).toBe("error");
   });
 });

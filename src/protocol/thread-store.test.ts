@@ -47,6 +47,62 @@ describe("reduceCodexState", () => {
     expect(next.threads.t1.turns["turn-1"].items.i1.text).toBe("hello");
   });
 
+  it("replaces a visible Desktop assistant message and reuses its persisted item", () => {
+    const started = reduceCodexState(initialCodexState, {
+      method: "turn/started",
+      params: { threadId: "t1", turn: { id: "turn-1" } },
+    });
+    const live = reduceCodexState(started, {
+      method: "desktop/visibleAgentMessage",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        itemId: "agent-1",
+        text: "Immediate Desktop text",
+      },
+    });
+
+    expect(live.threads.t1.turns["turn-1"].items["agent-1"]).toMatchObject({
+      type: "agentMessage",
+      text: "Immediate Desktop text",
+      status: "running",
+    });
+
+    const persisted = reduceCodexState(live, {
+      method: "item/completed",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          id: "agent-1",
+          type: "agentMessage",
+          text: "Immediate Desktop text",
+          status: "completed",
+        },
+      },
+    });
+
+    expect(persisted.threads.t1.turns["turn-1"].itemOrder).toEqual(["agent-1"]);
+    expect(persisted.threads.t1.turns["turn-1"].items["agent-1"].status).toBe("completed");
+
+    const completed = reduceCodexState(persisted, {
+      method: "turn/completed",
+      params: { threadId: "t1", turn: { id: "turn-1", status: "completed" } },
+    });
+    const lateDomUpdate = reduceCodexState(completed, {
+      method: "desktop/visibleAgentMessage",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        itemId: "agent-1",
+        text: "Immediate Desktop text with final punctuation.",
+      },
+    });
+    expect(lateDomUpdate.threads.t1.status).toBe("idle");
+    expect(lateDomUpdate.threads.t1.turns["turn-1"].status).toBe("completed");
+    expect(lateDomUpdate.threads.t1.turns["turn-1"].items["agent-1"].status).toBe("completed");
+  });
+
   it("keeps live items from separate turns separated", () => {
     const first = reduceCodexState(initialCodexState, {
       method: "item/started",

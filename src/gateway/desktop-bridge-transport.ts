@@ -46,6 +46,10 @@ type DesktopEnvelope = {
   status?: unknown;
   bodyJsonString?: unknown;
   error?: unknown;
+  threadId?: unknown;
+  turnId?: unknown;
+  itemId?: unknown;
+  text?: unknown;
 };
 
 const HOST_ROUTES: Readonly<Record<string, string>> = Object.freeze({
@@ -142,6 +146,25 @@ export class DesktopBridgeTransport implements CodexTransport {
 
   private receiveDesktopMessage(value: unknown) {
     if (!isDesktopEnvelope(value)) return;
+    if (value.type === "desktop-visible-agent-message") {
+      if (
+        typeof value.threadId === "string" &&
+        typeof value.turnId === "string" &&
+        typeof value.itemId === "string" &&
+        typeof value.text === "string"
+      ) {
+        this.onMessage?.({
+          method: "desktop/visibleAgentMessage",
+          params: {
+            threadId: value.threadId,
+            turnId: value.turnId,
+            itemId: value.itemId,
+            text: value.text,
+          },
+        });
+      }
+      return;
+    }
     if (value.type === "fetch-response") {
       this.receiveHostResponse(value);
       return;

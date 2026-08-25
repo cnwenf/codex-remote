@@ -103,6 +103,28 @@ describe("DesktopBridgeTransport", () => {
     await transport.stop();
   });
 
+  it("forwards visible Desktop assistant text before the rollout snapshot is persisted", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    client.onMessage?.({
+      type: "desktop-visible-agent-message",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "agent-1",
+      text: "Live text visible in Desktop",
+    });
+
+    expect(messages).toEqual([{
+      method: "desktop/visibleAgentMessage",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "agent-1",
+        text: "Live text visible in Desktop",
+      },
+    }]);
+    await transport.stop();
+  });
+
   it("returns server-request decisions over mcp-response exactly once", async () => {
     const { client, messages, transport } = await createStartedTransport();
     client.onMessage?.({

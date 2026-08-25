@@ -121,6 +121,36 @@ describe("Timeline", () => {
     expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
   });
 
+  it("shows one running ellipsis when stale history contains multiple in-progress turns", () => {
+    const thread: CodexThread = {
+      id: "stale-running-turns",
+      title: "Only latest animates",
+      status: "running",
+      activeTurnId: "turn-2",
+      turnOrder: ["turn-1", "turn-2"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "inProgress",
+          itemOrder: ["old-tool"],
+          items: { "old-tool": { id: "old-tool", type: "commandExecution", text: "old" } },
+        },
+        "turn-2": {
+          id: "turn-2",
+          status: "inProgress",
+          itemOrder: ["new-tool"],
+          items: { "new-tool": { id: "new-tool", type: "commandExecution", text: "new" } },
+        },
+      },
+    };
+
+    const { container } = render(<Timeline thread={thread} />);
+
+    expect(screen.getAllByLabelText("Codex 仍在输出")).toHaveLength(1);
+    expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
+    expect(container.querySelector('[data-turn-id="turn-2"] .typing-indicator')).toBeInTheDocument();
+  });
+
   it("marks an earlier activity group complete once later assistant output arrives", () => {
     const thread: CodexThread = {
       id: "later-output",

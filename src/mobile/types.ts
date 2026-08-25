@@ -3,6 +3,7 @@ export type RemoteConnection = {
   name: string;
   baseUrl: string;
   lastUsedAt: number;
+  pairingStatus?: "pending" | "ready" | "error";
 };
 
 export type RemoteConnectionInput = {

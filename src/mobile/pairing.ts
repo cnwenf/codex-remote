@@ -12,13 +12,38 @@ export function parsePairingPayload(value: string) {
   return { baseUrl: normalizeRemoteUrl(remote), code };
 }
 
-export async function exchangePairing(payload: string, fetcher: typeof fetch = fetch) {
+export async function exchangePairing(
+  payload: string,
+  fetcher: typeof fetch = fetch,
+  timeoutMs = 10_000,
+) {
   const { baseUrl, code } = parsePairingPayload(payload);
-  const response = await fetcher(`${baseUrl}/api/mobile/pair`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code }),
-  });
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let response: Response;
+  try {
+    response = await Promise.race([
+      fetcher(`${baseUrl}/api/mobile/pair`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+        signal: controller.signal,
+      }),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+          reject(new Error("pairing-exchange-timeout"));
+        }, timeoutMs);
+      }),
+    ]);
+  } catch (cause) {
+    if (timedOut) throw new Error("pairing-exchange-timeout");
+    throw cause;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
   if (!response.ok) throw new Error("pairing-exchange-failed");
   const body = await response.json() as Record<string, unknown>;
   if (body.baseUrl !== baseUrl || typeof body.token !== "string" || !body.token) {

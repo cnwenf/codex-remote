@@ -36,12 +36,40 @@ export class ConnectionStore {
       name,
       baseUrl: normalizeRemoteUrl(input.baseUrl),
       lastUsedAt: existing?.lastUsedAt ?? this.now(),
+      pairingStatus: "ready",
     };
     const next = [connection, ...connections.filter((value) => value.id !== id)];
     if (token) await this.persistence.writeSecret(id, token);
     await this.persistence.writeConnections(next);
     await this.persistence.writeSelectedId(id);
     return connection;
+  }
+
+  async savePendingPairing(input: Pick<RemoteConnectionInput, "name" | "baseUrl">) {
+    const name = input.name.trim();
+    if (!name) throw new Error("remote-name-required");
+    const connections = await this.persistence.readConnections();
+    const connection: RemoteConnection = {
+      id: this.makeId(),
+      name,
+      baseUrl: normalizeRemoteUrl(input.baseUrl),
+      lastUsedAt: this.now(),
+      pairingStatus: "pending",
+    };
+    await this.persistence.writeConnections([connection, ...connections]);
+    await this.persistence.writeSelectedId(connection.id);
+    return connection;
+  }
+
+  async completePairing(id: string, token: string) {
+    const value = token.trim();
+    if (!value) throw new Error("remote-token-required");
+    await this.persistence.writeSecret(id, value);
+    return this.setPairingStatus(id, "ready");
+  }
+
+  async failPairing(id: string) {
+    return this.setPairingStatus(id, "error");
   }
 
   async select(id: string) {
@@ -83,6 +111,18 @@ export class ConnectionStore {
     await this.persistence.removeSecret(id);
     await this.persistence.writeConnections(next);
     if (selectedId === id) await this.persistence.writeSelectedId(next[0]?.id);
+  }
+
+  private async setPairingStatus(id: string, pairingStatus: NonNullable<RemoteConnection["pairingStatus"]>) {
+    const connections = await this.persistence.readConnections();
+    const existing = connections.find((connection) => connection.id === id);
+    if (!existing) throw new Error("remote-not-found");
+    const updated = { ...existing, pairingStatus };
+    await this.persistence.writeConnections([
+      updated,
+      ...connections.filter((connection) => connection.id !== id),
+    ]);
+    return updated;
   }
 }
 

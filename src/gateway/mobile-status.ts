@@ -3,7 +3,11 @@ import type { MobileStatusResponse, MobileTask, MobileTaskStatus } from "../mobi
 const MAX_MOBILE_THREADS = 100;
 const MAX_MOBILE_TITLE = 160;
 
-export function projectMobileStatus(value: unknown, generatedAt = Date.now()): MobileStatusResponse {
+export function projectMobileStatus(
+  value: unknown,
+  generatedAt = Date.now(),
+  statusOverrides: ReadonlyMap<string, MobileTaskStatus> = new Map(),
+): MobileStatusResponse {
   const data = asRecord(value).data;
   const threads = Array.isArray(data)
     ? data.slice(0, MAX_MOBILE_THREADS).flatMap<MobileTask>((entry) => {
@@ -19,7 +23,7 @@ export function projectMobileStatus(value: unknown, generatedAt = Date.now()): M
         return [{
           id,
           title,
-          status: normalizeMobileStatus(record.status),
+          status: statusOverrides.get(id) ?? normalizeMobileStatus(record.status),
           ...(updatedAt === undefined ? {} : { updatedAt }),
         }];
       })

@@ -60,7 +60,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 .brand-lockup { display: flex; align-items: center; gap: 11px; min-width: 0; }
-.brand-lockup h1 { margin: 0; font-size: 1rem; letter-spacing: -0.015em; }
+.brand-lockup h1 { max-width: min(48vw, 46rem); margin: 0; overflow: hidden; font-size: 1rem; letter-spacing: -0.015em; text-overflow: ellipsis; white-space: nowrap; }
 .brand-mark {
   display: grid;
   place-items: center;
@@ -123,7 +123,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .app-shell { height: 100%; min-height: 0; overflow: hidden; display: grid; grid-template-columns: minmax(260px, 330px) minmax(0, 1fr); }
 .sidebar { height: 100%; min-width: 0; min-height: 0; overflow: hidden; border-right: 1px solid var(--line); background: var(--surface-muted); }
-.task-nav { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 18px; padding: 24px 18px max(16px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left)); }
+.task-nav { height: 100%; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 18px; padding: 24px 18px max(16px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left)); }
 .section-heading { display: flex; align-items: center; justify-content: center; min-height: 48px; padding: 0 5px; text-align: center; }
 .section-heading .eyebrow { display: none; }
 .section-heading h2 { margin: 0; font-size: 1.3rem; letter-spacing: -0.03em; }
@@ -233,8 +233,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .danger-button:disabled { cursor: not-allowed; opacity: 0.55; }
 
 .task-pane { height: 100%; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background: var(--canvas); }
-.task-header { min-height: 82px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; margin: 14px 18px 0; padding: 12px 18px; border: 1px solid var(--line); border-radius: 999px; background: var(--floating-surface); box-shadow: var(--shadow); }
-.task-header h2 { max-width: 52ch; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1.08rem; letter-spacing: -0.02em; }
+.task-header { min-height: 58px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; margin: 10px 18px 0; padding: 8px 16px; border: 1px solid var(--line); border-radius: 999px; background: var(--floating-surface); box-shadow: var(--shadow); }
 .task-header .eyebrow { max-width: 60ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; letter-spacing: 0; }
 .task-status { padding: 6px 9px; border-radius: 999px; color: var(--ink-muted); background: var(--surface-muted); font-size: 0.68rem; font-weight: 700; text-transform: capitalize; }
 .task-status.status-running { color: var(--accent-strong); background: var(--accent-soft); }
@@ -488,6 +487,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .connection-open > span:nth-child(2) { display: grid; min-width: 0; gap: 3px; }
 .connection-open strong, .connection-open small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-open small { color: var(--ink-muted); }
+.connection-open .connection-pairing-status { font-weight: 680; }
+.connection-open .connection-pairing-status.pairing { color: var(--accent); }
+.connection-open .connection-pairing-status.error { color: var(--danger); }
 .connection-open > .device-icon { margin-left: 4px; }
 .connection-row-actions { display: flex; justify-content: flex-end; gap: 3px; padding: 0 10px 10px; }
 .connection-row-actions button { min-height: 36px; padding: 0 10px; border: 0; border-radius: 8px; color: var(--ink-muted); background: transparent; }
@@ -512,20 +514,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .app-root { grid-template-rows: calc(58px + env(safe-area-inset-top)) minmax(0, 1fr); }
   .app-root > .topbar { padding-top: env(safe-area-inset-top); border-bottom: 0; background: var(--canvas); }
   .app-root > .topbar .brand-mark { display: none; }
-  .app-root > .topbar .brand-lockup h1 { font-size: 1.1rem; }
+  .app-root > .topbar .brand-lockup h1 { max-width: 42vw; font-size: 0.92rem; }
   .connection-state { padding: 7px 11px; border-radius: 999px; background: var(--surface-muted); }
   .app-shell { display: block; height: 100%; min-height: 0; overflow: hidden; }
   .sidebar, .task-pane { height: 100%; }
   .task-pane { display: none; }
   .app-shell.has-selection .sidebar { display: none; }
-  .app-shell.has-selection .task-pane { display: grid; }
+  .app-shell.has-selection .task-pane { display: flex; }
   .task-nav { gap: 12px; padding: 8px 18px max(12px, env(safe-area-inset-bottom)); }
   .section-heading { min-height: 58px; }
   .task-list { padding-bottom: 10px; }
   .thread-action-layer { display: grid; place-items: center; padding: 20px; background: oklch(0.12 0.012 252 / 0.2); }
   .thread-action-menu { position: relative; top: auto !important; right: auto !important; width: min(100%, 320px); border-radius: 20px; box-shadow: 0 24px 70px oklch(0.08 0.012 252 / 0.3); }
-  .task-header { min-height: 72px; grid-template-columns: 48px minmax(0, 1fr) auto; margin: 8px 12px 0; padding: 8px 12px 8px 6px; }
-  .task-header h2 { font-size: 1rem; }
+  .task-header { min-height: 58px; grid-template-columns: 44px minmax(0, 1fr) auto; margin: 6px 12px 0; padding: 5px 10px 5px 5px; }
   .back-button { display: grid; width: 46px; height: 46px; place-items: center; padding: 0; border-radius: 999px; font-size: 2rem; background: var(--surface); }
   .task-status { max-width: 70px; overflow: hidden; text-overflow: ellipsis; }
   .timeline-scroll { padding: 24px 20px calc(178px + env(safe-area-inset-bottom)); scroll-padding-bottom: calc(178px + env(safe-area-inset-bottom)); }

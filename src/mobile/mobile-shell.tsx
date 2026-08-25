@@ -10,7 +10,7 @@ import { ConnectionList } from "./connection-list";
 import { ConnectionStore, normalizeRemoteUrl } from "./connection-store";
 import { parseMobileDeepLink, type MobileThreadTarget } from "./deep-link";
 import { CodexRemoteNative } from "./native-bridge";
-import { exchangePairing } from "./pairing";
+import { beginScannedPairing } from "./pair-connection";
 import type { RemoteConnection, RemoteConnectionInput } from "./types";
 import { findMobileUpdate, type MobilePlatform, type MobileUpdateStatus } from "./app-update";
 
@@ -141,11 +141,9 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
     setError(undefined);
     try {
       const { value } = await CodexRemoteNative.scanConnection();
-      const paired = await exchangePairing(value);
-      const name = new URL(paired.baseUrl).hostname;
-      const connection = await store.save({ name, baseUrl: paired.baseUrl, token: paired.token });
-      await reloadConnections();
-      await openConnectionId(connection.id);
+      const pairing = await beginScannedPairing(value, store, reloadConnections);
+      void pairing.completion;
+      setView("connections");
     } catch (cause) {
       setError(messageForError(cause));
       setView("connections");
@@ -229,6 +227,7 @@ function messageForError(cause: unknown) {
   if (value === "remote-unreachable" || value === "Failed to fetch") return "无法访问这个 Remote 地址";
   if (value === "remote-url-insecure-public-host") return "HTTP 只允许本地、VPN IP 或 .local 地址";
   if (value === "remote-token-required") return "请输入登录密码";
+  if (value === "remote-token-not-found") return "连接尚未配对，请重新扫码";
   if (value.startsWith("pairing-")) return "二维码已失效或无法完成配对，请在 Mac 上重新生成";
   if (value.startsWith("remote-url-")) return "Remote 地址格式不正确";
   return value;

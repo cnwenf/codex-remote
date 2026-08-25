@@ -218,6 +218,10 @@ test("mobile task list and conversation scroll independently", async ({ page }) 
 
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
   await expect(page.getByText("Follow-up instruction 10")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fixture task" })).toHaveCount(1);
+  const taskHeaderBounds = await page.locator(".task-header").boundingBox();
+  expect(taskHeaderBounds).not.toBeNull();
+  expect(taskHeaderBounds!.height).toBeLessThanOrEqual(80);
   const codeBlock = page.locator(".message-agent pre").last();
   await expect(codeBlock).toBeVisible();
   const codeBounds = await codeBlock.boundingBox();

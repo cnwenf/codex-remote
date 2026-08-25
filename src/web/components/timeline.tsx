@@ -26,17 +26,36 @@ export function Timeline({ thread, imageRequest }: { thread?: CodexThread; image
     );
   }
 
+  const typingTurnId = thread.activeTurnId && thread.turns[thread.activeTurnId]?.status === "inProgress"
+    ? thread.activeTurnId
+    : [...thread.turnOrder].reverse().find((turnId) => thread.turns[turnId]?.status === "inProgress");
+
   return (
     <ol className="timeline" aria-label="对话内容">
       {thread.turnOrder.map((turnId) => {
         const turn = thread.turns[turnId];
-        return turn ? <TurnView key={turnId} turn={turn} imageRequest={imageRequest} /> : null;
+        return turn ? (
+          <TurnView
+            key={turnId}
+            turn={turn}
+            imageRequest={imageRequest}
+            showTyping={thread.status === "running" && turnId === typingTurnId}
+          />
+        ) : null;
       })}
     </ol>
   );
 }
 
-function TurnView({ turn, imageRequest }: { turn: CodexTurn; imageRequest?: ImageRequest }) {
+function TurnView({
+  turn,
+  imageRequest,
+  showTyping,
+}: {
+  turn: CodexTurn;
+  imageRequest?: ImageRequest;
+  showTyping: boolean;
+}) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const segments = segmentItems(items);
 
@@ -91,7 +110,7 @@ function TurnView({ turn, imageRequest }: { turn: CodexTurn; imageRequest?: Imag
         );
       })}
 
-      {turn.status === "inProgress" ? (
+      {showTyping ? (
         <div className="typing-indicator" role="status" aria-label="Codex 仍在输出">
           <span className="typing-dot" aria-hidden="true" />
           <span className="typing-dot" aria-hidden="true" />

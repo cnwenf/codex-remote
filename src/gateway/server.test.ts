@@ -50,6 +50,18 @@ class AlreadyInitializedTransport extends FakeTransport {
   }
 }
 
+class PeriodicStatusTransport extends AlreadyInitializedTransport {
+  threads: Array<Record<string, unknown>> = [];
+
+  override send(message: RpcMessage) {
+    super.send(message);
+    if ("method" in message && message.method === "thread/list" && "id" in message) {
+      const data = this.threads.map((thread) => ({ ...thread }));
+      queueMicrotask(() => this.emit({ id: message.id, result: { data } }));
+    }
+  }
+}
+
 class ReadOnlyTransport extends FakeTransport {
   readonly requiresInitialize = false;
   getSessionInfo() {
@@ -108,7 +120,8 @@ async function waitForSentMethod(transport: FakeTransport, method: string) {
   const deadline = Date.now() + 1_000;
   while (Date.now() < deadline) {
     const message = transport.sent.find(
-      (candidate) => "method" in candidate && candidate.method === method,
+      (candidate) => "method" in candidate && candidate.method === method &&
+        !("id" in candidate && typeof candidate.id === "string" && candidate.id.startsWith("gateway-internal-")),
     );
     if (message) return message;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -120,7 +133,8 @@ async function waitForSentRequests(transport: FakeTransport, method: string, cou
   const deadline = Date.now() + 1_000;
   while (Date.now() < deadline) {
     const messages = transport.sent.filter(
-      (candidate) => "method" in candidate && candidate.method === method,
+      (candidate) => "method" in candidate && candidate.method === method &&
+        !("id" in candidate && typeof candidate.id === "string" && candidate.id.startsWith("gateway-internal-")),
     );
     if (messages.length >= count) return messages;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -180,7 +194,8 @@ describe("gateway server", () => {
     const gateway = createGateway({ port: 0, token: "test-token", transport });
 
     const address = await gateway.start();
-    expect(transport.sent).toEqual([]);
+    expect(transport.sent.some((message) => "method" in message && message.method === "initialize"))
+      .toBe(false);
     const socket = await connect(address, "test-token", `http://127.0.0.1:${address.port}`);
     await expect(nextJson(socket)).resolves.toMatchObject({
       type: "session",
@@ -320,6 +335,105 @@ describe("gateway server", () => {
         headers: { authorization: `Bearer ${token}` },
       });
       expect(wrongMethod.status).toBe(405);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it("merges live turn activity into the mobile notification snapshot", async () => {
+    const token = "test-token";
+    const transport = new AlreadyInitializedTransport();
+    const desktopState = {
+      request() {
+        return {
+          data: [
+            { id: "desktop-active", title: "Desktop active", status: { type: "active" } },
+            { id: "live-active", title: "Live active", status: { type: "idle" } },
+          ],
+        };
+      },
+      close() {},
+    };
+    const gateway = createGateway({
+      port: 0,
+      token,
+      desktopState,
+      transport,
+    });
+    const address = await gateway.start();
+    try {
+      transport.emit({
+        method: "turn/started",
+        params: { threadId: "live-active", turn: { id: "turn-2" } },
+      });
+      const running = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect((await running.json() as any).threads).toMatchObject([
+        { id: "desktop-active", status: "running" },
+        { id: "live-active", status: "running" },
+      ]);
+
+      transport.emit({
+        method: "turn/completed",
+        params: { threadId: "live-active", turn: { id: "turn-2", status: "completed" } },
+      });
+      const completed = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect((await completed.json() as any).threads).toMatchObject([
+        { id: "desktop-active", status: "running" },
+        { id: "live-active", status: "idle" },
+      ]);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it("periodically reconciles mobile running state with Desktop thread/list", async () => {
+    const token = "test-token";
+    const transport = new PeriodicStatusTransport();
+    transport.threads = [
+      { id: "one", status: { type: "active" } },
+      { id: "two", status: { type: "active" } },
+    ];
+    const desktopState = {
+      request() {
+        return {
+          data: [
+            { id: "one", title: "One", status: { type: "idle" } },
+            { id: "two", title: "Two", status: { type: "idle" } },
+          ],
+        };
+      },
+      close() {},
+    };
+    const gateway = createGateway({
+      port: 0,
+      token,
+      desktopState,
+      transport,
+      mobileStatusSyncIntervalMs: 10,
+    });
+    const address = await gateway.start();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const first = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect((await first.json() as any).threads.filter((thread: any) => thread.status === "running"))
+        .toHaveLength(2);
+
+      transport.threads = [
+        { id: "one", status: { type: "idle" } },
+        { id: "two", status: { type: "active" } },
+      ];
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      const second = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect((await second.json() as any).threads.filter((thread: any) => thread.status === "running"))
+        .toMatchObject([{ id: "two" }]);
     } finally {
       await gateway.stop();
     }

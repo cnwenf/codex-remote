@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -84,8 +86,32 @@ export class ImageUploadStore {
     const extension = formats.find((format) => name.endsWith(format.extension))?.extension;
     if (!extension) return undefined;
     const id = name.slice(0, -extension.length);
-    if (!imageIdPattern.test(id) || join(this.root, name) !== path) return undefined;
-    return id;
+    if (imageIdPattern.test(id) && resolve(this.root, name) === resolve(path)) return id;
+
+    try {
+      const source = realpathSync(path);
+      const info = lstatSync(source);
+      if (!info.isFile() || info.size <= 0 || info.size > MAX_IMAGE_BYTES) return undefined;
+      const buffer = readFileSync(source);
+      const format = formats.find((candidate) => candidate.matches(buffer));
+      if (!format) return undefined;
+      const fingerprint = createHash("sha256")
+        .update(source)
+        .update(String(info.mtimeMs))
+        .update(String(info.size))
+        .digest("hex");
+      const importedId = `${fingerprint.slice(0, 8)}-${fingerprint.slice(8, 12)}-8${fingerprint.slice(13, 16)}-a${fingerprint.slice(17, 20)}-${fingerprint.slice(20, 32)}`;
+      const target = join(this.root, `${importedId}${format.extension}`);
+      mkdirSync(this.root, { recursive: true, mode: 0o700 });
+      chmodSync(this.root, 0o700);
+      if (!existsSync(target)) {
+        copyFileSync(source, target);
+        chmodSync(target, 0o600);
+      }
+      return importedId;
+    } catch {
+      return undefined;
+    }
   }
 
   async open(id: string): Promise<StoredImage> {

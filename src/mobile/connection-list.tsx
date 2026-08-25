@@ -57,7 +57,11 @@ export function ConnectionList({
               <li key={connection.id}>
                 <button type="button" className="connection-open" onClick={() => onOpen(connection)}>
                   <span className="device-icon" aria-hidden="true" />
-                  <span><strong>{connection.name}</strong><small>{connection.baseUrl}</small></span>
+                  <span>
+                    <strong>{connection.name}</strong>
+                    <small>{connection.baseUrl}</small>
+                    <ConnectionPairingStatus status={connection.pairingStatus} />
+                  </span>
                   <span aria-hidden="true">›</span>
                 </button>
                 <div className="connection-row-actions">
@@ -88,6 +92,12 @@ export function ConnectionList({
       </section>
     </main>
   );
+}
+
+function ConnectionPairingStatus({ status }: { status: RemoteConnection["pairingStatus"] }) {
+  if (status === "pending") return <small className="connection-pairing-status pairing">正在配对…</small>;
+  if (status === "error") return <small className="connection-pairing-status error">连接不可用，请重新扫码</small>;
+  return null;
 }
 
 function updateMessage(status: MobileUpdateStatus) {

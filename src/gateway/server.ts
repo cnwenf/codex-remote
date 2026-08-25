@@ -9,6 +9,7 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { RpcRouter } from "../protocol/rpc-router";
 import {
   isRpcRequest,
+  isRpcResponse,
   type CodexTransport,
   type GatewayEnvelope,
   type RpcMessage,
@@ -41,6 +42,9 @@ const KNOWN_SERVER_REQUESTS = new Set([
 ]);
 const MOBILE_STATUS_RATE_WINDOW_MS = 60_000;
 const MOBILE_STATUS_RATE_LIMIT = 120;
+const DEFAULT_MOBILE_STATUS_SYNC_INTERVAL_MS = 5_000;
+const MOBILE_STATUS_SYNC_TIMEOUT_MS = 3_000;
+const LIVE_EVENT_GRACE_MS = 20_000;
 const NATIVE_WEBVIEW_ORIGINS = new Set([
   "capacitor://localhost",
   "http://localhost",
@@ -58,6 +62,7 @@ type GatewayOptions = {
   uploadDir?: string;
   defaultCwd?: string;
   heartbeatIntervalMs?: number;
+  mobileStatusSyncIntervalMs?: number;
   transport: CodexTransport;
   desktopState?: {
     request(method: string, params: unknown): unknown;
@@ -79,6 +84,19 @@ export function createGateway(options: GatewayOptions) {
     options.uploadDir ?? join(homedir(), ".codex", "codex-remote", "uploads"),
   );
   const mobileStatusRate = new Map<string, { startedAt: number; count: number }>();
+  const liveThreadActivity = new Map<string, {
+    status: "running" | "idle" | "error";
+    turnId?: string;
+    source: "event" | "sync";
+    updatedAt: number;
+  }>();
+  const pendingInternalRequests = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+  let nextInternalRequestId = 1;
+  let mobileStatusSyncTimer: ReturnType<typeof setInterval> | undefined;
   const pairingStore = new PairingStore();
   let allowedOrigins = new Set([
     ...(options.allowedOrigins ?? []),
@@ -301,6 +319,12 @@ export function createGateway(options: GatewayOptions) {
           throw error;
         }
       }
+      void refreshLiveThreadActivity();
+      mobileStatusSyncTimer = setInterval(
+        () => { void refreshLiveThreadActivity(); },
+        options.mobileStatusSyncIntervalMs ?? DEFAULT_MOBILE_STATUS_SYNC_INTERVAL_MS,
+      );
+      mobileStatusSyncTimer.unref();
 
       await new Promise<void>((resolveListen, rejectListen) => {
         httpServer.once("error", rejectListen);
@@ -339,6 +363,12 @@ export function createGateway(options: GatewayOptions) {
 
     async stop() {
       clearInterval(heartbeatTimer);
+      if (mobileStatusSyncTimer) clearInterval(mobileStatusSyncTimer);
+      for (const pending of pendingInternalRequests.values()) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error("gateway-stopping"));
+      }
+      pendingInternalRequests.clear();
       for (const controller of controllers.values()) {
         controller.close(1001, "gateway-stopping");
       }
@@ -360,6 +390,17 @@ export function createGateway(options: GatewayOptions) {
       initializeReject = undefined;
       return;
     }
+    if (isRpcResponse(message) && typeof message.id === "string") {
+      const pending = pendingInternalRequests.get(message.id);
+      if (pending) {
+        pendingInternalRequests.delete(message.id);
+        clearTimeout(pending.timeout);
+        if (message.error) pending.reject(new Error(message.error.message));
+        else pending.resolve(message.result);
+        return;
+      }
+    }
+    updateLiveThreadActivity(message);
     if (isRpcRequest(message) && !KNOWN_SERVER_REQUESTS.has(message.method)) {
       options.transport.send({
         id: message.id,
@@ -383,6 +424,95 @@ export function createGateway(options: GatewayOptions) {
         message: "Ignored an unmapped App Server response",
       });
     }
+  }
+
+  function updateLiveThreadActivity(message: RpcMessage) {
+    if (!("method" in message)) return;
+    const params = recordValue(message.params);
+    const threadId = optionalString(params.threadId);
+    if (!threadId) return;
+    if (message.method === "turn/started") {
+      const turn = recordValue(params.turn);
+      liveThreadActivity.set(threadId, {
+        status: "running",
+        turnId: optionalString(turn.id) ?? optionalString(params.turnId),
+        source: "event",
+        updatedAt: Date.now(),
+      });
+      return;
+    }
+    if (message.method === "turn/completed") {
+      const turn = recordValue(params.turn);
+      const completedTurnId = optionalString(turn.id) ?? optionalString(params.turnId);
+      const active = liveThreadActivity.get(threadId);
+      if (!active?.turnId || !completedTurnId || active.turnId === completedTurnId) {
+        liveThreadActivity.set(threadId, {
+          status: optionalString(turn.status) === "failed" ? "error" : "idle",
+          source: "event",
+          updatedAt: Date.now(),
+        });
+      }
+      return;
+    }
+    if (message.method !== "thread/status/changed") return;
+    const rawStatus = params.status;
+    const status = typeof rawStatus === "string"
+      ? rawStatus
+      : optionalString(recordValue(rawStatus).type);
+    if (status === "active" || status === "running") {
+      liveThreadActivity.set(threadId, {
+        status: "running",
+        turnId: liveThreadActivity.get(threadId)?.turnId,
+        source: "event",
+        updatedAt: Date.now(),
+      });
+    } else if (status === "error" || status === "failed" || status === "systemError") {
+      liveThreadActivity.set(threadId, { status: "error", source: "event", updatedAt: Date.now() });
+    } else if (status === "idle" || status === "completed" || status === "notLoaded") {
+      liveThreadActivity.set(threadId, { status: "idle", source: "event", updatedAt: Date.now() });
+    }
+  }
+
+  async function refreshLiveThreadActivity() {
+    try {
+      const value = await requestTransport("thread/list", { limit: 100, sortKey: "updated_at" });
+      const now = Date.now();
+      for (const thread of projectMobileStatus(value, now).threads) {
+        if (thread.status === "unknown") continue;
+        const current = liveThreadActivity.get(thread.id);
+        if (
+          current?.source === "event" &&
+          current.status !== thread.status &&
+          now - current.updatedAt < LIVE_EVENT_GRACE_MS
+        ) continue;
+        liveThreadActivity.set(thread.id, {
+          status: thread.status,
+          source: "sync",
+          updatedAt: now,
+        });
+      }
+    } catch {
+      // The Desktop bridge can briefly be unavailable; the next interval retries.
+    }
+  }
+
+  function requestTransport(method: string, params: unknown) {
+    return new Promise<unknown>((resolveRequest, rejectRequest) => {
+      const id = `gateway-internal-${nextInternalRequestId++}`;
+      const timeout = setTimeout(() => {
+        pendingInternalRequests.delete(id);
+        rejectRequest(new Error("gateway-internal-request-timeout"));
+      }, MOBILE_STATUS_SYNC_TIMEOUT_MS);
+      timeout.unref();
+      pendingInternalRequests.set(id, { resolve: resolveRequest, reject: rejectRequest, timeout });
+      try {
+        options.transport.send({ id, method, params });
+      } catch (cause) {
+        pendingInternalRequests.delete(id);
+        clearTimeout(timeout);
+        rejectRequest(cause instanceof Error ? cause : new Error("gateway-internal-request-failed"));
+      }
+    });
   }
 
   function broadcastEnvelope(envelope: GatewayEnvelope) {
@@ -504,7 +634,11 @@ export function createGateway(options: GatewayOptions) {
     try {
       const value = await options.desktopState.request("desktopState/listThreads", {});
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-      response.end(JSON.stringify(projectMobileStatus(value)));
+      response.end(JSON.stringify(projectMobileStatus(
+        value,
+        Date.now(),
+        new Map([...liveThreadActivity].map(([threadId, activity]) => [threadId, activity.status])),
+      )));
     } catch {
       response.writeHead(503).end();
     }
@@ -857,6 +991,16 @@ function readRawBody(request: IncomingMessage, maxBytes: number) {
 
 function singleHeader(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function optionalString(value: unknown) {
+  return typeof value === "string" ? value : undefined;
 }
 
 function resolveRemoteImages(message: RpcMessage, store: ImageUploadStore): RpcMessage {

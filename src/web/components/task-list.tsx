@@ -149,13 +149,6 @@ export function TaskList({
 
   return (
     <nav className="task-nav" aria-label="对话导航">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">Codex</p>
-          <h2>Remote</h2>
-        </div>
-      </div>
-
       <div className="task-list" data-testid="task-list-scroll">
         {filtered.length === 0 ? (
           <p className="empty-list">{threads.length === 0 ? "还没有活跃对话" : "没有匹配的对话"}</p>

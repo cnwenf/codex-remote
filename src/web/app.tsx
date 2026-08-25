@@ -133,7 +133,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
       <header className="topbar">
         <div className="brand-lockup">
           <BrandMark compact />
-          <h1>Remote</h1>
+          <h1>{codex.selectedThread?.title ?? "Remote"}</h1>
         </div>
         {remote ? (
           <button type="button" className="manage-connections-button" onClick={remote.onManageConnections}>
@@ -238,7 +238,6 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                       ? "直接对话"
                       : codex.selectedThread.cwd ?? "直接对话"}
                   </p>
-                  <h2>{codex.selectedThread.title}</h2>
                 </div>
                 <span className={`task-status status-${codex.selectedThread.status}`}>
                   {statusLabel(codex.selectedThread.status)}

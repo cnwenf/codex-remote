@@ -72,4 +72,35 @@ describe("ConnectionList", () => {
     await userEvent.click(screen.getByRole("button", { name: "下载 0.4.2" }));
     expect(onDownloadUpdate).toHaveBeenCalledWith("https://example.test/app.apk");
   });
+
+  it("shows pairing progress and failure in the connection list", () => {
+    render(
+      <ConnectionList
+        connections={[
+          {
+            id: "pairing",
+            name: "Pairing Mac",
+            baseUrl: "http://192.168.1.20:4321",
+            lastUsedAt: 2,
+            pairingStatus: "pending",
+          },
+          {
+            id: "offline",
+            name: "Offline Mac",
+            baseUrl: "http://192.168.1.21:4321",
+            lastUsedAt: 1,
+            pairingStatus: "error",
+          },
+        ]}
+        onNew={vi.fn()}
+        onScan={vi.fn()}
+        onOpen={vi.fn()}
+        onEdit={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("正在配对…")).toBeVisible();
+    expect(screen.getByText("连接不可用，请重新扫码")).toBeVisible();
+  });
 });
