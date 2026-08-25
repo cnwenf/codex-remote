@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
@@ -107,5 +107,39 @@ describe("App", () => {
       state: { codexRemoteView: "list" },
     })));
     expect(value.clearSelection).toHaveBeenCalled();
+  });
+
+  it("groups the native mobile conversation title, back action, status, and connection", () => {
+    const thread = {
+      id: "thread-1",
+      title: "Release signing repair",
+      status: "running",
+      turnOrder: [],
+      turns: {},
+    };
+    useCodexMock.mockReturnValue(codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+      selectedThreadId: thread.id,
+      selectedThread: thread,
+    }));
+
+    render(<App remote={{
+      connectionId: "mac-1",
+      name: "macmini",
+      baseUrl: "http://192.168.1.10:4321",
+      token: "test-token",
+      onManageConnections: vi.fn(),
+    }} />);
+
+    const topbar = document.querySelector(".topbar-native-thread");
+    expect(topbar).not.toBeNull();
+    expect(topbar).toContainElement(within(topbar as HTMLElement).getByRole("button", { name: "返回对话列表" }));
+    expect(topbar).toContainElement(within(topbar as HTMLElement).getByRole("heading", { name: "Release signing repair" }));
+    expect(topbar).toContainElement(within(topbar as HTMLElement).getByText("运行中"));
+    const connection = screen.getByRole("button", { name: "管理连接 macmini，已连接" });
+    expect(connection).toHaveTextContent("macmini");
+    expect(connection.querySelector(".remote-connection-indicator.connection-ready")).not.toBeNull();
+    expect(document.querySelector(".desktop-thread-context")).toBeNull();
   });
 });

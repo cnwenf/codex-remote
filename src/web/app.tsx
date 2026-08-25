@@ -130,14 +130,35 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
 
   return (
     <main className="app-root">
-      <header className="topbar">
+      <header className={`topbar ${remote ? "topbar-native" : ""} ${remote && codex.selectedThread ? "topbar-native-thread" : ""}`}>
         <div className="brand-lockup">
+          {codex.selectedThread ? (
+            <button
+              type="button"
+              className="mobile-thread-back"
+              onClick={returnToList}
+              aria-label="返回对话列表"
+            >
+              ‹
+            </button>
+          ) : null}
           <BrandMark compact />
           <h1>{codex.selectedThread?.title ?? "Remote"}</h1>
+          {remote && codex.selectedThread ? (
+            <span className={`mobile-thread-status status-${codex.selectedThread.status}`}>
+              {statusLabel(codex.selectedThread.status)}
+            </span>
+          ) : null}
         </div>
         {remote ? (
-          <button type="button" className="manage-connections-button" onClick={remote.onManageConnections}>
-            {remote.name}
+          <button
+            type="button"
+            className="manage-connections-button remote-connection-pill"
+            onClick={remote.onManageConnections}
+            aria-label={`管理连接 ${remote.name}，${connectionLabel(codex.connection)}`}
+          >
+            <span aria-hidden="true" className={`remote-connection-indicator connection-${codex.connection}`} />
+            <span>{remote.name}</span>
           </button>
         ) : null}
         <div className={`connection-state connection-${codex.connection}`}>
@@ -223,7 +244,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               />
             ) : codex.selectedThread ? (
               <>
-              <header className="task-header">
+              {!remote ? <header className="task-header">
                 <button
                   type="button"
                   className="back-button"
@@ -233,7 +254,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                   ‹
                 </button>
                 <div>
-                  <p className="eyebrow">
+                  <p className="eyebrow desktop-thread-context">
                     {isDirectThread(codex.selectedThread, codex.defaultCwd)
                       ? "直接对话"
                       : codex.selectedThread.cwd ?? "直接对话"}
@@ -242,7 +263,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 <span className={`task-status status-${codex.selectedThread.status}`}>
                   {statusLabel(codex.selectedThread.status)}
                 </span>
-              </header>
+              </header> : null}
               {codex.selectedThreadError ? (
                 <div className="thread-load-error" role="alert">
                   <span>对话加载失败：{codex.selectedThreadError}</span>
@@ -333,4 +354,11 @@ function statusLabel(status: "running" | "idle" | "error" | "unknown") {
   if (status === "idle") return "空闲";
   if (status === "error") return "出错";
   return "未知";
+}
+
+function connectionLabel(connection: "disconnected" | "connecting" | "reconnecting" | "ready") {
+  if (connection === "ready") return "已连接";
+  if (connection === "reconnecting") return "正在重连";
+  if (connection === "connecting") return "正在连接";
+  return "离线";
 }

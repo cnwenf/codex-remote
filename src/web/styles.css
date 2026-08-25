@@ -61,6 +61,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .brand-lockup { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .brand-lockup h1 { max-width: min(48vw, 46rem); margin: 0; overflow: hidden; font-size: 1rem; letter-spacing: -0.015em; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-thread-back, .mobile-thread-status { display: none; }
 .brand-mark {
   display: grid;
   place-items: center;
@@ -462,6 +463,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .decision-toast { position: fixed; z-index: 12; top: 72px; left: 50%; transform: translateX(-50%); padding: 10px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow); font-size: 0.76rem; font-weight: 700; }
 
 .manage-connections-button { max-width: 190px; min-height: 38px; margin-left: auto; overflow: hidden; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--surface-muted); font-size: 0.72rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.remote-connection-indicator { display: none; width: 8px; height: 8px; flex: 0 0 auto; border-radius: 999px; background: var(--ink-muted); }
+.remote-connection-indicator.connection-ready { background: var(--success); }
+.remote-connection-indicator.connection-connecting,
+.remote-connection-indicator.connection-reconnecting { background: var(--warning); }
 .native-connect-error { width: min(calc(100% - 32px), 520px); margin: auto; padding: 28px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
 .native-connect-error h2 { margin: 0; }
 .native-connect-error p { color: var(--ink-muted); line-height: 1.5; }
@@ -515,6 +520,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .app-root > .topbar { padding-top: env(safe-area-inset-top); border-bottom: 0; background: var(--canvas); }
   .app-root > .topbar .brand-mark { display: none; }
   .app-root > .topbar .brand-lockup h1 { max-width: 42vw; font-size: 0.92rem; }
+  .app-root > .topbar-native { gap: 10px; }
+  .app-root > .topbar-native .brand-lockup { min-width: 0; flex: 1 1 auto; gap: 8px; }
+  .app-root > .topbar-native .brand-lockup h1 { max-width: none; flex: 1 1 auto; font-size: 0.96rem; }
+  .app-root > .topbar-native .connection-state { display: none; }
+  .app-root > .topbar-native .remote-connection-pill { min-width: 0; max-width: 112px; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; margin-left: 0; padding: 0 12px; }
+  .app-root > .topbar-native .remote-connection-pill > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .app-root > .topbar-native .remote-connection-indicator { display: block; }
+  .app-root > .topbar-native-thread .mobile-thread-back { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; padding: 0 0 3px; border: 0; border-radius: 999px; color: var(--ink); background: var(--surface-muted); font-size: 1.9rem; line-height: 1; }
+  .app-root > .topbar-native-thread .mobile-thread-status { display: inline-flex; min-height: 28px; flex: 0 0 auto; align-items: center; padding: 0 9px; border-radius: 999px; color: var(--ink-muted); background: var(--surface-muted); font-size: 0.66rem; font-weight: 720; }
+  .app-root > .topbar-native-thread .mobile-thread-status.status-running { color: var(--accent-strong); background: var(--accent-soft); }
+  .app-root > .topbar-native-thread .mobile-thread-status.status-error { color: var(--danger); }
   .connection-state { padding: 7px 11px; border-radius: 999px; background: var(--surface-muted); }
   .app-shell { display: block; height: 100%; min-height: 0; overflow: hidden; }
   .sidebar, .task-pane { height: 100%; }
