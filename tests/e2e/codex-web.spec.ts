@@ -261,6 +261,20 @@ test("mobile browser back swipe history returns to the conversation list", async
   await expect(page).toHaveURL(/127\.0\.0\.1:4318\/?$/);
 });
 
+test("keeps desktop conversation actions hidden until explicitly revealed", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+
+  const row = page.getByRole("button", { name: /^Fixture task，/ }).locator("xpath=../..");
+  const actions = row.locator(".task-row-actions");
+  await expect(actions).toHaveCSS("visibility", "hidden");
+
+  await page.getByRole("button", { name: "对话操作 Fixture task" }).click();
+  await expect(actions).toHaveCSS("visibility", "visible");
+});
+
 test("pins, renames, archives, restores, and deletes through the Desktop-aligned sidebar", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");

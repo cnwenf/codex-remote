@@ -175,7 +175,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .task-row-shell[data-action-count="2"][data-actions-open="true"] .task-row-content { transform: translateX(-152px); }
 .task-row-shell[data-action-count="3"][data-actions-open="true"] .task-row-content { transform: translateX(-228px); }
 .task-row-shell[data-action-count="4"][data-actions-open="true"] .task-row-content { transform: translateX(-304px); }
-.task-row-actions { position: absolute; z-index: 0; inset: 0 0 0 auto; width: 152px; display: grid; grid-auto-flow: column; grid-auto-columns: 76px; }
+.task-row-actions { position: absolute; z-index: 0; inset: 0 0 0 auto; width: 152px; display: grid; grid-auto-flow: column; grid-auto-columns: 76px; visibility: hidden; pointer-events: none; }
+.task-row-shell[data-actions-open="true"] .task-row-actions { visibility: visible; pointer-events: auto; }
 .task-row-shell[data-action-count="1"] .task-row-actions { width: 76px; }
 .task-row-shell[data-action-count="2"] .task-row-actions { width: 152px; }
 .task-row-shell[data-action-count="3"] .task-row-actions { width: 228px; }
