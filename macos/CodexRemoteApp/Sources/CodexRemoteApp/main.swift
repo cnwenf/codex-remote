@@ -2,6 +2,26 @@ import AppKit
 import CoreImage
 import Foundation
 
+private func bundledVersion() -> String {
+  // LaunchServices can return the Info.plist of an older installed bundle when
+  // two ad-hoc signed builds share one bundle identifier during an in-place
+  // update. The resource travels with this executable, so it is authoritative.
+  let executableResources = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("Resources", isDirectory: true)
+  if let version = try? String(contentsOf: executableResources.appendingPathComponent("VERSION"), encoding: .utf8)
+       .trimmingCharacters(in: .whitespacesAndNewlines),
+     !version.isEmpty {
+    return version
+  }
+  if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+     !version.isEmpty {
+    return version
+  }
+  return "dev"
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private var statusItem: NSStatusItem!
@@ -21,6 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var hostField = NSTextField()
   private var addressField = NSTextField()
   private var statusLabel = NSTextField(labelWithString: "Stopped")
+  private var bridgeStatusLabel = NSTextField(labelWithString: "Checking…")
+  private var restartDesktopButton = NSButton(title: "Restart Desktop", target: nil, action: nil)
+  private var bridgeTimer: Timer?
   private var toggle = NSButton(checkboxWithTitle: "Remote enabled", target: nil, action: nil)
   private var connectionMode = NSPopUpButton()
   private var pairingImageView = NSImageView()
@@ -33,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     configureMenu()
     configureWindow()
     loadConfiguration()
-    let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    let version = bundledVersion()
     updateController = UpdateController(currentVersion: version) { [weak self] message in self?.statusLabel.stringValue = message }
     writeUpdateReadiness(version: version)
     #if DEBUG
@@ -51,12 +74,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     #endif
     if toggle.state == .on { startGateway() }
+    refreshDesktopBridgeStatus()
+    bridgeTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+      Task { @MainActor in self?.refreshDesktopBridgeStatus() }
+    }
     if ProcessInfo.processInfo.environment["CODEX_REMOTE_BACKGROUND_LAUNCH"] != "1" {
       showSettings()
     }
   }
 
-  func applicationWillTerminate(_ notification: Notification) { stopGateway() }
+  func applicationWillTerminate(_ notification: Notification) { bridgeTimer?.invalidate(); stopGateway() }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
     showSettings()
@@ -154,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     save.keyEquivalent = "\r"
     save.bezelStyle = .rounded
     let update = NSButton(title: "Check for Updates", target: self, action: #selector(checkForUpdates))
-    let version = NSTextField(labelWithString: "Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")")
+    let version = NSTextField(labelWithString: "Version \(bundledVersion())")
     version.textColor = .tertiaryLabelColor
     version.font = .systemFont(ofSize: 11.5)
     let pairing = NSButton(title: "Get Link QR Code", target: self, action: #selector(showPairingQR))
@@ -166,6 +193,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     settingsHelp.font = .systemFont(ofSize: 11.5)
     settingsHelp.textColor = .secondaryLabelColor
     settingsHelp.alignment = .left
+    let bridgeTitle = NSTextField(labelWithString: "Desktop bridge")
+    bridgeTitle.font = .systemFont(ofSize: 12, weight: .medium)
+    bridgeStatusLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
+    bridgeStatusLabel.textColor = .secondaryLabelColor
+    restartDesktopButton.target = self
+    restartDesktopButton.action = #selector(confirmDesktopRestart)
+    restartDesktopButton.bezelStyle = .rounded
+    let bridgeSpacer = NSView()
+    bridgeSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    let bridgeRow = NSStackView(views: [bridgeStatusLabel, bridgeSpacer, restartDesktopButton])
+    bridgeRow.orientation = .horizontal
+    bridgeRow.alignment = .centerY
+    let bridgeSection = labelled(bridgeTitle, bridgeRow)
     let tokenTitle = NSTextField(labelWithString: "Authentication token")
     tokenTitle.font = .systemFont(ofSize: 12, weight: .medium)
     tokenTitle.alignment = .left
@@ -183,6 +223,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let settingsStack = NSStackView(views: [
       settingsTitle,
       settingsHelp,
+      bridgeSection,
       toggle,
       labelled(modeTitle, connectionMode),
       labelled(hostTitle, hostField),
@@ -192,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     settingsStack.orientation = .vertical
     settingsStack.alignment = .leading
     settingsStack.spacing = 12
-    for control in [connectionMode, hostField, passwordField, saveRow] {
+    for control in [bridgeSection, connectionMode, hostField, passwordField, saveRow] {
       control.widthAnchor.constraint(equalTo: settingsStack.widthAnchor).isActive = true
     }
     let settingsCard = card(content: settingsStack)
@@ -399,6 +440,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     refreshAccessAddress()
     window.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
+    // AppKit otherwise promotes the first editable control in the key-view
+    // loop (the private IP field) when this window becomes key. Keep the
+    // window itself focused on open; users can still click any field to edit.
+    window.makeFirstResponder(nil)
+    DispatchQueue.main.async { [weak self] in
+      self?.window.makeFirstResponder(nil)
+    }
   }
   @objc private func copyRemoteAddress() {
     refreshAccessAddress()
@@ -412,6 +460,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSWorkspace.shared.open(url)
   }
   @objc private func checkForUpdates() { updateController.checkAndInstall() }
+  private func refreshDesktopBridgeStatus() {
+    guard let url = URL(string: "http://127.0.0.1:9229/json/list") else { return }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 2
+    URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+      let ready = (response as? HTTPURLResponse)?.statusCode == 200
+      Task { @MainActor in
+        self?.bridgeStatusLabel.stringValue = ready ? "Connected on 127.0.0.1:9229" : "Unavailable"
+        self?.bridgeStatusLabel.textColor = ready ? .systemGreen : .systemOrange
+        self?.restartDesktopButton.isEnabled = !ready
+      }
+    }.resume()
+  }
+
+  @objc private func confirmDesktopRestart() {
+    let alert = NSAlert()
+    alert.messageText = "Restart Codex Desktop?"
+    alert.informativeText = "Desktop will quit once and reopen with its loopback bridge enabled. Running work may be interrupted."
+    alert.addButton(withTitle: "Restart Desktop")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    restartDesktopOnce()
+  }
+
+  private func restartDesktopOnce() {
+    let script = Bundle.main.resourceURL!.appendingPathComponent("restart-codex-desktop.sh")
+    guard FileManager.default.isExecutableFile(atPath: script.path) else {
+      bridgeStatusLabel.stringValue = "Restart helper is unavailable"
+      return
+    }
+    restartDesktopButton.isEnabled = false
+    bridgeStatusLabel.stringValue = "Restarting Desktop…"
+    let process = Process()
+    process.executableURL = script
+    process.arguments = ["--execute"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    process.terminationHandler = { [weak self] process in
+      Task { @MainActor in
+        self?.bridgeStatusLabel.stringValue = process.terminationStatus == 0 ? "Bridge restored" : "Desktop restart failed"
+        self?.restartDesktopButton.isEnabled = process.terminationStatus != 0
+        self?.refreshDesktopBridgeStatus()
+      }
+    }
+    do { try process.run() }
+    catch {
+      bridgeStatusLabel.stringValue = "Desktop restart failed"
+      restartDesktopButton.isEnabled = true
+    }
+  }
   private func writeUpdateReadiness(version: String) {
     try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     try? version.write(to: support.appendingPathComponent("update-ready"), atomically: true, encoding: .utf8)

@@ -36,6 +36,12 @@ function codexState(overrides: Record<string, unknown> = {}) {
     createThread: vi.fn().mockResolvedValue(undefined),
     updateSelectedThreadSettings: vi.fn(),
     sendInstruction: vi.fn().mockResolvedValue(undefined),
+    prepareDesktopRestart: vi.fn().mockResolvedValue({
+      confirmationToken: "confirm-once",
+      expiresInSeconds: 60,
+      runningThreadCount: 1,
+    }),
+    confirmDesktopRestart: vi.fn().mockResolvedValue({ accepted: true }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     resolveRequest: vi.fn(),
     ...overrides,
@@ -82,6 +88,39 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "Desktop task", level: 1 })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Remote" })).not.toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeVisible();
+  });
+
+  it("confirms a one-time Desktop restart from the read-only banner", async () => {
+    const thread = {
+      id: "thread-1",
+      title: "Desktop task",
+      cwd: "/tmp/project",
+      status: "running",
+      turnOrder: [],
+      turns: {},
+      desktopMirror: true,
+    };
+    const value = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+      desktopStateAvailable: true,
+      desktopControlAvailable: false,
+      transportMode: "desktop-cold",
+      selectedThreadId: thread.id,
+      selectedThread: thread,
+    });
+    useCodexMock.mockReturnValue(value);
+
+    render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "重启 Desktop 恢复控制" }));
+    expect(value.prepareDesktopRestart).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("dialog", { name: "重启 Codex Desktop" })).toHaveTextContent(
+      "当前有 1 个对话正在运行",
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "确认重启" }));
+    expect(value.confirmDesktopRestart).toHaveBeenCalledWith("confirm-once");
+    expect(await screen.findByText("已请求重启，正在等待 Desktop 桥恢复…")).toBeVisible();
   });
 
   it("keeps mobile browser back swipe inside the app and returns to the conversation list", async () => {

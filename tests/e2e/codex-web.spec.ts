@@ -1,5 +1,21 @@
 import { expect, test } from "@playwright/test";
 
+test("confirms a one-time Desktop restart before leaving read-only mode", async ({ page }) => {
+  test.skip(process.env.CODEX_REMOTE_E2E_DESKTOP_MIRROR !== "1", "read-only Desktop fixture only");
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Desktop restart fixture，/ }).click();
+  await expect(page.getByText(/Desktop 桥当前不可用/)).toBeVisible();
+  await page.getByRole("button", { name: "重启 Desktop 恢复控制" }).click();
+  const dialog = page.getByRole("dialog", { name: "重启 Codex Desktop" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("1 个对话正在运行");
+  await dialog.getByRole("button", { name: "取消" }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
 test("follows the system theme and keeps mobile navigation actions in thumb reach", async ({ page }, testInfo) => {
   await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");

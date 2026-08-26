@@ -853,6 +853,20 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     await socket.request("turn/interrupt", { threadId: selectedThreadId, turnId });
   }, [selectedThreadId, socket, state.threads]);
 
+  const prepareDesktopRestart = useCallback(async () => {
+    return await socket.request("gateway/desktopRestart/prepare") as {
+      confirmationToken: string;
+      expiresInSeconds: number;
+      runningThreadCount: number;
+    };
+  }, [socket]);
+
+  const confirmDesktopRestart = useCallback(async (confirmationToken: string) => {
+    return await socket.request("gateway/desktopRestart/confirm", { confirmationToken }) as {
+      accepted: boolean;
+    };
+  }, [socket]);
+
   const resolveRequest = useCallback(
     (requestId: RpcRequest["id"], result: unknown) => {
       socket.respond(requestId, result);
@@ -901,6 +915,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       createThread,
       updateSelectedThreadSettings,
       sendInstruction,
+      prepareDesktopRestart,
+      confirmDesktopRestart,
       steerQueuedMessage,
       interrupt,
       resolveRequest,
@@ -910,6 +926,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       archivedThreads,
       archivedThreadsLoading,
       connection,
+      confirmDesktopRestart,
       createThread,
       creationOptions,
       defaultCwd,
@@ -925,6 +942,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       loadingThreadId,
       loadEarlierThreadHistory,
       pendingRequests,
+      prepareDesktopRestart,
       refreshThreads,
       refreshThreadSections,
       refreshCreationOptions,

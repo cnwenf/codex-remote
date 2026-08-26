@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   CodexTransport,
   RpcMessage,
@@ -1058,6 +1058,80 @@ describe("gateway server", () => {
       },
     });
     expect(socket.readyState).toBe(WebSocket.OPEN);
+
+    socket.close();
+    await once(socket, "close");
+    await gateway.stop();
+  });
+
+  it("requires a short-lived one-time confirmation before restarting Desktop", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const transport = new ReadOnlyTransport();
+    const restartDesktop = vi.fn().mockResolvedValue(undefined);
+    const gateway = createGateway({
+      port: 0,
+      token,
+      allowedOrigins: [origin],
+      transport,
+      restartDesktop,
+      restartConfirmationToken: () => "one-time-confirmation",
+    });
+    const address = await gateway.start();
+    const socket = await connect(address, token, origin);
+    await nextJson(socket);
+
+    transport.emit({
+      method: "turn/started",
+      params: { threadId: "thread-running", turn: { id: "turn-running" } },
+    });
+    await nextJson(socket);
+    socket.send(JSON.stringify({
+      type: "rpc",
+      payload: { id: 40, method: "gateway/desktopRestart/prepare" },
+    }));
+    await expect(nextJson(socket)).resolves.toEqual({
+      type: "rpc",
+      payload: {
+        id: 40,
+        result: {
+          confirmationToken: "one-time-confirmation",
+          expiresInSeconds: 60,
+          runningThreadCount: 1,
+        },
+      },
+    });
+
+    socket.send(JSON.stringify({
+      type: "rpc",
+      payload: {
+        id: 41,
+        method: "gateway/desktopRestart/confirm",
+        params: { confirmationToken: "one-time-confirmation" },
+      },
+    }));
+    await expect(nextJson(socket)).resolves.toEqual({
+      type: "rpc",
+      payload: { id: 41, result: { accepted: true } },
+    });
+    expect(restartDesktop).toHaveBeenCalledTimes(1);
+
+    socket.send(JSON.stringify({
+      type: "rpc",
+      payload: {
+        id: 42,
+        method: "gateway/desktopRestart/confirm",
+        params: { confirmationToken: "one-time-confirmation" },
+      },
+    }));
+    await expect(nextJson(socket)).resolves.toEqual({
+      type: "rpc",
+      payload: {
+        id: 42,
+        error: { code: -32010, message: "Desktop restart confirmation is invalid or expired" },
+      },
+    });
+    expect(restartDesktop).toHaveBeenCalledTimes(1);
 
     socket.close();
     await once(socket, "close");

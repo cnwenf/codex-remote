@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -14,6 +14,7 @@ import {
   type CodexTransport,
   type GatewayEnvelope,
   type RpcMessage,
+  type RpcRequest,
 } from "../protocol/types";
 import {
   createSessionCredential,
@@ -65,6 +66,8 @@ type GatewayOptions = {
   heartbeatIntervalMs?: number;
   sessionSyncIntervalMs?: number;
   mobileStatusSyncIntervalMs?: number;
+  restartDesktop?: () => Promise<void>;
+  restartConfirmationToken?: () => string;
   onTransportDiagnostic?(diagnostic: { category: string; message: string }): void;
   transport: CodexTransport;
   desktopState?: {
@@ -102,6 +105,8 @@ export function createGateway(options: GatewayOptions) {
   let nextInternalRequestId = 1;
   let mobileStatusSyncTimer: ReturnType<typeof setInterval> | undefined;
   let sessionSyncTimer: ReturnType<typeof setInterval> | undefined;
+  const restartConfirmations = new Map<string, { token: string; expiresAt: number }>();
+  let restartInFlight = false;
   const pairingStore = new PairingStore();
   let allowedOrigins = new Set([
     ...(options.allowedOrigins ?? []),
@@ -241,6 +246,10 @@ export function createGateway(options: GatewayOptions) {
       try {
         const envelope = JSON.parse(rawDataToBuffer(data).toString("utf8")) as unknown;
         if (!isRpcEnvelope(envelope)) throw new Error("invalid-envelope");
+        if (isRpcRequest(envelope.payload) && envelope.payload.method.startsWith("gateway/desktopRestart/")) {
+          void handleDesktopRestartRequest(clientId, socket, envelope.payload);
+          return;
+        }
         if (isRpcRequest(envelope.payload) && envelope.payload.method.startsWith("desktopState/")) {
           void handleDesktopStateRequest(socket, envelope.payload);
           return;
@@ -288,10 +297,74 @@ export function createGateway(options: GatewayOptions) {
     });
 
     socket.once("close", () => {
+      restartConfirmations.delete(clientId);
       controllers.delete(clientId);
       router.dropClient(clientId);
     });
   });
+
+  async function handleDesktopRestartRequest(clientId: string, socket: WebSocket, request: RpcRequest) {
+    if (!options.restartDesktop) {
+      sendEnvelope(socket, { type: "rpc", payload: {
+        id: request.id,
+        error: { code: -32601, message: "Desktop restart is unavailable" },
+      } });
+      return;
+    }
+    if (request.method === "gateway/desktopRestart/prepare") {
+      const token = options.restartConfirmationToken?.() ?? randomBytes(24).toString("base64url");
+      restartConfirmations.set(clientId, { token, expiresAt: Date.now() + 60_000 });
+      const runningThreadIds = new Set<string>();
+      for (const [threadId, activity] of liveThreadActivity) {
+        if (activity.status === "running") runningThreadIds.add(threadId);
+      }
+      for (const [threadId, task] of syncedMobileThreads) {
+        if (task.status === "running") runningThreadIds.add(threadId);
+      }
+      sendEnvelope(socket, { type: "rpc", payload: {
+        id: request.id,
+        result: { confirmationToken: token, expiresInSeconds: 60, runningThreadCount: runningThreadIds.size },
+      } });
+      return;
+    }
+    if (request.method !== "gateway/desktopRestart/confirm") {
+      sendEnvelope(socket, { type: "rpc", payload: {
+        id: request.id,
+        error: { code: -32601, message: "Desktop restart method is not supported" },
+      } });
+      return;
+    }
+    const params = recordValue(request.params);
+    const confirmationToken = typeof params.confirmationToken === "string" ? params.confirmationToken : "";
+    const confirmation = restartConfirmations.get(clientId);
+    restartConfirmations.delete(clientId);
+    if (!confirmation || confirmation.expiresAt < Date.now() || confirmation.token !== confirmationToken) {
+      sendEnvelope(socket, { type: "rpc", payload: {
+        id: request.id,
+        error: { code: -32010, message: "Desktop restart confirmation is invalid or expired" },
+      } });
+      return;
+    }
+    if (restartInFlight) {
+      sendEnvelope(socket, { type: "rpc", payload: {
+        id: request.id,
+        error: { code: -32011, message: "Desktop restart is already in progress" },
+      } });
+      return;
+    }
+    restartInFlight = true;
+    try {
+      await options.restartDesktop();
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result: { accepted: true } } });
+    } catch {
+      sendEnvelope(socket, { type: "rpc", payload: {
+        id: request.id,
+        error: { code: -32012, message: "Desktop restart failed" },
+      } });
+    } finally {
+      restartInFlight = false;
+    }
+  }
 
   return {
     async start(): Promise<AddressInfo> {

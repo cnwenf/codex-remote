@@ -8,6 +8,7 @@ import { DesktopBridgeTransport } from "./desktop-bridge-transport";
 import { acquireDesktopBridgeLock } from "./desktop-bridge-lock";
 import { DesktopCdpClient } from "./desktop-cdp-client";
 import { DesktopState } from "./desktop-state";
+import { createDesktopRestarter } from "./desktop-restart";
 import { createGateway } from "./server";
 
 const token = process.env.CODEX_WEB_TOKEN ?? (
@@ -61,6 +62,11 @@ const gateway = createGateway({
   staticDir: resolve(process.env.STATIC_DIR ?? "dist"),
   defaultCwd: process.cwd(),
   desktopState: new DesktopState(join(codexHome, "state_5.sqlite")),
+  restartDesktop: createDesktopRestarter({
+    scriptPath: resolve(
+      process.env.CODEX_REMOTE_DESKTOP_RESTART_SCRIPT ?? "scripts/restart-codex-desktop.sh",
+    ),
+  }),
   transport,
   onTransportDiagnostic: diagnosticFile ? (diagnostic) => {
     appendFileSync(

@@ -242,7 +242,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .stale-banner { padding: 8px 18px; color: var(--ink); background: color-mix(in oklch, var(--warning) 20%, var(--surface)); font-size: 0.76rem; text-align: center; }
 .thread-load-error { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 18px; color: var(--danger); background: color-mix(in oklch, var(--danger) 10%, var(--surface)); font-size: 0.76rem; }
 .thread-load-error .secondary-button { min-height: 34px; }
-.desktop-mirror-banner { padding: 8px 18px; color: var(--muted); background: color-mix(in oklch, var(--accent) 8%, var(--surface)); border-bottom: 1px solid var(--line); font-size: 0.76rem; text-align: center; }
+.desktop-mirror-banner { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px 18px; color: var(--muted); background: color-mix(in oklch, var(--accent) 8%, var(--surface)); border-bottom: 1px solid var(--line); font-size: 0.76rem; text-align: center; }
+.desktop-restart-button { min-height: 30px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--surface); font: inherit; font-weight: 700; cursor: pointer; }
+.desktop-restart-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 20px; background: oklch(0.08 0.01 252 / 0.48); }
+.desktop-restart-dialog { width: min(440px, 100%); padding: 24px; border: 1px solid var(--line); border-radius: 22px; color: var(--ink); background: var(--floating-surface); box-shadow: var(--shadow); }
+.desktop-restart-dialog h2 { margin: 0 0 14px; font-size: 1.18rem; }
+.desktop-restart-dialog p { margin: 8px 0; color: var(--ink-muted); line-height: 1.55; }
+.desktop-restart-dialog > div { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.desktop-restart-dialog .danger-button { padding: 9px 14px; border: 0; border-radius: 12px; color: white; background: var(--danger); font-weight: 750; }
+.desktop-restart-notice { position: fixed; z-index: 35; right: 20px; bottom: 20px; max-width: min(420px, calc(100vw - 40px)); padding: 11px 15px; border: 1px solid var(--line); border-radius: 14px; color: var(--ink); background: var(--floating-surface); box-shadow: var(--shadow); }
 .timeline-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; scrollbar-gutter: stable; padding: 30px clamp(18px, 4vw, 56px); }
 .history-sentinel { width: min(100%, 820px); min-height: 24px; margin: 0 auto 12px; color: var(--ink-muted); font-size: 0.68rem; text-align: center; }
 .timeline { width: min(100%, 820px); min-width: 0; max-width: 100%; margin: 0 auto; padding: 0; list-style: none; }

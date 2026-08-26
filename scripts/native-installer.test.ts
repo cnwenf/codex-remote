@@ -10,6 +10,7 @@ const agents = readFileSync(join(root, "scripts/install-launch-agents.sh"), "utf
 const appSource = readFileSync(join(root, "macos/CodexRemoteApp/Sources/CodexRemoteApp/main.swift"), "utf8");
 const buildScript = readFileSync(join(root, "scripts/build-macos-app.sh"), "utf8");
 const gatewayLauncher = readFileSync(join(root, "scripts/launch-bundled-gateway.sh"), "utf8");
+const macosUpdater = readFileSync(join(root, "scripts/perform-macos-update.sh"), "utf8");
 
 describe("native installer contract", () => {
   it("uses an interactive tty and stable checksum-verified release assets", () => {
@@ -137,6 +138,25 @@ printf 'sha256 Fingerprint=%s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/.
     expect(appSource).toContain('labelWithString: "Authentication token"');
     expect(appSource).toContain('title: "Get Link QR Code"');
     expect(appSource).toContain('title: "Check for Updates"');
+    expect(appSource).toContain('labelWithString: "Desktop bridge"');
+    expect(appSource).toContain('title: "Restart Desktop"');
+    expect(appSource).toContain("restart-codex-desktop.sh");
+  });
+
+  it("reports the packaged version reliably before an in-place update is accepted", () => {
+    expect(buildScript).toContain('print "$VERSION" > "$RES/VERSION"');
+    expect(buildScript).toContain("CFBundlePackageType");
+    expect(appSource).toContain('appendingPathComponent("VERSION")');
+    expect(appSource).toContain("bundledVersion()")
+    expect(appSource).not.toContain('?? "0.0.0"');
+    expect(macosUpdater).toContain('backup="$work/Codex Remote.previous"');
+    expect(macosUpdater).toContain('staged_payload="$work/Codex Remote.staged"');
+    expect(macosUpdater).toContain('mv "$staged_app" "$staged_payload"');
+    expect(macosUpdater).toContain('installed_executable="$current_app/Contents/MacOS/Codex Remote"');
+    expect(macosUpdater).toContain('nohup "$installed_executable"');
+    expect(macosUpdater).not.toContain('/usr/bin/open -n "$current_app"');
+    expect(macosUpdater).toContain('/usr/bin/pgrep -x "Codex Remote"');
+    expect(macosUpdater).not.toContain("Codex Remote.backup.app");
   });
 
   it("uses an explicit leading-aligned native settings layout instead of ambiguous centered stacks", () => {
@@ -178,7 +198,7 @@ printf 'sha256 Fingerprint=%s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/.
   });
 
   it("ships executable install and packaging scripts", () => {
-    for (const file of ["install.sh", "scripts/build-macos-app.sh", "scripts/package-macos-dmg.sh", "scripts/create-macos-dmg.sh"]) {
+    for (const file of ["install.sh", "scripts/build-macos-app.sh", "scripts/package-macos-dmg.sh", "scripts/create-macos-dmg.sh", "scripts/restart-codex-desktop.sh"]) {
       expect(statSync(join(root, file)).mode & 0o111).not.toBe(0);
     }
   });
@@ -255,6 +275,17 @@ touch "\${@: -1}"
     expect(agents).toContain("CODEX_REMOTE_BACKGROUND_LAUNCH");
     expect(appSource).toContain('environment["CODEX_REMOTE_BACKGROUND_LAUNCH"] != "1"');
     expect(appSource).toContain("showSettings()\n");
+  });
+
+  it("opens the management window without automatically focusing the private IP field", () => {
+    const showSettings = appSource.match(
+      /@objc private func showSettings\(\)[\s\S]*?\n  \}/,
+    )?.[0] ?? "";
+
+    expect(showSettings).toContain("window.makeKeyAndOrderFront(nil)");
+    expect(showSettings).toContain("window.makeFirstResponder(nil)");
+    expect(showSettings).not.toContain("hostField.becomeFirstResponder");
+    expect(appSource).not.toContain("hostField.refusesFirstResponder = true");
   });
 
   it("ships an in-app rollback updater instead of only opening Releases", () => {

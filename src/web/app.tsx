@@ -35,6 +35,12 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
   const [decisionNotice, setDecisionNotice] = useState<string>();
   const [showNewConversation, setShowNewConversation] = useState(false);
   const [composerExpanded, setComposerExpanded] = useState(false);
+  const [desktopRestart, setDesktopRestart] = useState<{
+    confirmationToken: string;
+    runningThreadCount: number;
+  }>();
+  const [desktopRestartBusy, setDesktopRestartBusy] = useState(false);
+  const [desktopRestartNotice, setDesktopRestartNotice] = useState<string>();
   const threads = codex.state.threadOrder
     .map((id) => codex.state.threads[id])
     .filter(Boolean);
@@ -134,6 +140,32 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     if (!request) return;
     codex.resolveRequest(request.id, resolution.result);
     setDecisionNotice(resolution.decision === "accept" ? "Request approved" : "Request denied");
+  }
+
+  async function prepareDesktopRestart() {
+    setDesktopRestartNotice(undefined);
+    setDesktopRestartBusy(true);
+    try {
+      setDesktopRestart(await codex.prepareDesktopRestart());
+    } catch (cause) {
+      setDesktopRestartNotice(cause instanceof Error ? cause.message : copy.restartFailed);
+    } finally {
+      setDesktopRestartBusy(false);
+    }
+  }
+
+  async function confirmDesktopRestart() {
+    if (!desktopRestart) return;
+    setDesktopRestartBusy(true);
+    try {
+      await codex.confirmDesktopRestart(desktopRestart.confirmationToken);
+      setDesktopRestart(undefined);
+      setDesktopRestartNotice(copy.restartWaiting);
+    } catch (cause) {
+      setDesktopRestartNotice(cause instanceof Error ? cause.message : copy.restartFailed);
+    } finally {
+      setDesktopRestartBusy(false);
+    }
   }
 
   return (
@@ -288,7 +320,13 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               ) : null}
               {codex.selectedThread.desktopMirror && !codex.desktopControlAvailable ? (
                 <div className="desktop-mirror-banner" role="status">
-                  {copy.desktopUnavailable}
+                  <span>{copy.desktopUnavailable}</span>
+                  <button
+                    type="button"
+                    className="desktop-restart-button"
+                    disabled={desktopRestartBusy}
+                    onClick={() => void prepareDesktopRestart()}
+                  >{copy.restartDesktop}</button>
                 </div>
               ) : null}
               <ConversationViewport
@@ -353,6 +391,26 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
           {decisionNotice}
         </div>
       ) : null}
+      {desktopRestartNotice ? (
+        <div className="desktop-restart-notice" role="status">{desktopRestartNotice}</div>
+      ) : null}
+      {desktopRestart ? (
+        <div className="desktop-restart-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !desktopRestartBusy) setDesktopRestart(undefined);
+        }}>
+          <section className="desktop-restart-dialog" role="dialog" aria-modal="true" aria-labelledby="desktop-restart-title">
+            <h2 id="desktop-restart-title">{copy.restartTitle}</h2>
+            <p>{desktopRestart.runningThreadCount > 0
+              ? copy.restartRunning(desktopRestart.runningThreadCount)
+              : copy.restartNoRunning}</p>
+            <p>{copy.restartWarning}</p>
+            <div>
+              <button type="button" className="secondary-button" disabled={desktopRestartBusy} onClick={() => setDesktopRestart(undefined)}>{copy.cancel}</button>
+              <button type="button" className="danger-button" disabled={desktopRestartBusy} onClick={() => void confirmDesktopRestart()}>{desktopRestartBusy ? copy.restarting : copy.confirmRestart}</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {codex.pendingRequests[0] ? (
         <ApprovalSheet request={codex.pendingRequests[0]} onResolve={resolveApproval} />
       ) : null}
@@ -403,6 +461,22 @@ function appCopy(language: MobileLanguage) {
     desktopUnavailable: en
       ? "The Desktop bridge is unavailable. Reading the local snapshot in read-only mode."
       : "Desktop 桥当前不可用；正在读取本地快照，网页为只读查看。",
+    restartDesktop: en ? "Restart Desktop to restore control" : "重启 Desktop 恢复控制",
+    restartTitle: en ? "Restart Codex Desktop" : "重启 Codex Desktop",
+    restartRunning: (count: number) => en
+      ? `${count} conversation${count === 1 ? " is" : "s are"} currently running.`
+      : `当前有 ${count} 个对话正在运行。`,
+    restartNoRunning: en ? "No conversations are currently running." : "当前没有运行中的对话。",
+    restartWarning: en
+      ? "Desktop will quit once and reopen with its loopback bridge enabled. Running work may be interrupted."
+      : "Desktop 将退出一次并带本机桥接参数重新打开，正在运行的工作可能中断。",
+    confirmRestart: en ? "Confirm restart" : "确认重启",
+    restarting: en ? "Restarting…" : "正在重启…",
+    cancel: en ? "Cancel" : "取消",
+    restartWaiting: en
+      ? "Restart requested. Waiting for the Desktop bridge to recover…"
+      : "已请求重启，正在等待 Desktop 桥恢复…",
+    restartFailed: en ? "Desktop restart failed" : "Desktop 重启失败",
     viewCodeChanges: en ? "View code changes" : "查看代码变更",
   };
 }
