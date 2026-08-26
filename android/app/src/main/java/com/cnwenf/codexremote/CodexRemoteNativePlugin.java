@@ -239,8 +239,8 @@ public class CodexRemoteNativePlugin extends Plugin {
         );
         Intent installer = new Intent(Intent.ACTION_VIEW)
             .setDataAndType(contentUri, "application/vnd.android.package-archive")
-            .setClipData(ClipData.newRawUri("Codex Remote update", contentUri))
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        installer.setClipData(ClipData.newRawUri("Codex Remote update", contentUri));
         PackageManager packageManager = getContext().getPackageManager();
         for (ResolveInfo handler : packageManager.queryIntentActivities(installer, PackageManager.MATCH_DEFAULT_ONLY)) {
             getContext().grantUriPermission(
