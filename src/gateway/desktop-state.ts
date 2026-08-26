@@ -10,6 +10,7 @@ const DEFAULT_HISTORY_TURNS = 8;
 const MAX_HISTORY_TURNS = 8;
 const DEFAULT_HISTORY_BYTES = 2 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
+const MAX_HISTORY_SCAN_BYTES = 8 * 1024 * 1024;
 const MAX_ITEM_TEXT = 4_000;
 const MAX_TITLE_TEXT = 80;
 const STATUS_TAIL_BYTES = 512 * 1024;
@@ -567,8 +568,9 @@ function readConversationPage(
   imageStore: ImageUploadStore,
 ) {
   let cursor = before;
-  while (cursor > 0) {
-    const rangeStart = Math.max(0, cursor - maxBytes);
+  const scanFloor = Math.max(0, before - MAX_HISTORY_SCAN_BYTES);
+  while (cursor > scanFloor) {
+    const rangeStart = Math.max(scanFloor, cursor - maxBytes);
     const buffer = readBufferRange(path, rangeStart, cursor - rangeStart);
     let alignedStart = rangeStart;
     let relativeStart = 0;
@@ -592,7 +594,7 @@ function readConversationPage(
     if (turns.length > 0 || pageStart === 0) return { start: pageStart, turns };
     cursor = pageStart < cursor ? pageStart : rangeStart;
   }
-  return { start: 0, turns: [] as ParsedTurn[] };
+  return { start: scanFloor, turns: [] as ParsedTurn[] };
 }
 
 function threadSnapshot(

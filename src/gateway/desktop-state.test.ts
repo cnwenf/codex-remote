@@ -681,4 +681,16 @@ describe("DesktopState", () => {
     expect(result.history).toEqual({ hasMoreBefore: true, beforeCursor: expect.any(String) });
     state.close();
   });
+
+  it("does not scan an entire sparse rollout when the current page has no turns", () => {
+    const { databasePath, rolloutPath } = fixture();
+    truncateSync(rolloutPath, 70 * 1024 * 1024);
+    const state = new DesktopState(databasePath);
+
+    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+    expect(result.thread.turns).toEqual([]);
+    expect(result.history.hasMoreBefore).toBe(true);
+    expect(Number(result.history.beforeCursor)).toBeGreaterThan(0);
+    state.close();
+  });
 });
