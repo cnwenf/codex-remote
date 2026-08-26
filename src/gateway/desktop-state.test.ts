@@ -648,4 +648,37 @@ describe("DesktopState", () => {
     expect((state.request("desktopState/listThreads", {}) as any).data[0].status).toEqual({ type: "idle" });
     state.close();
   });
+
+  it("does not rescan an entire recent rollout when its bounded tail has no status event", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, `${JSON.stringify({
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-large" },
+    })}\n`);
+    truncateSync(rolloutPath, 8 * 1024 * 1024);
+    appendFileSync(rolloutPath, `\n${JSON.stringify({
+      type: "response_item",
+      payload: { type: "message", id: "agent-large", role: "assistant", content: [] },
+    })}\n`);
+    const state = new DesktopState(databasePath);
+
+    expect((state.request("desktopState/listThreads", {}) as any).data[0].status)
+      .toEqual({ type: "unknown" });
+    state.close();
+  });
+
+  it("loads the latest bounded page instead of rejecting a very large rollout", () => {
+    const { databasePath, rolloutPath } = fixture();
+    truncateSync(rolloutPath, 70 * 1024 * 1024);
+    appendFileSync(
+      rolloutPath,
+      `\n${completedTurn(2).map((value) => JSON.stringify(value)).join("\n")}\n`,
+    );
+    const state = new DesktopState(databasePath);
+
+    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+    expect(result.thread.turns.map((turn: any) => turn.id)).toEqual(["turn-2"]);
+    expect(result.history).toEqual({ hasMoreBefore: true, beforeCursor: expect.any(String) });
+    state.close();
+  });
 });

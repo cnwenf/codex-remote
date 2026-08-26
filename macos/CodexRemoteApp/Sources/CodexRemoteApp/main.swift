@@ -1,5 +1,6 @@
 import AppKit
 import CoreImage
+import Darwin
 import Foundation
 
 private func bundledVersion() -> String {
@@ -44,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var bridgeStatusLabel = NSTextField(labelWithString: "Checking…")
   private var restartDesktopButton = NSButton(title: "Restart Desktop", target: nil, action: nil)
   private var bridgeTimer: Timer?
+  private var gatewayHealthPolicy = GatewayHealthPolicy()
   private var toggle = NSButton(checkboxWithTitle: "Remote enabled", target: nil, action: nil)
   private var connectionMode = NSPopUpButton()
   private var pairingImageView = NSImageView()
@@ -83,7 +85,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
-  func applicationWillTerminate(_ notification: Notification) { bridgeTimer?.invalidate(); stopGateway() }
+  func applicationWillTerminate(_ notification: Notification) {
+    bridgeTimer?.invalidate()
+    stopGateway(force: true)
+  }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
     showSettings()
@@ -474,11 +479,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
       let body = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-      let ready = (response as? HTTPURLResponse)?.statusCode == 200 && body?["available"] as? Bool == true
+      let httpResponse = response as? HTTPURLResponse
+      let ready = httpResponse?.statusCode == 200 && body?["available"] as? Bool == true
       Task { @MainActor in
-        self?.bridgeStatusLabel.stringValue = ready ? "Connected" : "Unavailable"
-        self?.bridgeStatusLabel.textColor = ready ? .systemGreen : .systemOrange
-        self?.restartDesktopButton.isEnabled = !ready
+        guard let self else { return }
+        let shouldRestartGateway = self.gatewayHealthPolicy.observe(healthy: httpResponse != nil)
+        if shouldRestartGateway, self.toggle.state == .on, self.gateway?.isRunning == true {
+          self.statusLabel.stringValue = "Gateway stopped responding; reconnecting…"
+          self.restartGateway()
+          return
+        }
+        self.bridgeStatusLabel.stringValue = ready ? "Connected" : "Unavailable"
+        self.bridgeStatusLabel.textColor = ready ? .systemGreen : .systemOrange
+        self.restartDesktopButton.isEnabled = !ready
       }
     }.resume()
   }
@@ -523,7 +536,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     try? version.write(to: support.appendingPathComponent("update-ready"), atomically: true, encoding: .utf8)
   }
-  private func restartGateway() { stopGateway(); if toggle.state == .on { startGateway() } }
+  private func restartGateway() {
+    let oldGateway = gateway
+    stopGateway()
+    guard toggle.state == .on else { return }
+    guard let oldGateway, oldGateway.isRunning else {
+      startGateway()
+      return
+    }
+
+    // A Node process with a blocked event loop can defer its JavaScript SIGTERM
+    // handler indefinitely. Give it a short graceful window, then force it out
+    // before starting the replacement so the PID lock and listening sockets
+    // cannot strand the Remote gateway in an unavailable state.
+    let oldPID = oldGateway.processIdentifier
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { [weak self, weak oldGateway] in
+      if oldGateway?.isRunning == true {
+        Darwin.kill(oldPID, SIGKILL)
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+        guard let self, self.toggle.state == .on, self.gateway == nil else { return }
+        self.startGateway()
+      }
+    }
+  }
   private func refreshAccessAddress() { addressField.stringValue = effectiveRemoteURL() }
   private func startGateway() {
     guard gateway == nil else { return }
@@ -547,13 +583,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       else { statusLabel.stringValue = "Remote is running"; refreshAccessAddress() }
     } catch { statusLabel.stringValue = "Failed: \(error.localizedDescription)" }
   }
-  private func stopGateway() {
+  private func stopGateway(force: Bool = false) {
     serviceGeneration += 1
     gatewayRestart?.cancel(); gatewayRestart = nil
     tunnelRestart?.cancel(); tunnelRestart = nil
     stopTunnel()
     gateway?.terminationHandler = nil
-    gateway?.terminate(); gateway = nil
+    if let gateway {
+      let pid = gateway.processIdentifier
+      gateway.terminate()
+      if force, gateway.isRunning {
+        Darwin.kill(pid, SIGKILL)
+      }
+    }
+    gateway = nil
     statusLabel.stringValue = "Stopped"
     refreshAccessAddress()
   }

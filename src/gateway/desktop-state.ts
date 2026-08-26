@@ -6,7 +6,6 @@ import { ImageUploadStore } from "./image-upload-store";
 
 const MAX_THREAD_IDS = 100;
 const MAX_THREADS = 500;
-const MAX_ROLLOUT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_HISTORY_TURNS = 8;
 const MAX_HISTORY_TURNS = 8;
 const DEFAULT_HISTORY_BYTES = 2 * 1024 * 1024;
@@ -15,8 +14,9 @@ const MAX_ITEM_TEXT = 4_000;
 const MAX_TITLE_TEXT = 80;
 const STATUS_TAIL_BYTES = 512 * 1024;
 const MAX_STATUS_APPEND_BYTES = 4 * 1024 * 1024;
-const RECENT_ROLLOUT_MS = 10 * 60 * 1_000;
-const TODO_TAIL_BYTES = 32 * 1024 * 1024;
+const TODO_TAIL_BYTES = 4 * 1024 * 1024;
+const MAX_SESSION_INDEX_BYTES = 4 * 1024 * 1024;
+const MAX_GLOBAL_STATE_BYTES = 8 * 1024 * 1024;
 
 type ThreadRow = {
   id: string;
@@ -209,24 +209,34 @@ export class DesktopState {
     const latestSettings = this.readRolloutSettings(row.rollout_path);
     const permissionProtocol = latestSettings?.permissionProtocol ?? this.readThreadPermissionProtocol(row);
     const permissionKey = JSON.stringify(permissionProtocol);
-    if (stat.size > MAX_ROLLOUT_BYTES) throw new Error("Desktop thread history is too large");
     const cached = this.rolloutCache.get(threadId);
     if (
       cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size &&
       cached.isPinned === isPinned && cached.title === title &&
       cached.permissionKey === permissionKey
     ) return cached.value;
-    const turns = parseRollout(readFileSync(rolloutPath, "utf8"), this.imageStore);
-    const value = threadSnapshot(
-      row,
-      turns,
-      isPinned,
-      title,
-      permissionProtocol,
-      latestSettings,
-      matchDesktopProject(row.cwd, this.readDesktopProjects()),
-      this.readLatestTodoList(row.rollout_path),
+    const page = readConversationPage(
+      rolloutPath,
+      stat.size,
+      DEFAULT_HISTORY_TURNS,
+      DEFAULT_HISTORY_BYTES,
+      this.imageStore,
     );
+    const value = {
+      ...threadSnapshot(
+        row,
+        page.turns,
+        isPinned,
+        title,
+        permissionProtocol,
+        latestSettings,
+        matchDesktopProject(row.cwd, this.readDesktopProjects()),
+        this.readLatestTodoList(row.rollout_path),
+      ),
+      history: page.start > 0
+        ? { hasMoreBefore: true, beforeCursor: String(page.start) }
+        : { hasMoreBefore: false },
+    };
     this.rolloutCache.set(threadId, {
       mtimeMs: stat.mtimeMs,
       size: stat.size,
@@ -282,7 +292,7 @@ export class DesktopState {
 
   private readPinnedThreadIds(): string[] | undefined {
     try {
-      const value = JSON.parse(readFileSync(this.globalStatePath, "utf8")) as unknown;
+      const value = readBoundedJson(this.globalStatePath, MAX_GLOBAL_STATE_BYTES);
       const pinned = asRecord(value)["pinned-thread-ids"];
       if (!Array.isArray(pinned)) return undefined;
       return [...new Set(pinned.filter((id): id is string => typeof id === "string"))]
@@ -295,7 +305,7 @@ export class DesktopState {
 
   private readDesktopAtomState() {
     try {
-      const value = asRecord(JSON.parse(readFileSync(this.globalStatePath, "utf8")));
+      const value = asRecord(readBoundedJson(this.globalStatePath, MAX_GLOBAL_STATE_BYTES));
       return asRecord(value["electron-persisted-atom-state"]);
     } catch {
       return {};
@@ -304,7 +314,7 @@ export class DesktopState {
 
   private readDesktopProjects(): DesktopProject[] {
     try {
-      const value = asRecord(JSON.parse(readFileSync(this.globalStatePath, "utf8")));
+      const value = asRecord(readBoundedJson(this.globalStatePath, MAX_GLOBAL_STATE_BYTES));
       return Object.entries(asRecord(value["local-projects"])).flatMap(([key, raw]) => {
         const project = asRecord(raw);
         const id = stringValue(project.id) ?? key;
@@ -439,7 +449,10 @@ export class DesktopState {
         this.sessionNamesCache.size === stat.size
       ) return this.sessionNamesCache.names;
       const names = new Map<string, string>();
-      for (const line of readFileSync(this.sessionIndexPath, "utf8").split("\n")) {
+      const length = Math.min(stat.size, MAX_SESSION_INDEX_BYTES);
+      let raw = readFileRange(this.sessionIndexPath, stat.size - length, length);
+      if (stat.size > length) raw = raw.slice(Math.max(0, raw.indexOf("\n") + 1));
+      for (const line of raw.split("\n")) {
         if (!line.trim()) continue;
         let entry: Record<string, unknown>;
         try { entry = asRecord(JSON.parse(line)); } catch { continue; }
@@ -486,10 +499,7 @@ export class DesktopState {
       const tailStatus = statusFromRolloutText(
         readFileRange(rolloutPath, stat.size - length, length),
       );
-      let status = tailStatus;
-      if (Date.now() - stat.mtimeMs < RECENT_ROLLOUT_MS) {
-        if (status === "unknown") status = statusFromRolloutText(readFileSync(rolloutPath, "utf8"));
-      }
+      const status = tailStatus;
       this.statusCache.set(rolloutPath, { mtimeMs: stat.mtimeMs, size: stat.size, status });
       return { type: status };
     } catch {
@@ -501,6 +511,12 @@ export class DesktopState {
 
 function readFileRange(path: string, position: number, length: number) {
   return readBufferRange(path, position, length).toString("utf8");
+}
+
+function readBoundedJson(path: string, maxBytes: number) {
+  const stat = statSync(path);
+  if (stat.size > maxBytes) throw new Error("Desktop state file is too large");
+  return JSON.parse(readFileSync(path, "utf8")) as unknown;
 }
 
 function readBufferRange(path: string, position: number, length: number) {
