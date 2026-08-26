@@ -191,6 +191,11 @@ jobs:
           git commit -m "release: publish Android $GITHUB_REF_NAME"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin HEAD:android-download
+          for asset in Codex-Remote-android-arm64.apk Codex-Remote-android-arm64.apk.sha256; do
+            curl --fail --silent --show-error --retry 5 --retry-all-errors \
+              "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@android-download/${GITHUB_REF_NAME}/${asset}" \
+              >/dev/null
+          done
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

@@ -40,6 +40,7 @@ describe("native installer contract", () => {
     expect(releaseWorkflow).toContain("gh release view");
     expect(releaseWorkflow).toContain("gh release upload");
     expect(releaseWorkflow).toContain("--clobber");
+    expect(releaseWorkflow).toContain("purge.jsdelivr.net");
 
     expect(androidBuild).toContain("ANDROID_RELEASE_KEYSTORE_PATH");
     expect(androidBuild).toContain("signingConfig signingConfigs.release");
