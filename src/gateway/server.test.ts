@@ -250,6 +250,29 @@ describe("gateway server", () => {
     await gateway.stop();
   });
 
+  it("reports the authoritative bridge state independently of the Desktop snapshot", async () => {
+    const transport = new MutableSessionTransport();
+    const gateway = createGateway({ port: 0, token: "test-token", transport });
+    const address = await gateway.start();
+    const readStatus = () => fetch(`http://127.0.0.1:${address.port}/api/bridge/status`, {
+      headers: { authorization: "Bearer test-token" },
+    }).then((response) => response.json());
+
+    await expect(readStatus()).resolves.toEqual({
+      available: false,
+      transport: "desktop-cold",
+      readOnly: true,
+    });
+    transport.live = true;
+    await expect(readStatus()).resolves.toEqual({
+      available: true,
+      transport: "desktop-live",
+      readOnly: false,
+    });
+
+    await gateway.stop();
+  });
+
   it("accepts an authenticated Capacitor WebView controller", async () => {
     const gateway = createGateway({
       port: 0,
@@ -356,6 +379,11 @@ describe("gateway server", () => {
       const body = await bearer.json() as Record<string, unknown>;
       expect(body).toMatchObject({
         version: 1,
+        bridge: {
+          available: true,
+          transport: "desktop-live",
+          readOnly: false,
+        },
         threads: [{ id: "task-1", title: "Active task", status: "running", updatedAt: 42 }],
       });
       expect(JSON.stringify(body)).not.toMatch(/must\/not\/leak|private output/);

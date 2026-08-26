@@ -461,13 +461,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
   @objc private func checkForUpdates() { updateController.checkAndInstall() }
   private func refreshDesktopBridgeStatus() {
-    guard let url = URL(string: "http://127.0.0.1:9229/json/list") else { return }
+    guard let token = try? String(contentsOf: support.appendingPathComponent("token"), encoding: .utf8)
+      .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+      bridgeStatusLabel.stringValue = "Set a login password"
+      bridgeStatusLabel.textColor = .systemOrange
+      restartDesktopButton.isEnabled = true
+      return
+    }
+    guard let url = URL(string: "http://127.0.0.1:4321/api/bridge/status") else { return }
     var request = URLRequest(url: url)
     request.timeoutInterval = 2
-    URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
-      let ready = (response as? HTTPURLResponse)?.statusCode == 200
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+      let body = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+      let ready = (response as? HTTPURLResponse)?.statusCode == 200 && body?["available"] as? Bool == true
       Task { @MainActor in
-        self?.bridgeStatusLabel.stringValue = ready ? "Connected on 127.0.0.1:9229" : "Unavailable"
+        self?.bridgeStatusLabel.stringValue = ready ? "Connected" : "Unavailable"
         self?.bridgeStatusLabel.textColor = ready ? .systemGreen : .systemOrange
         self?.restartDesktopButton.isEnabled = !ready
       }
@@ -499,7 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     process.standardError = FileHandle.nullDevice
     process.terminationHandler = { [weak self] process in
       Task { @MainActor in
-        self?.bridgeStatusLabel.stringValue = process.terminationStatus == 0 ? "Bridge restored" : "Desktop restart failed"
+        self?.bridgeStatusLabel.stringValue = process.terminationStatus == 0 ? "Waiting for gateway bridge…" : "Desktop restart failed"
         self?.restartDesktopButton.isEnabled = process.terminationStatus != 0
         self?.refreshDesktopBridgeStatus()
       }

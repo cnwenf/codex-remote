@@ -123,6 +123,43 @@ describe("App", () => {
     expect(await screen.findByText("已请求重启，正在等待 Desktop 桥恢复…")).toBeVisible();
   });
 
+  it("clears the restart wait state when the Desktop bridge becomes writable again", async () => {
+    const thread = {
+      id: "thread-1",
+      title: "Desktop task",
+      cwd: "/tmp/project",
+      status: "idle",
+      turnOrder: [],
+      turns: {},
+      desktopMirror: true,
+    };
+    const readOnly = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+      desktopStateAvailable: true,
+      desktopControlAvailable: false,
+      transportMode: "desktop-cold",
+      selectedThreadId: thread.id,
+      selectedThread: thread,
+    });
+    useCodexMock.mockReturnValue(readOnly);
+
+    const view = render(<App />);
+    await userEvent.click(screen.getByRole("button", { name: "重启 Desktop 恢复控制" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认重启" }));
+    expect(await screen.findByText("已请求重启，正在等待 Desktop 桥恢复…")).toBeVisible();
+
+    useCodexMock.mockReturnValue(codexState({
+      ...readOnly,
+      desktopControlAvailable: true,
+      transportMode: "desktop-live",
+    }));
+    view.rerender(<App />);
+
+    expect(await screen.findByText("Desktop 桥已恢复")).toBeVisible();
+    expect(screen.queryByText("已请求重启，正在等待 Desktop 桥恢复…")).not.toBeInTheDocument();
+  });
+
   it("keeps mobile browser back swipe inside the app and returns to the conversation list", async () => {
     const thread = {
       id: "thread-1",

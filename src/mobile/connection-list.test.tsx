@@ -16,6 +16,31 @@ describe("ConnectionList", () => {
     expect(actions).toContainElement(within(actions).getByRole("button", { name: "扫码添加" }));
   });
 
+  it("uses balanced header controls and a line-based settings symbol", () => {
+    const { container } = render(
+      <ConnectionList
+        connections={[]}
+        onNew={vi.fn()}
+        onScan={vi.fn()}
+        onOpen={vi.fn()}
+        onEdit={vi.fn()}
+        onRemove={vi.fn()}
+        onSettings={vi.fn()}
+        currentVersion="0.4.1"
+        updateStatus={{ state: "idle" }}
+        onCheckUpdate={vi.fn()}
+        onDownloadUpdate={vi.fn()}
+      />,
+    );
+
+    const settings = screen.getByRole("button", { name: "设置" });
+    const update = screen.getByRole("button", { name: "检查更新" });
+    expect(settings).toHaveClass("mobile-header-control");
+    expect(update).toHaveClass("mobile-header-control");
+    expect(settings.querySelector('svg[data-icon="settings-sliders"]')).not.toBeNull();
+    expect(container.querySelector(".mobile-settings-button > span")).not.toBeInTheDocument();
+  });
+
   it("offers a first connection and opens or edits an existing connection", async () => {
     const onNew = vi.fn();
     const onOpen = vi.fn();
@@ -85,15 +110,22 @@ describe("ConnectionList", () => {
     });
 
     rerender(<ConnectionList {...common} updateStatus={{ state: "downloading", latestVersion: "0.4.2", progress: 43 }} />);
-    expect(screen.getByRole("progressbar", { name: "正在下载 0.4.2" })).toHaveAttribute("aria-valuenow", "43");
+    const progress = screen.getByRole("progressbar", { name: "正在下载 0.4.2" });
+    expect(progress).toHaveAttribute("aria-valuenow", "43");
+    expect(progress).toHaveClass("mobile-header-progress-ring");
+    expect(progress).toHaveStyle({ "--download-progress": "154.8deg" });
     expect(screen.getByText("43%")).toBeVisible();
+
+    rerender(<ConnectionList {...common} updateStatus={{ state: "installing", latestVersion: "0.4.2" }} />);
+    expect(screen.getByRole("status", { name: /准备安装/ })).toHaveClass("is-complete");
+    expect(screen.getByText("✓")).toBeVisible();
 
     rerender(<ConnectionList {...common} updateStatus={{ state: "current" }} />);
     expect(screen.getByText("已是最新版本")).toBeVisible();
 
     rerender(<ConnectionList {...common} updateStatus={{ state: "error", message: "安装包校验失败" }} />);
     expect(screen.getByRole("status")).toHaveTextContent("安装包校验失败");
-    expect(screen.getByRole("button", { name: "检查更新" })).toHaveTextContent("重试更新");
+    expect(screen.getByRole("button", { name: "重试更新" })).toHaveTextContent("!");
   });
 
   it("shows pairing progress and failure in the connection list", () => {

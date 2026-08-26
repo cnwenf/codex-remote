@@ -529,7 +529,6 @@ function isCodexRenderer(value: unknown): value is CdpTarget {
     return false;
   }
   const url = typeof target.url === "string" ? target.url : "";
-  const title = typeof target.title === "string" ? target.title : "";
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -541,7 +540,13 @@ function isCodexRenderer(value: unknown): value is CdpTarget {
       decodeURIComponent(parsed.pathname),
     );
   }
-  return parsed.protocol === "app:" && /\bcodex\b/i.test(title);
+  if (parsed.protocol !== "app:") return false;
+  // Recent Desktop releases title the renderer "ChatGPT" instead of
+  // "Codex". The stable discriminator is the main app route itself. Do not
+  // attach to auxiliary app:// pages such as the avatar overlay.
+  return parsed.hostname === "-" &&
+    parsed.pathname === "/index.html" &&
+    !parsed.searchParams.has("initialRoute");
 }
 
 function isCodexAuxiliaryRenderer(value: unknown): value is CdpTarget {

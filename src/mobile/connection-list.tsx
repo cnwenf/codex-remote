@@ -35,8 +35,12 @@ export function ConnectionList({
     <main className="mobile-connections">
       <header className="mobile-remote-header">
         {onSettings ? (
-          <button type="button" className="mobile-settings-button" aria-label={copy.settings} onClick={onSettings}>
-            <span aria-hidden="true" />
+          <button type="button" className="mobile-header-control mobile-settings-button" aria-label={copy.settings} onClick={onSettings}>
+            <svg data-icon="settings-sliders" aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6" />
+              <circle cx="14" cy="7" r="2" />
+              <circle cx="7" cy="17" r="2" />
+            </svg>
           </button>
         ) : <span className="mobile-header-spacer" aria-hidden="true" />}
         <h1>Remote</h1>
@@ -44,7 +48,7 @@ export function ConnectionList({
           updateStatus.state === "available" ? (
             <button
               type="button"
-              className="mobile-header-update"
+              className="mobile-header-control mobile-header-update is-available"
               aria-label={copy.downloadVersion(updateStatus.latestVersion)}
               onClick={() => onDownloadUpdate({
                 latestVersion: updateStatus.latestVersion,
@@ -52,39 +56,42 @@ export function ConnectionList({
                 checksumUrl: updateStatus.checksumUrl,
               })}
             >
-              <small>v{currentVersion}</small>
-              <strong>{copy.downloadVersion(updateStatus.latestVersion)}</strong>
+              <span className="mobile-header-control-label">v{updateStatus.latestVersion}</span>
             </button>
           ) : updateStatus.state === "downloading" ? (
             <div
-              className="mobile-header-update mobile-header-download-progress"
+              className="mobile-header-control mobile-header-update mobile-header-progress-ring"
               role="progressbar"
               aria-label={copy.downloadingVersion(updateStatus.latestVersion)}
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={updateStatus.progress}
+              style={{ "--download-progress": `${updateStatus.progress * 3.6}deg` } as React.CSSProperties}
             >
-              <small>v{updateStatus.latestVersion}</small>
-              <strong>{updateStatus.progress}%</strong>
-              <span style={{ "--download-progress": `${updateStatus.progress}%` } as React.CSSProperties} />
+              <span className="mobile-header-control-label">{updateStatus.progress}%</span>
             </div>
           ) : updateStatus.state === "installing" ? (
-            <div className="mobile-header-update" aria-live="polite">
-              <small>v{updateStatus.latestVersion}</small>
-              <strong>{copy.preparingInstall}</strong>
+            <div
+              className="mobile-header-control mobile-header-update is-complete"
+              role="status"
+              aria-label={copy.preparingInstall}
+              aria-live="polite"
+            >
+              <span className="mobile-header-complete" aria-hidden="true">✓</span>
             </div>
           ) : (
             <button
               type="button"
-              className="mobile-header-update"
-              aria-label={updateStatus.state === "checking" ? copy.checking : copy.checkUpdate}
+              className="mobile-header-control mobile-header-update"
+              aria-label={updateStatus.state === "checking"
+                ? copy.checking
+                : updateStatus.state === "error" ? copy.retryUpdate : copy.checkUpdate}
               disabled={updateStatus.state === "checking"}
               onClick={onCheckUpdate}
             >
-              <small>v{currentVersion}</small>
-              <strong>{updateStatus.state === "checking"
-                ? copy.checking
-                : updateStatus.state === "error" ? copy.retryUpdate : copy.checkUpdate}</strong>
+              <span className="mobile-header-control-label">{updateStatus.state === "checking"
+                ? "…"
+                : updateStatus.state === "error" ? "!" : `v${currentVersion}`}</span>
             </button>
           )
         ) : <span className="mobile-header-spacer" aria-hidden="true" />}

@@ -486,21 +486,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .native-connect-error p { color: var(--ink-muted); line-height: 1.5; }
 .native-connect-error > div { display: flex; justify-content: flex-end; gap: 8px; }
 .mobile-connections, .mobile-connection-editor, .mobile-settings { min-height: 100dvh; color: var(--ink); background: var(--canvas); }
-.mobile-remote-header { width: min(calc(100% - 36px), 680px); min-height: calc(76px + env(safe-area-inset-top)); display: grid; grid-template-columns: 104px minmax(0, 1fr) 104px; align-items: end; margin: 0 auto; padding: env(safe-area-inset-top) 0 8px; text-align: center; }
+.mobile-remote-header { width: min(calc(100% - 36px), 680px); min-height: calc(76px + env(safe-area-inset-top)); display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px; align-items: end; margin: 0 auto; padding: env(safe-area-inset-top) 0 8px; text-align: center; }
 .mobile-remote-header h1 { align-self: center; margin: 0; font-size: 1.3rem; letter-spacing: -0.03em; }
-.mobile-header-spacer { width: 104px; height: 52px; }
-.mobile-settings-button { width: 48px; height: 48px; display: grid; place-items: center; align-self: center; justify-self: start; padding: 0; border: 1px solid var(--line); border-radius: 999px; background: var(--floating-surface); }
-.mobile-settings-button > span { position: relative; width: 18px; height: 18px; border: 2px solid currentColor; border-radius: 999px; }
-.mobile-settings-button > span::before { content: ""; position: absolute; inset: 4px; border-radius: 999px; background: currentColor; }
-.mobile-settings-button > span::after { content: ""; position: absolute; top: -5px; right: 5px; bottom: -5px; left: 5px; border-top: 3px solid currentColor; border-bottom: 3px solid currentColor; transform: rotate(45deg); }
-.mobile-header-update { width: 104px; min-height: 48px; display: grid; align-content: center; gap: 1px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--floating-surface); font: inherit; text-align: center; }
-.mobile-header-update small { color: var(--ink-muted); font-size: 0.62rem; font-weight: 650; line-height: 1.1; }
-.mobile-header-update strong { overflow: hidden; font-size: 0.68rem; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-header-spacer { width: 48px; height: 48px; }
+.mobile-header-control { width: 48px; height: 48px; min-width: 48px; min-height: 48px; display: grid; place-items: center; align-self: center; padding: 0; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--floating-surface); font: 680 0.62rem/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: center; }
+.mobile-settings-button { justify-self: start; }
+.mobile-settings-button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.mobile-header-update { position: relative; justify-self: end; }
+.mobile-header-control-label { position: relative; z-index: 1; display: block; max-width: 40px; overflow: hidden; text-overflow: clip; white-space: nowrap; }
+.mobile-header-update.is-available { border-color: color-mix(in oklch, var(--action) 55%, var(--line)); color: var(--action); }
 .mobile-header-update:disabled { cursor: wait; opacity: 0.62; }
 .mobile-update-feedback { width: min(calc(100% - 36px), 680px); margin: 4px auto -8px; color: var(--ink-muted); font-size: 0.72rem; text-align: right; }
 .mobile-update-error { color: var(--danger); }
-.mobile-header-download-progress { position: relative; overflow: hidden; }
-.mobile-header-download-progress > span { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; background: linear-gradient(90deg, var(--accent) var(--download-progress), transparent var(--download-progress)); }
+.mobile-header-progress-ring { border: 0; background: conic-gradient(var(--action) 0 var(--download-progress), var(--surface-muted) var(--download-progress) 360deg); }
+.mobile-header-progress-ring::before { content: ""; position: absolute; inset: 3px; border: 1px solid var(--line); border-radius: inherit; background: var(--floating-surface); }
+.mobile-header-update.is-complete { border-color: color-mix(in oklch, var(--success) 65%, var(--line)); color: var(--success); }
+.mobile-header-complete { font-size: 1rem; font-weight: 760; }
 .mobile-remote-actions { width: min(calc(100% - 36px), 680px); display: flex; gap: 10px; margin: 18px auto 0; overflow-x: auto; scrollbar-width: none; }
 .mobile-remote-actions::-webkit-scrollbar { display: none; }
 .connection-scan-button, .connection-new-button { min-height: 46px; display: inline-flex; align-items: center; justify-content: center; gap: 9px; padding: 0 16px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--surface-muted); font: inherit; font-size: 0.8rem; font-weight: 680; white-space: nowrap; }

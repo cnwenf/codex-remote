@@ -90,6 +90,17 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     return () => window.removeEventListener("popstate", handleBack);
   }, [codex.clearSelection]);
 
+  useEffect(() => {
+    if (!codex.desktopControlAvailable || desktopRestartNotice !== copy.restartWaiting) return;
+    setDesktopRestartNotice(copy.restartRestored);
+  }, [codex.desktopControlAvailable, copy.restartRestored, copy.restartWaiting, desktopRestartNotice]);
+
+  useEffect(() => {
+    if (desktopRestartNotice !== copy.restartRestored) return;
+    const timer = window.setTimeout(() => setDesktopRestartNotice(undefined), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [copy.restartRestored, desktopRestartNotice]);
+
   function pushView(view: "thread" | "new", threadId?: string) {
     if (asRemoteView(window.history.state) === view &&
         (view !== "thread" || historyRecord(window.history.state).codexRemoteThreadId === threadId)) return;
@@ -476,6 +487,7 @@ function appCopy(language: MobileLanguage) {
     restartWaiting: en
       ? "Restart requested. Waiting for the Desktop bridge to recover…"
       : "已请求重启，正在等待 Desktop 桥恢复…",
+    restartRestored: en ? "Desktop bridge restored" : "Desktop 桥已恢复",
     restartFailed: en ? "Desktop restart failed" : "Desktop 重启失败",
     viewCodeChanges: en ? "View code changes" : "查看代码变更",
   };

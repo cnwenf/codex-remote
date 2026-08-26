@@ -140,6 +140,10 @@ export function createGateway(options: GatewayOptions) {
       void handleMobileStatus(request, response);
       return;
     }
+    if (pathname === "/api/bridge/status") {
+      handleBridgeStatus(request, response);
+      return;
+    }
     if (pathname === "/api/mobile/pairing") {
       void handlePairingCreate(request, response);
       return;
@@ -764,14 +768,30 @@ export function createGateway(options: GatewayOptions) {
         });
       }
       response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      const bridge = bridgeStatus(options.transport.getSessionInfo?.());
       response.end(JSON.stringify({
         version: desktop.version,
         generatedAt,
+        bridge,
         threads: [...threadsById.values()].slice(0, 100),
       }));
     } catch {
       response.writeHead(503).end();
     }
+  }
+
+  function handleBridgeStatus(request: IncomingMessage, response: ServerResponse) {
+    response.setHeader("Cache-Control", "no-store");
+    if (request.method !== "GET") {
+      response.writeHead(405, { Allow: "GET" }).end();
+      return;
+    }
+    if (!isRequestAuthorized(request, options.token, sessionCredential)) {
+      response.writeHead(401).end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify(bridgeStatus(options.transport.getSessionInfo?.())));
   }
 
   async function handlePairingCreate(request: IncomingMessage, response: ServerResponse) {
@@ -1024,10 +1044,21 @@ function setSecurityHeaders(response: ServerResponse) {
 
 function isMobileApiPath(pathname: string) {
   return pathname === "/api/mobile/status" ||
+    pathname === "/api/bridge/status" ||
     pathname === "/api/mobile/pairing" ||
     pathname === "/api/mobile/pair" ||
     pathname === "/api/images" ||
     /^\/api\/images\/[0-9a-f-]+$/i.test(pathname);
+}
+
+function bridgeStatus(sessionInfo: ReturnType<NonNullable<CodexTransport["getSessionInfo"]>> | undefined) {
+  const transport = sessionInfo?.transport ?? "unknown";
+  const readOnly = sessionInfo?.readOnly !== false;
+  return {
+    available: transport === "desktop-live" && !readOnly,
+    transport,
+    readOnly,
+  };
 }
 
 function isRequestAuthorized(request: IncomingMessage, token: string, sessionCredential: string) {

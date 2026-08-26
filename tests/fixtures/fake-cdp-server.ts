@@ -49,8 +49,8 @@ export class FakeCdpServer {
         {
           id: "codex",
           type: "page",
-          title: "Codex",
-          url: "file:///Applications/ChatGPT.app/Contents/Resources/app.asar/webview/index.html",
+          title: "ChatGPT",
+          url: "app://-/index.html",
           webSocketDebuggerUrl: `ws://127.0.0.1:${address.port}/devtools/page/codex`,
         },
         {

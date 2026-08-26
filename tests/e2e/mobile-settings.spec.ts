@@ -27,4 +27,21 @@ test.describe("native mobile settings preview", () => {
     await page.getByRole("button", { name: "Back" }).click();
     await expect(page.getByRole("heading", { name: "Choose a Mac" })).toBeVisible();
   });
+
+  test("keeps settings and update controls balanced and clickable", async ({ page }) => {
+    const settings = page.getByRole("button", { name: "设置" });
+    const update = page.getByRole("button", { name: "检查更新" });
+    const [settingsBox, updateBox] = await Promise.all([settings.boundingBox(), update.boundingBox()]);
+
+    expect(settingsBox).not.toBeNull();
+    expect(updateBox).not.toBeNull();
+    expect(settingsBox!.width).toBeCloseTo(updateBox!.width, 0);
+    expect(settingsBox!.height).toBeCloseTo(updateBox!.height, 0);
+    expect(settingsBox!.width).toBeCloseTo(48, 0);
+    expect(updateBox!.height).toBeCloseTo(48, 0);
+
+    await update.click();
+    await settings.click();
+    await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
+  });
 });
