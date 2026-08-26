@@ -174,6 +174,23 @@ jobs:
         with:
           path: release-assets
           merge-multiple: true
+      - name: Publish Android download through GitHub Raw
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          publish_dir="$(mktemp -d)"
+          mkdir -p "$publish_dir/$GITHUB_REF_NAME"
+          cp release-assets/Codex-Remote-android-arm64.apk "$publish_dir/$GITHUB_REF_NAME/"
+          cp release-assets/Codex-Remote-android-arm64.apk.sha256 "$publish_dir/$GITHUB_REF_NAME/"
+          cd "$publish_dir"
+          git init
+          git checkout --orphan android-download
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$GITHUB_REF_NAME"
+          git commit -m "release: publish Android $GITHUB_REF_NAME"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:android-download
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

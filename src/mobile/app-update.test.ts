@@ -7,8 +7,8 @@ describe("findMobileUpdate", () => {
       tag_name: "v0.4.2",
       html_url: "https://github.com/cnwenf/codex-remote/releases/tag/v0.4.2",
       assets: [
-        { name: "Codex-Remote-android-arm64.apk", browser_download_url: "https://example.test/app.apk" },
-        { name: "Codex-Remote-android-arm64.apk.sha256", browser_download_url: "https://example.test/app.apk.sha256" },
+        { name: "Codex-Remote-android-arm64.apk", browser_download_url: "https://github.com/example/app.apk" },
+        { name: "Codex-Remote-android-arm64.apk.sha256", browser_download_url: "https://github.com/example/app.apk.sha256" },
         { name: "Codex-Remote-iOS-unsigned.ipa", browser_download_url: "https://example.test/app.ipa" },
       ],
     }), { status: 200 }));
@@ -16,8 +16,8 @@ describe("findMobileUpdate", () => {
     await expect(findMobileUpdate("0.4.1", "android", fetcher)).resolves.toEqual({
       state: "available",
       latestVersion: "0.4.2",
-      downloadUrl: "https://example.test/app.apk",
-      checksumUrl: "https://example.test/app.apk.sha256",
+      downloadUrl: "https://raw.githubusercontent.com/cnwenf/codex-remote/android-download/v0.4.2/Codex-Remote-android-arm64.apk",
+      checksumUrl: "https://raw.githubusercontent.com/cnwenf/codex-remote/android-download/v0.4.2/Codex-Remote-android-arm64.apk.sha256",
     });
   });
 

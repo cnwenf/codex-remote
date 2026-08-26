@@ -111,7 +111,7 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
         guard
             let value = call.getString("url"),
             let url = URL(string: value),
-            url.scheme?.lowercased() == "https"
+            ["http", "https"].contains(url.scheme?.lowercased() ?? "")
         else { call.reject("external-url-insecure"); return }
         DispatchQueue.main.async {
             UIApplication.shared.open(url, options: [:]) { opened in

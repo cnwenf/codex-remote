@@ -5,7 +5,15 @@ import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-st
 
 type ImageRequest = { baseUrl: string; token: string };
 
-export function Timeline({ thread, imageRequest }: { thread?: CodexThread; imageRequest?: ImageRequest }) {
+export function Timeline({
+  thread,
+  imageRequest,
+  onOpenExternalUrl,
+}: {
+  thread?: CodexThread;
+  imageRequest?: ImageRequest;
+  onOpenExternalUrl?: (url: string) => void;
+}) {
   if (!thread) {
     return (
       <div className="empty-thread">
@@ -39,6 +47,7 @@ export function Timeline({ thread, imageRequest }: { thread?: CodexThread; image
             key={turnId}
             turn={turn}
             imageRequest={imageRequest}
+            onOpenExternalUrl={onOpenExternalUrl}
             showTyping={thread.status === "running" && turnId === typingTurnId}
           />
         ) : null;
@@ -51,10 +60,12 @@ function TurnView({
   turn,
   imageRequest,
   showTyping,
+  onOpenExternalUrl,
 }: {
   turn: CodexTurn;
   imageRequest?: ImageRequest;
   showTyping: boolean;
+  onOpenExternalUrl?: (url: string) => void;
 }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const segments = segmentItems(items);
@@ -86,7 +97,7 @@ function TurnView({
           return (
             <article key={item.id} className="message message-user">
               <span className="message-author">你</span>
-              <MarkdownContent text={item.text || "等待输入…"} />
+              <MarkdownContent text={item.text || "等待输入…"} onOpenExternalUrl={onOpenExternalUrl} />
               {item.imageIds?.length ? (
                 <div className="message-images">
                   {item.imageIds.map((imageId, index) => (
@@ -105,7 +116,7 @@ function TurnView({
         return (
           <article key={item.id} className="message message-agent">
             <span className="message-author">Codex</span>
-            <MarkdownContent text={item.text || "等待输出…"} />
+            <MarkdownContent text={item.text || "等待输出…"} onOpenExternalUrl={onOpenExternalUrl} />
           </article>
         );
       })}
@@ -217,15 +228,29 @@ export function TodoListDock({ todoList }: { todoList?: CodexThread["todoList"] 
   );
 }
 
-function MarkdownContent({ text }: { text: string }) {
+function MarkdownContent({ text, onOpenExternalUrl }: { text: string; onOpenExternalUrl?: (url: string) => void }) {
   return (
     <div className="markdown-body">
       <Markdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ children, ...props }) => (
-            <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>
-          ),
+          a: ({ children, href, ...props }) => {
+            const external = href && /^https?:\/\//i.test(href);
+            return (
+              <a
+                {...props}
+                href={href}
+                target="_blank"
+                rel="noreferrer noopener"
+                onClick={external && onOpenExternalUrl ? (event) => {
+                  event.preventDefault();
+                  onOpenExternalUrl(href);
+                } : undefined}
+              >
+                {children}
+              </a>
+            );
+          },
         }}
       >
         {text}

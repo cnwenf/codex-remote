@@ -23,6 +23,7 @@ export type NativeRemoteSession = {
   language?: MobileLanguage;
   messageSendMode?: MobileMessageSendMode;
   onManageConnections(): void;
+  onOpenExternalUrl?(url: string): void;
 };
 
 export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
@@ -299,6 +300,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 <Timeline
                   thread={codex.selectedThread}
                   imageRequest={remote ? { baseUrl: remote.baseUrl, token: remote.token } : undefined}
+                  onOpenExternalUrl={remote?.onOpenExternalUrl}
                 />
                 {codex.selectedThread.diff ? (
                   <details className="diff-panel">

@@ -155,6 +155,9 @@ export function MobileShell({
         language: settings.language,
         messageSendMode: settings.messageSendMode,
         onManageConnections: () => setView("connections"),
+        onOpenExternalUrl: (url) => {
+          void CodexRemoteNative.openExternalUrl({ url }).catch(() => undefined);
+        },
       });
       setView("remote");
       await ensureNotificationPermission();

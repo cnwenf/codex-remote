@@ -20,6 +20,7 @@ type GitHubRelease = {
 };
 
 const latestReleaseUrl = "https://api.github.com/repos/cnwenf/codex-remote/releases/latest";
+const androidDownloadRoot = "https://raw.githubusercontent.com/cnwenf/codex-remote/android-download";
 
 export async function findMobileUpdate(
   currentVersion: string,
@@ -47,11 +48,18 @@ export async function findMobileUpdate(
     : typeof release.html_url === "string" ? release.html_url : "";
   if (!downloadUrl.startsWith("https://")) throw new Error("update-download-invalid");
   if (platform === "android") {
-    const checksumUrl = typeof checksumAsset?.browser_download_url === "string"
-      ? checksumAsset.browser_download_url
-      : "";
-    if (!checksumUrl.startsWith("https://")) throw new Error("update-checksum-invalid");
-    return { state: "available", latestVersion, downloadUrl, checksumUrl };
+    if (typeof checksumAsset?.browser_download_url !== "string") {
+      throw new Error("update-checksum-invalid");
+    }
+    const releaseTag = typeof release.tag_name === "string" ? release.tag_name : `v${latestVersion}`;
+    const assetName = typeof asset?.name === "string" ? asset.name : "";
+    if (!assetName) throw new Error("update-download-invalid");
+    return {
+      state: "available",
+      latestVersion,
+      downloadUrl: `${androidDownloadRoot}/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}`,
+      checksumUrl: `${androidDownloadRoot}/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}.sha256`,
+    };
   }
   return { state: "available", latestVersion, downloadUrl };
 }

@@ -35,11 +35,20 @@ describe("native installer contract", () => {
     expect(releaseWorkflow).toContain("verify-android-signing.sh");
     expect(releaseWorkflow).not.toContain("assembleDebug");
     expect(releaseWorkflow).not.toContain("app-debug.apk");
+    expect(releaseWorkflow).toContain("android-download");
+    expect(releaseWorkflow).toContain("Codex-Remote-android-arm64.apk.sha256");
 
     expect(androidBuild).toContain("ANDROID_RELEASE_KEYSTORE_PATH");
     expect(androidBuild).toContain("signingConfig signingConfigs.release");
     expect(signingVerifier).toContain("verify --print-certs");
     expect(signingVerifier).toContain("android/release-signing-cert.sha256");
+  });
+
+  it("grants the system package installer access to the verified APK on OEM Android builds", () => {
+    const nativePlugin = readFileSync(join(root, "android/app/src/main/java/com/cnwenf/codexremote/CodexRemoteNativePlugin.java"), "utf8");
+    expect(nativePlugin).toContain("ClipData.newRawUri");
+    expect(nativePlugin).toContain("queryIntentActivities");
+    expect(nativePlugin).toContain("grantUriPermission");
   });
 
   it("accepts only the pinned Android signing certificate", () => {

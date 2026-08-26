@@ -204,7 +204,7 @@ lines.on("line", (line) => {
         threadId: "fixture-thread",
         turnId: "fixture-live-turn",
         itemId: "fixture-agent",
-        delta: "## Checks complete\n\n- All tests passed\n- Markdown rendered",
+        delta: "## Checks complete\n\n- All tests passed\n- Markdown rendered\n- [Open fixture status](https://example.com/status)",
       },
     });
     send({

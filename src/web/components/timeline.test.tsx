@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CodexThread } from "../../protocol/thread-store";
 import { Timeline, TodoListDock } from "./timeline";
 
@@ -268,6 +268,36 @@ describe("Timeline", () => {
     expect(container.querySelector(".markdown-body ul")).toHaveTextContent(/第一项\s*第二项/);
     expect(container.querySelector("code")).toHaveTextContent("pnpm test");
     expect(container.querySelector("script")).toBeNull();
+  });
+
+  it("routes conversation web links through the native browser callback", async () => {
+    const openExternalUrl = vi.fn();
+    const thread: CodexThread = {
+      id: "native-link",
+      title: "Native link",
+      status: "idle",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          itemOrder: ["agent"],
+          items: {
+            agent: {
+              id: "agent",
+              type: "agentMessage",
+              text: "打开 [内网页面](http://192.168.1.20:8080/status)",
+            },
+          },
+        },
+      },
+    };
+
+    render(<Timeline thread={thread} onOpenExternalUrl={openExternalUrl} />);
+    await userEvent.click(screen.getByRole("link", { name: "内网页面" }));
+
+    expect(openExternalUrl).toHaveBeenCalledOnce();
+    expect(openExternalUrl).toHaveBeenCalledWith("http://192.168.1.20:8080/status");
   });
 
   it("renders authenticated uploaded images in user messages", () => {

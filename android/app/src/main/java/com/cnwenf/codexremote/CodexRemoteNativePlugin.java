@@ -1,6 +1,9 @@
 package com.cnwenf.codexremote;
 
+import android.content.ClipData;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -133,9 +136,15 @@ public class CodexRemoteNativePlugin extends Plugin {
         String value = call.getString("url");
         if (value == null || value.isEmpty()) { call.reject("external-url-required"); return; }
         Uri uri = Uri.parse(value);
-        if (!"https".equalsIgnoreCase(uri.getScheme())) { call.reject("external-url-insecure"); return; }
+        if (!ExternalUrlSupport.isAllowedWebUrl(value)) {
+            call.reject("external-url-insecure"); return;
+        }
         try {
-            getActivity().startActivity(new Intent(Intent.ACTION_VIEW, uri));
+            Intent browser = new Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE);
+            if (browser.resolveActivity(getContext().getPackageManager()) == null) {
+                call.reject("external-url-open-failed"); return;
+            }
+            getActivity().startActivity(browser);
             call.resolve();
         } catch (Exception error) {
             call.reject("external-url-open-failed", error);
@@ -230,7 +239,16 @@ public class CodexRemoteNativePlugin extends Plugin {
         );
         Intent installer = new Intent(Intent.ACTION_VIEW)
             .setDataAndType(contentUri, "application/vnd.android.package-archive")
+            .setClipData(ClipData.newRawUri("Codex Remote update", contentUri))
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        PackageManager packageManager = getContext().getPackageManager();
+        for (ResolveInfo handler : packageManager.queryIntentActivities(installer, PackageManager.MATCH_DEFAULT_ONLY)) {
+            getContext().grantUriPermission(
+                handler.activityInfo.packageName,
+                contentUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            );
+        }
         getActivity().startActivity(installer);
         updateInProgress.set(false);
         call.resolve();
