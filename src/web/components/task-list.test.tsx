@@ -15,6 +15,15 @@ const thread: CodexThread = {
 };
 
 describe("TaskList", () => {
+  it("renders the mobile conversation navigation in English", () => {
+    render(<TaskList threads={[thread]} onSelect={vi.fn()} onNew={vi.fn()} language="en" />);
+
+    expect(screen.getByRole("heading", { name: "Pinned" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Projects" })).toBeVisible();
+    expect(screen.getByRole("searchbox")).toHaveAttribute("placeholder", "Search chats");
+    expect(screen.getByRole("button", { name: "New conversation" })).toBeVisible();
+  });
+
   it("uses the mobile Remote navigation shell with bottom actions", () => {
     const { container } = render(<TaskList threads={[thread]} onSelect={vi.fn()} onNew={vi.fn()} />);
 

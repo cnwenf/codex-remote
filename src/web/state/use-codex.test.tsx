@@ -920,6 +920,30 @@ describe("useCodex", () => {
     fake.serverSend({ type: "rpc", payload: { id: promoteRequest.id, result: { messageId: "queued-1" } } });
     await act(() => promoting);
     expect(result.current.selectedQueuedMessages).toEqual([]);
+
+    let steering: Promise<void>;
+    act(() => { steering = result.current.sendInstruction("Guide immediately", [], "steer"); });
+    const steeringQueueRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(steeringQueueRequest).toMatchObject({
+      method: "desktop/queue/add",
+      params: { threadId: "t1", text: "Guide immediately" },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: steeringQueueRequest.id,
+        result: { message: { id: "queued-steer-1", text: "Guide immediately", createdAt: 2 } },
+      },
+    });
+    await waitFor(() => expect(JSON.parse(fake.sent.at(-1) as string).payload.method).toBe("desktop/queue/steer"));
+    const immediateSteerRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(immediateSteerRequest).toMatchObject({
+      method: "desktop/queue/steer",
+      params: { threadId: "t1", messageId: "queued-steer-1", expectedTurnId: "turn-1" },
+    });
+    fake.serverSend({ type: "rpc", payload: { id: immediateSteerRequest.id, result: { messageId: "queued-steer-1" } } });
+    await act(() => steering);
+    expect(result.current.selectedQueuedMessages).toEqual([]);
     vi.unstubAllGlobals();
   });
 

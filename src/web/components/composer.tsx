@@ -10,6 +10,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import type { ModelOption, PermissionOption } from "../state/use-codex";
+import type { MobileLanguage } from "../../mobile/settings-store";
 
 export type ComposerSettings = {
   model?: string;
@@ -32,6 +33,7 @@ type ComposerProps = {
   onSettingsChange?: (settings: ComposerSettings) => void;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
+  language?: MobileLanguage;
 };
 
 export function Composer({
@@ -49,7 +51,10 @@ export function Composer({
   onSettingsChange,
   expanded,
   onExpandedChange,
+  language,
 }: ComposerProps) {
+  const english = language === "en";
+  const chinese = language === "zh-CN";
   const [text, setText] = useState(() => readDraft(draftKey));
   const activeDraftKey = useRef(draftKey);
   const [busy, setBusy] = useState(false);
@@ -171,8 +176,10 @@ export function Composer({
         onPaste={handlePaste}
         onFocus={() => setExpanded(true)}
         placeholder={running
-          ? runningMode === "queue" ? "发送后排队，当前任务完成后执行" : "Add guidance while Codex works"
-          : "What should Codex do next?"}
+          ? runningMode === "queue"
+            ? english ? "Queue until the current turn finishes" : "发送后排队，当前任务完成后执行"
+            : chinese ? "引导当前轮次" : "Add guidance while Codex works"
+          : chinese ? "输入下一条消息" : "What should Codex do next?"}
         rows={isExpanded ? 3 : 1}
         disabled={disabled}
       />
@@ -296,7 +303,11 @@ export function Composer({
           type="submit"
           disabled={(!text.trim() && images.length === 0) || busy || disabled}
         >
-          {busy ? "Working…" : running ? runningMode === "queue" ? "排队" : "Steer" : "Send"}
+          {busy
+            ? chinese ? "发送中…" : "Working…"
+            : running
+              ? runningMode === "queue" ? english ? "Queue" : "排队" : chinese ? "引导" : "Steer"
+              : chinese ? "发送" : "Send"}
         </button>
       </div>
       {isExpanded && error ? <p className="inline-error" role="alert">{error}</p> : null}

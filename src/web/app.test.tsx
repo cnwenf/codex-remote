@@ -142,4 +142,39 @@ describe("App", () => {
     expect(connection.querySelector(".remote-connection-indicator.connection-ready")).not.toBeNull();
     expect(document.querySelector(".desktop-thread-context")).toBeNull();
   });
+
+  it("uses the mobile default running-message mode for the composer", async () => {
+    const thread = {
+      id: "thread-1",
+      title: "Running task",
+      status: "running",
+      turnOrder: ["turn-1"],
+      turns: { "turn-1": { id: "turn-1", status: "inProgress", itemOrder: [], items: {} } },
+      desktopMirror: true,
+    };
+    const value = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+      desktopControlAvailable: true,
+      selectedThreadId: thread.id,
+      selectedThread: thread,
+    });
+    useCodexMock.mockReturnValue(value);
+
+    render(<App remote={{
+      connectionId: "mac-1",
+      name: "macmini",
+      baseUrl: "http://192.168.1.10:4321",
+      token: "test-token",
+      messageSendMode: "steer",
+      language: "en",
+      onManageConnections: vi.fn(),
+    }} />);
+
+    await userEvent.click(screen.getByRole("textbox", { name: "Instruction" }));
+    expect(screen.getByRole("button", { name: "Steer" })).toBeVisible();
+    await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "Guide now");
+    await userEvent.click(screen.getByRole("button", { name: "Steer" }));
+    expect(value.sendInstruction).toHaveBeenCalledWith("Guide now", [], "steer");
+  });
 });

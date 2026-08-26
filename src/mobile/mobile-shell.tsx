@@ -12,19 +12,38 @@ import { parseMobileDeepLink, type MobileThreadTarget } from "./deep-link";
 import { CodexRemoteNative } from "./native-bridge";
 import { beginScannedPairing } from "./pair-connection";
 import type { RemoteConnection, RemoteConnectionInput } from "./types";
+import { SettingsPage } from "./settings-page";
+import {
+  applyMobileSettings,
+  CapacitorMobileSettingsPersistence,
+  DEFAULT_MOBILE_SETTINGS,
+  type MobileSettings,
+  MobileSettingsStore,
+} from "./settings-store";
 import {
   findMobileUpdate,
   type MobilePlatform,
   type MobileUpdateArtifact,
   type MobileUpdateStatus,
 } from "./app-update";
+import { mobileCopy } from "./mobile-copy";
 
-type MobileView = "connections" | "form" | "remote";
+type MobileView = "connections" | "form" | "remote" | "settings";
 
-export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore } = {}) {
+export function MobileShell({
+  storeOverride,
+  settingsStoreOverride,
+}: {
+  storeOverride?: ConnectionStore;
+  settingsStoreOverride?: MobileSettingsStore;
+} = {}) {
   const store = useMemo(
     () => storeOverride ?? new ConnectionStore(new CapacitorConnectionPersistence()),
     [storeOverride],
+  );
+  const settingsStore = useMemo(
+    () => settingsStoreOverride ?? new MobileSettingsStore(new CapacitorMobileSettingsPersistence()),
+    [settingsStoreOverride],
   );
   const [connections, setConnections] = useState<RemoteConnection[]>([]);
   const [active, setActive] = useState<NativeRemoteSession>();
@@ -35,6 +54,17 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
   const [pendingTarget, setPendingTarget] = useState<MobileThreadTarget>();
   const [currentVersion, setCurrentVersion] = useState(packageInfo.version);
   const [updateStatus, setUpdateStatus] = useState<MobileUpdateStatus>({ state: "idle" });
+  const [settings, setSettings] = useState<MobileSettings>(DEFAULT_MOBILE_SETTINGS);
+
+  useEffect(() => {
+    let disposed = false;
+    void settingsStore.read().then((value) => {
+      if (disposed) return;
+      setSettings(value);
+      applyMobileSettings(value);
+    });
+    return () => { disposed = true; };
+  }, [settingsStore]);
 
   useEffect(() => {
     let disposed = false;
@@ -92,14 +122,14 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
           return { state: "downloading", latestVersion, progress: Math.max(0, Math.min(100, event.progress ?? 0)) };
         }
         if (event.state === "installing") return { state: "installing", latestVersion };
-        return { state: "error", message: event.message || "下载失败，请重试" };
+        return { state: "error", message: event.message || mobileCopy(settings.language).downloadFailed };
       });
     }).catch(() => undefined);
     return () => { void listener.then((handle) => handle?.remove()); };
-  }, []);
+  }, [settings.language]);
 
   useEffect(() => {
-    if (view !== "form") return;
+    if (view !== "form" && view !== "settings") return;
     const listener = CapacitorApp.addListener("backButton", () => {
       setError(undefined);
       setEditing(undefined);
@@ -122,6 +152,8 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
         baseUrl: connection.baseUrl,
         token,
         requestedThreadId,
+        language: settings.language,
+        messageSendMode: settings.messageSendMode,
         onManageConnections: () => setView("connections"),
       });
       setView("remote");
@@ -133,7 +165,7 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
         token,
       }).catch(() => undefined);
     } catch (cause) {
-      setError(messageForError(cause));
+      setError(messageForError(cause, settings.language));
       setView("connections");
     }
   }
@@ -152,14 +184,14 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
         ? pendingTarget.threadId
         : undefined);
     } catch (cause) {
-      setError(messageForError(cause));
+      setError(messageForError(cause, settings.language));
     } finally {
       setBusy(false);
     }
   }
 
   async function remove(connection: RemoteConnection) {
-    if (!window.confirm(`删除连接“${connection.name}”？`)) return;
+    if (!window.confirm(mobileCopy(settings.language).deleteConfirmation(connection.name))) return;
     await CodexRemoteNative.stopMonitoring({ connectionId: connection.id }).catch(() => undefined);
     await store.remove(connection.id);
     await reloadConnections();
@@ -174,7 +206,7 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
       void pairing.completion;
       setView("connections");
     } catch (cause) {
-      setError(messageForError(cause));
+      setError(messageForError(cause, settings.language));
       setView("connections");
     } finally {
       setBusy(false);
@@ -188,7 +220,7 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
     try {
       setUpdateStatus(await findMobileUpdate(currentVersion, platform as MobilePlatform));
     } catch {
-      setUpdateStatus({ state: "error", message: "检查失败，请稍后重试" });
+      setUpdateStatus({ state: "error", message: mobileCopy(settings.language).checkFailed });
     }
   }
 
@@ -197,7 +229,7 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
       try {
         await CodexRemoteNative.openExternalUrl({ url: artifact.downloadUrl });
       } catch {
-        setUpdateStatus({ state: "error", message: "无法打开下载页面" });
+        setUpdateStatus({ state: "error", message: mobileCopy(settings.language).openDownloadFailed });
       }
       return;
     }
@@ -211,8 +243,19 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
     } catch {
       setUpdateStatus((current) => current.state === "error"
         ? current
-        : { state: "error", message: "下载失败，请重试" });
+        : { state: "error", message: mobileCopy(settings.language).downloadFailed });
     }
+  }
+
+  async function updateSettings(next: MobileSettings) {
+    const saved = await settingsStore.write(next);
+    setSettings(saved);
+    applyMobileSettings(saved);
+    setActive((current) => current ? {
+      ...current,
+      language: saved.language,
+      messageSendMode: saved.messageSendMode,
+    } : current);
   }
 
   if (view === "remote" && active) {
@@ -226,9 +269,19 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
           busy={busy}
           error={error}
           onSave={save}
+          language={settings.language}
           onCancel={() => { setError(undefined); setEditing(undefined); setView("connections"); }}
         />
       </main>
+    );
+  }
+  if (view === "settings") {
+    return (
+      <SettingsPage
+        settings={settings}
+        onChange={(next) => void updateSettings(next)}
+        onBack={() => setView("connections")}
+      />
     );
   }
   return (
@@ -243,6 +296,8 @@ export function MobileShell({ storeOverride }: { storeOverride?: ConnectionStore
       updateStatus={updateStatus}
       onCheckUpdate={() => void checkUpdate()}
       onDownloadUpdate={(url) => void downloadUpdate(url)}
+      onSettings={() => setView("settings")}
+      language={settings.language}
     />
   );
 }
@@ -265,14 +320,15 @@ async function verifyRemote(baseUrl: string, token: string) {
   if (!response.ok) throw new Error("remote-unreachable");
 }
 
-function messageForError(cause: unknown) {
+function messageForError(cause: unknown, language: MobileSettings["language"] = "zh-CN") {
+  const copy = mobileCopy(language);
   const value = cause instanceof Error ? cause.message : "remote-save-failed";
-  if (value === "remote-auth-failed") return "登录密码不正确";
-  if (value === "remote-unreachable" || value === "Failed to fetch") return "无法访问这个 Remote 地址";
-  if (value === "remote-url-insecure-public-host") return "HTTP 只允许本地、VPN IP 或 .local 地址";
-  if (value === "remote-token-required") return "请输入登录密码";
-  if (value === "remote-token-not-found") return "连接尚未配对，请重新扫码";
-  if (value.startsWith("pairing-")) return "二维码已失效或无法完成配对，请在 Mac 上重新生成";
-  if (value.startsWith("remote-url-")) return "Remote 地址格式不正确";
+  if (value === "remote-auth-failed") return copy.loginIncorrect;
+  if (value === "remote-unreachable" || value === "Failed to fetch") return copy.addressUnavailable;
+  if (value === "remote-url-insecure-public-host") return copy.insecureAddress;
+  if (value === "remote-token-required") return copy.passwordRequired;
+  if (value === "remote-token-not-found") return copy.pairingRequired;
+  if (value.startsWith("pairing-")) return copy.pairingFailed;
+  if (value.startsWith("remote-url-")) return copy.invalidAddress;
   return value;
 }

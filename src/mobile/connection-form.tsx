@@ -1,5 +1,7 @@
 import { useRef, useState, type FormEvent, type TouchEvent } from "react";
 import type { RemoteConnection, RemoteConnectionInput } from "./types";
+import { mobileCopy } from "./mobile-copy";
+import type { MobileLanguage } from "./settings-store";
 
 export function ConnectionForm({
   connection,
@@ -7,13 +9,16 @@ export function ConnectionForm({
   error,
   onSave,
   onCancel,
+  language = "zh-CN",
 }: {
   connection?: RemoteConnection;
   busy?: boolean;
   error?: string;
   onSave(input: RemoteConnectionInput): Promise<void>;
   onCancel(): void;
+  language?: MobileLanguage;
 }) {
+  const copy = mobileCopy(language);
   const [name, setName] = useState(connection?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(connection?.baseUrl ?? "");
   const [token, setToken] = useState("");
@@ -50,14 +55,14 @@ export function ConnectionForm({
     >
       <header>
         <p className="eyebrow">CODEX REMOTE</p>
-        <h2>{connection ? "修改连接" : "新建连接"}</h2>
+        <h2>{connection ? copy.editConnection : copy.newConnection}</h2>
       </header>
       <label>
-        名称
+        {copy.name}
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="我的 Mac" required />
       </label>
       <label>
-        Remote 地址
+        {copy.remoteAddress}
         <input
           value={baseUrl}
           onChange={(event) => setBaseUrl(event.target.value)}
@@ -68,11 +73,11 @@ export function ConnectionForm({
         />
       </label>
       <label>
-        登录密码
+        {copy.password}
         <input
           value={token}
           onChange={(event) => setToken(event.target.value)}
-          placeholder={connection ? "留空则保持原密码" : "输入 Web 登录密码"}
+          placeholder={connection ? copy.keepPassword : copy.enterPassword}
           type="password"
           autoComplete="new-password"
           required={!connection}
@@ -80,8 +85,8 @@ export function ConnectionForm({
       </label>
       {error ? <p className="connection-form-error" role="alert">{error}</p> : null}
       <div className="connection-form-actions">
-        <button type="button" className="secondary-button" onClick={onCancel}>取消</button>
-        <button type="submit" className="primary-button" disabled={busy}>{busy ? "验证中…" : "保存并连接"}</button>
+        <button type="button" className="secondary-button" onClick={onCancel}>{copy.cancel}</button>
+        <button type="submit" className="primary-button" disabled={busy}>{busy ? copy.validating : copy.saveConnect}</button>
       </div>
     </form>
   );

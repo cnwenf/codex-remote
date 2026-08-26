@@ -538,7 +538,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   );
 
   const sendInstruction = useCallback(
-    async (text: string, images: File[] = []) => {
+    async (text: string, images: File[] = [], runningMessageMode: "queue" | "steer" = "queue") => {
       if (!selectedThreadId) throw new Error("Select a task first");
       if (threadLoadError?.threadId === selectedThreadId) {
         throw new Error(threadLoadError.message);
@@ -564,6 +564,18 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
             cwd: thread.cwd,
           });
           const [message] = normalizeQueuedMessages([asRecord(result).message]);
+          if (runningMessageMode === "steer" && message) {
+            await socket.request("desktop/queue/steer", {
+              threadId: selectedThreadId,
+              messageId: message.id,
+              expectedTurnId: thread.activeTurnId,
+            });
+            setQueuedByThread((current) => ({
+              ...current,
+              [selectedThreadId]: (current[selectedThreadId] ?? []).filter((item) => item.id !== message.id),
+            }));
+            return;
+          }
           if (message) {
             setQueuedByThread((current) => ({
               ...current,

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent } from "react";
 import type { CodexThread, ThreadStatus } from "../../protocol/thread-store";
+import type { MobileLanguage } from "../../mobile/settings-store";
 
 type TaskListProps = {
   threads: CodexThread[];
@@ -15,6 +16,7 @@ type TaskListProps = {
   onUnarchive?: (id: string) => void | Promise<void>;
   onDelete?: (id: string) => void | Promise<void>;
   onLoadArchived?: () => void | Promise<void>;
+  language?: MobileLanguage;
 };
 
 type ProjectGroup = {
@@ -50,7 +52,10 @@ export function TaskList({
   onUnarchive,
   onDelete,
   onLoadArchived,
+  language = "zh-CN",
 }: TaskListProps) {
+  const copy = taskListCopy(language);
+  const separator = language === "en" ? ", " : "，";
   const [query, setQuery] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [actionMenu, setActionMenu] = useState<ThreadActionMenuState>();
@@ -111,7 +116,7 @@ export function TaskList({
     if (!dialog || dialogBusy) return;
     const name = dialogName.trim();
     if (dialog.type === "rename" && !name) {
-      setDialogError("标题不能为空");
+      setDialogError(copy.titleRequired);
       return;
     }
     setDialogBusy(true);
@@ -121,7 +126,7 @@ export function TaskList({
       else await onDelete?.(dialog.thread.id);
       setDialog(undefined);
     } catch (cause) {
-      setDialogError(cause instanceof Error ? cause.message : "操作失败");
+      setDialogError(cause instanceof Error ? cause.message : copy.operationFailed);
     } finally {
       setDialogBusy(false);
     }
@@ -148,14 +153,14 @@ export function TaskList({
   }
 
   return (
-    <nav className="task-nav" aria-label="对话导航">
+    <nav className="task-nav" aria-label={copy.navigation}>
       <div className="task-list" data-testid="task-list-scroll">
         {filtered.length === 0 ? (
-          <p className="empty-list">{threads.length === 0 ? "还没有活跃对话" : "没有匹配的对话"}</p>
+          <p className="empty-list">{threads.length === 0 ? copy.noActive : copy.noMatches}</p>
         ) : (
           <>
             <section className="nav-section" aria-labelledby="pinned-heading">
-              <h3 id="pinned-heading">置顶</h3>
+              <h3 id="pinned-heading">{copy.pinned}</h3>
               <div className="conversation-list">
                 {pinned.length > 0 ? pinned.map((thread) => (
                   <ConversationRow
@@ -171,13 +176,14 @@ export function TaskList({
                     onRevealActions={(revealed, anchor) => revealThreadActions(thread, false, revealed, anchor)}
                     directCwd={directCwd}
                     desktopProjectsAvailable={hasDesktopProjects}
+                    language={language}
                   />
-                )) : <p className="empty-section">暂无置顶对话</p>}
+                )) : <p className="empty-section">{copy.noPinned}</p>}
               </div>
             </section>
 
             <section className="nav-section project-section" aria-labelledby="project-heading">
-              <h3 id="project-heading">项目</h3>
+              <h3 id="project-heading">{copy.projects}</h3>
               <div className="project-list">
                 {projects.map((project) => {
                   const expanded = Boolean(query.trim()) || expandedProjects.has(project.key) ||
@@ -188,7 +194,7 @@ export function TaskList({
                         type="button"
                         className="project-row"
                         aria-expanded={expanded}
-                        aria-label={`${project.name}，${project.threads.length} 个对话，${statusLabel(project.status)}`}
+                        aria-label={`${project.name}${separator}${project.threads.length} ${copy.conversations}${separator}${statusLabel(project.status, language)}`}
                         onClick={() => toggleProject(project.key)}
                       >
                         <span className="folder-icon" aria-hidden="true" />
@@ -214,6 +220,7 @@ export function TaskList({
                               directCwd={directCwd}
                               desktopProjectsAvailable={hasDesktopProjects}
                               compact
+                              language={language}
                             />
                           ))}
                         </div>
@@ -225,7 +232,7 @@ export function TaskList({
             </section>
 
             <section className="nav-section" aria-labelledby="recent-heading">
-              <h3 id="recent-heading">最近</h3>
+              <h3 id="recent-heading">{copy.recent}</h3>
               <div className="conversation-list">
                 {recent.length > 0 ? recent.map((thread) => (
                   <ConversationRow
@@ -241,29 +248,30 @@ export function TaskList({
                     onRevealActions={(revealed, anchor) => revealThreadActions(thread, false, revealed, anchor)}
                     directCwd={directCwd}
                     desktopProjectsAvailable={hasDesktopProjects}
+                    language={language}
                   />
-                )) : <p className="empty-section">暂无直接对话</p>}
+                )) : <p className="empty-section">{copy.noDirect}</p>}
               </div>
             </section>
 
           </>
         )}
         {!query.trim() ? (
-          <section className="nav-section archive-section" aria-label="归档对话">
+          <section className="nav-section archive-section" aria-label={copy.archived}>
               <button
                 type="button"
                 className="archive-heading"
                 aria-expanded={archivedExpanded}
                 onClick={toggleArchived}
               >
-                <span>归档对话</span>
-                <span>{archivedLoading ? "加载中" : archivedThreads.length}</span>
+                <span>{copy.archived}</span>
+                <span>{archivedLoading ? copy.loading : archivedThreads.length}</span>
                 <span aria-hidden="true">⌄</span>
               </button>
               {archivedExpanded ? (
                 <div className="conversation-list archived-conversations">
                   {archivedLoading && archivedThreads.length === 0 ? (
-                    <p className="empty-section">正在加载归档对话…</p>
+                    <p className="empty-section">{copy.loadingArchived}</p>
                   ) : archivedThreads.length > 0 ? archivedThreads.map((thread) => (
                     <ConversationRow
                       key={thread.id}
@@ -278,8 +286,9 @@ export function TaskList({
                       onRevealActions={(revealed, anchor) => revealThreadActions(thread, true, revealed, anchor)}
                       directCwd={directCwd}
                       desktopProjectsAvailable={hasDesktopProjects}
+                      language={language}
                     />
-                  )) : <p className="empty-section">暂无归档对话</p>}
+                  )) : <p className="empty-section">{copy.noArchived}</p>}
                 </div>
               ) : null}
           </section>
@@ -287,16 +296,16 @@ export function TaskList({
       </div>
       <div className="task-nav-footer">
         <label className="search-field">
-          <span className="visually-hidden">搜索对话</span>
+          <span className="visually-hidden">{copy.search}</span>
           <span className="search-icon" aria-hidden="true" />
           <input
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索聊天"
+            placeholder={copy.searchPlaceholder}
           />
         </label>
-        <button className="icon-button" type="button" onClick={onNew} aria-label="新对话">
+        <button className="icon-button" type="button" onClick={onNew} aria-label={copy.newConversation}>
           <span className="compose-icon" aria-hidden="true" />
         </button>
       </div>
@@ -314,6 +323,7 @@ export function TaskList({
           onArchive={() => closeActionsAndRun(() => onArchive?.(actionMenu.thread.id))}
           onUnarchive={() => closeActionsAndRun(() => onUnarchive?.(actionMenu.thread.id))}
           onDelete={() => openDelete(actionMenu.thread)}
+          language={language}
         />
       ) : null}
       {dialog ? (
@@ -324,15 +334,15 @@ export function TaskList({
             className="thread-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label={dialog.type === "rename" ? "重命名对话" : "删除对话"}
+            aria-label={dialog.type === "rename" ? copy.renameConversation : copy.deleteConversation}
             onSubmit={submitDialog}
           >
-            <h3>{dialog.type === "rename" ? "重命名对话" : "删除对话"}</h3>
+            <h3>{dialog.type === "rename" ? copy.renameConversation : copy.deleteConversation}</h3>
             {dialog.type === "rename" ? (
               <label>
-                <span>对话标题</span>
+                <span>{copy.conversationTitle}</span>
                 <input
-                  aria-label="对话标题"
+                  aria-label={copy.conversationTitle}
                   value={dialogName}
                   maxLength={200}
                   autoFocus
@@ -340,13 +350,13 @@ export function TaskList({
                 />
               </label>
             ) : (
-              <p>“{dialog.thread.title}”将从 Codex Desktop 中永久删除，无法恢复。</p>
+              <p>{copy.deleteWarning(dialog.thread.title)}</p>
             )}
             {dialogError ? <p className="inline-error" role="alert">{dialogError}</p> : null}
             <div className="thread-dialog-actions">
-              <button type="button" className="secondary-button" disabled={dialogBusy} onClick={() => setDialog(undefined)}>取消</button>
+              <button type="button" className="secondary-button" disabled={dialogBusy} onClick={() => setDialog(undefined)}>{copy.cancel}</button>
               <button type="submit" className={dialog.type === "delete" ? "danger-button" : "primary-button"} disabled={dialogBusy}>
-                {dialog.type === "rename" ? "保存" : "永久删除"}
+                {dialog.type === "rename" ? copy.save : copy.deletePermanently}
               </button>
             </div>
           </form>
@@ -369,6 +379,7 @@ function ThreadActionMenu({
   onArchive,
   onUnarchive,
   onDelete,
+  language = "zh-CN",
 }: {
   state: ThreadActionMenuState;
   canRename: boolean;
@@ -382,8 +393,10 @@ function ThreadActionMenu({
   onArchive: () => void;
   onUnarchive: () => void;
   onDelete: () => void;
+  language?: MobileLanguage;
 }) {
   const pinned = isPinnedThread(state.thread);
+  const copy = taskListCopy(language);
   return (
     <div
       className="thread-action-layer"
@@ -394,38 +407,38 @@ function ThreadActionMenu({
       <div
         className="thread-action-menu"
         role="menu"
-        aria-label={`对话操作 ${state.thread.title}`}
+        aria-label={`${copy.actions} ${state.thread.title}`}
         style={{ top: state.anchor.top, right: state.anchor.right }}
       >
         <p className="thread-action-title" title={state.thread.title}>{state.thread.title}</p>
         {canRename ? (
-          <button type="button" aria-label={`重命名 ${state.thread.title}`} onClick={onRename}>
+          <button type="button" aria-label={`${copy.rename} ${state.thread.title}`} onClick={onRename}>
             <ActionGlyph type="rename" />
-            <span>重命名</span>
+            <span>{copy.rename}</span>
           </button>
         ) : null}
         {canTogglePin ? (
-          <button type="button" aria-label={`${pinned ? "取消置顶" : "置顶"} ${state.thread.title}`} onClick={onTogglePin}>
+          <button type="button" aria-label={`${pinned ? copy.unpin : copy.pin} ${state.thread.title}`} onClick={onTogglePin}>
             <ActionGlyph type="pin" />
-            <span>{pinned ? "取消置顶" : "置顶"}</span>
+            <span>{pinned ? copy.unpin : copy.pin}</span>
           </button>
         ) : null}
         {canArchive ? (
-          <button type="button" aria-label={`归档 ${state.thread.title}`} onClick={onArchive}>
+          <button type="button" aria-label={`${copy.archive} ${state.thread.title}`} onClick={onArchive}>
             <ActionGlyph type="archive" />
-            <span>归档</span>
+            <span>{copy.archive}</span>
           </button>
         ) : null}
         {canUnarchive ? (
-          <button type="button" aria-label={`取消归档 ${state.thread.title}`} onClick={onUnarchive}>
+          <button type="button" aria-label={`${copy.unarchive} ${state.thread.title}`} onClick={onUnarchive}>
             <ActionGlyph type="restore" />
-            <span>取消归档</span>
+            <span>{copy.unarchive}</span>
           </button>
         ) : null}
         {canDelete ? (
-          <button className="thread-action-danger" type="button" aria-label={`删除 ${state.thread.title}`} onClick={onDelete}>
+          <button className="thread-action-danger" type="button" aria-label={`${copy.remove} ${state.thread.title}`} onClick={onDelete}>
             <ActionGlyph type="delete" />
-            <span>删除</span>
+            <span>{copy.remove}</span>
           </button>
         ) : null}
       </div>
@@ -464,6 +477,7 @@ function ConversationRow({
   compact = false,
   directCwd,
   desktopProjectsAvailable = false,
+  language = "zh-CN",
 }: {
   thread: CodexThread;
   selected: boolean;
@@ -479,7 +493,10 @@ function ConversationRow({
   compact?: boolean;
   directCwd?: string;
   desktopProjectsAvailable?: boolean;
+  language?: MobileLanguage;
 }) {
+  const copy = taskListCopy(language);
+  const separator = language === "en" ? ", " : "，";
   const pointerStart = useRef<{ x: number; y: number } | undefined>(undefined);
   const consumedSwipe = useRef(false);
   const actions = [onRename, onTogglePin, onArchive, onUnarchive, onDelete].filter(Boolean);
@@ -529,7 +546,7 @@ function ConversationRow({
           className={`task-row-main ${compact ? "task-row-compact" : ""}`}
           onClick={selectConversation}
           disabled={archived}
-          aria-label={`${thread.title}，${statusLabel(thread.status)}`}
+          aria-label={`${thread.title}${separator}${statusLabel(thread.status, language)}`}
         >
           <span className={`status-dot status-${thread.status}`} aria-hidden="true" />
           <span className="task-copy">
@@ -537,18 +554,18 @@ function ConversationRow({
             {!compact ? (
               <span>{
                 isDirectThread(thread, directCwd) || (desktopProjectsAvailable && !thread.projectId)
-                  ? "直接对话"
+                  ? copy.directConversation
                   : thread.projectName ?? projectName(thread.cwd)
               }</span>
             ) : null}
           </span>
-          <span className="task-time">{formatUpdatedAt(thread.updatedAt)}</span>
+          <span className="task-time">{formatUpdatedAt(thread.updatedAt, language)}</span>
         </button>
         {hasActions ? (
           <button
             type="button"
             className="task-row-more"
-            aria-label={`对话操作 ${thread.title}`}
+            aria-label={`${copy.actions} ${thread.title}`}
             aria-expanded={actionsRevealed}
             onClick={(event) => onRevealActions(
               !actionsRevealed,
@@ -613,17 +630,59 @@ function projectName(path?: string) {
   return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
-function statusLabel(status: ThreadStatus) {
-  if (status === "running") return "运行中";
-  if (status === "idle") return "空闲";
-  if (status === "error") return "出错";
-  return "状态未知";
+function statusLabel(status: ThreadStatus, language: MobileLanguage = "zh-CN") {
+  const english = language === "en";
+  if (status === "running") return english ? "Running" : "运行中";
+  if (status === "idle") return english ? "Idle" : "空闲";
+  if (status === "error") return english ? "Error" : "出错";
+  return english ? "Unknown" : "状态未知";
 }
 
-function formatUpdatedAt(value?: number) {
+function formatUpdatedAt(value?: number, language: MobileLanguage = "zh-CN") {
   if (!value) return "";
   const milliseconds = value < 1_000_000_000_000 ? value * 1_000 : value;
-  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(
+  return new Intl.DateTimeFormat(language === "en" ? "en" : "zh-CN", { hour: "2-digit", minute: "2-digit" }).format(
     new Date(milliseconds),
   );
+}
+
+function taskListCopy(language: MobileLanguage) {
+  const en = language === "en";
+  return {
+    navigation: en ? "Conversation navigation" : "对话导航",
+    noActive: en ? "No active conversations" : "还没有活跃对话",
+    noMatches: en ? "No matching conversations" : "没有匹配的对话",
+    pinned: en ? "Pinned" : "置顶",
+    noPinned: en ? "No pinned conversations" : "暂无置顶对话",
+    projects: en ? "Projects" : "项目",
+    conversations: en ? "conversations" : "个对话",
+    recent: en ? "Recent" : "最近",
+    noDirect: en ? "No direct conversations" : "暂无直接对话",
+    archived: en ? "Archived" : "归档对话",
+    loading: en ? "Loading" : "加载中",
+    loadingArchived: en ? "Loading archived conversations…" : "正在加载归档对话…",
+    noArchived: en ? "No archived conversations" : "暂无归档对话",
+    search: en ? "Search conversations" : "搜索对话",
+    searchPlaceholder: en ? "Search chats" : "搜索聊天",
+    newConversation: en ? "New conversation" : "新对话",
+    titleRequired: en ? "Title is required" : "标题不能为空",
+    operationFailed: en ? "Operation failed" : "操作失败",
+    renameConversation: en ? "Rename conversation" : "重命名对话",
+    deleteConversation: en ? "Delete conversation" : "删除对话",
+    conversationTitle: en ? "Conversation title" : "对话标题",
+    deleteWarning: (title: string) => en
+      ? `“${title}” will be permanently deleted from Codex Desktop and cannot be recovered.`
+      : `“${title}”将从 Codex Desktop 中永久删除，无法恢复。`,
+    cancel: en ? "Cancel" : "取消",
+    save: en ? "Save" : "保存",
+    deletePermanently: en ? "Delete permanently" : "永久删除",
+    actions: en ? "Conversation actions" : "对话操作",
+    rename: en ? "Rename" : "重命名",
+    pin: en ? "Pin" : "置顶",
+    unpin: en ? "Unpin" : "取消置顶",
+    archive: en ? "Archive" : "归档",
+    unarchive: en ? "Unarchive" : "取消归档",
+    remove: en ? "Delete" : "删除",
+    directConversation: en ? "Direct conversation" : "直接对话",
+  };
 }

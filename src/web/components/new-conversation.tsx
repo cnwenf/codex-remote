@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import type { MobileLanguage } from "../../mobile/settings-store";
 import type {
   CreateThreadOptions,
   ModelOption,
@@ -17,6 +18,7 @@ type NewConversationProps = {
   onRetry?: (cwd: string) => void | Promise<unknown>;
   onCreate: (options: CreateThreadOptions) => void | Promise<unknown>;
   onCancel: () => void;
+  language?: MobileLanguage;
 };
 
 export function NewConversation({
@@ -29,7 +31,9 @@ export function NewConversation({
   onRetry,
   onCreate,
   onCancel,
+  language = "zh-CN",
 }: NewConversationProps) {
+  const copy = newConversationCopy(language);
   const [cwd, setCwd] = useState("");
   const [modelId, setModelId] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
@@ -72,7 +76,7 @@ export function NewConversation({
         reasoningEffort,
       });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "创建对话失败");
+      setError(cause instanceof Error ? cause.message : copy.createFailed);
     } finally {
       setBusy(false);
     }
@@ -81,18 +85,18 @@ export function NewConversation({
   return (
     <section className="new-conversation" aria-labelledby="new-conversation-title">
       <div className="new-conversation-heading">
-        <button type="button" className="back-button visible" onClick={onCancel} aria-label="返回对话列表">‹</button>
+        <button type="button" className="back-button visible" onClick={onCancel} aria-label={copy.back}>‹</button>
         <div>
           <p className="eyebrow">New conversation</p>
-          <h2 id="new-conversation-title">新对话</h2>
+          <h2 id="new-conversation-title">{copy.title}</h2>
         </div>
       </div>
 
       <form onSubmit={submit}>
         <label className="choice-field">
-          <span>项目</span>
+          <span>{copy.project}</span>
           <select
-            aria-label="项目"
+            aria-label={copy.project}
             value={cwd}
             onChange={(event) => {
               const nextCwd = event.target.value;
@@ -100,27 +104,27 @@ export function NewConversation({
               void onProjectChange?.(nextCwd);
             }}
           >
-            <option value="">直接对话</option>
+            <option value="">{copy.direct}</option>
             {projects.map((project) => (
               <option value={project.cwd} key={project.cwd}>{project.name}</option>
             ))}
           </select>
-          <small>{cwd ? "在所选项目目录中运行" : "使用服务默认目录，不归入指定项目"}</small>
+          <small>{cwd ? copy.projectHint : copy.directHint}</small>
         </label>
 
         <label className="choice-field">
-          <span>权限</span>
-          <select aria-label="权限" value={permission} onChange={(event) => setPermission(event.target.value)} disabled={catalogLoading}>
+          <span>{copy.permission}</span>
+          <select aria-label={copy.permission} value={permission} onChange={(event) => setPermission(event.target.value)} disabled={catalogLoading}>
             {permissions.map((option) => (
               <option value={option.id} key={option.id}>{option.label}</option>
             ))}
           </select>
-          <small>{permissions.find((option) => option.id === permission)?.description ?? "可在后续审批中继续控制敏感操作"}</small>
+          <small>{permissions.find((option) => option.id === permission)?.description ?? copy.permissionHint}</small>
         </label>
 
         <label className="choice-field">
-          <span>模型</span>
-          <select aria-label="模型" value={selectedModel?.id ?? ""} onChange={(event) => setModelId(event.target.value)} disabled={catalogLoading}>
+          <span>{copy.model}</span>
+          <select aria-label={copy.model} value={selectedModel?.id ?? ""} onChange={(event) => setModelId(event.target.value)} disabled={catalogLoading}>
             {models.map((model) => (
               <option value={model.id} key={model.id}>{model.displayName}</option>
             ))}
@@ -128,10 +132,10 @@ export function NewConversation({
         </label>
 
         <label className="choice-field">
-          <span>思考强度</span>
-          <select aria-label="思考强度" value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)} disabled={catalogLoading}>
+          <span>{copy.reasoning}</span>
+          <select aria-label={copy.reasoning} value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value)} disabled={catalogLoading}>
             {(selectedModel?.reasoningEfforts ?? []).map((effort) => (
-              <option value={effort} key={effort}>{reasoningLabel(effort)}</option>
+              <option value={effort} key={effort}>{reasoningLabel(effort, language)}</option>
             ))}
           </select>
         </label>
@@ -140,11 +144,11 @@ export function NewConversation({
           <div className="catalog-error">
             <p className="inline-error" role="alert">{catalogError}</p>
             <button type="button" className="secondary-button" onClick={() => void onRetry?.(cwd)}>
-              重试读取
+              {copy.retry}
             </button>
           </div>
         ) : catalogLoading || models.length === 0 || permissions.length === 0 ? (
-          <p className="inline-error" role="status">正在读取本机模型和权限…</p>
+          <p className="inline-error" role="status">{copy.loading}</p>
         ) : null}
         {error ? <p className="inline-error" role="alert">{error}</p> : null}
 
@@ -153,14 +157,15 @@ export function NewConversation({
           className="primary-button create-conversation-button"
           disabled={busy || catalogLoading || Boolean(catalogError) || !selectedModel || !permission || !reasoningEffort}
         >
-          {busy ? "正在创建…" : "创建对话"}
+          {busy ? copy.creating : copy.create}
         </button>
       </form>
     </section>
   );
 }
 
-function reasoningLabel(value: string) {
+function reasoningLabel(value: string, language: MobileLanguage = "zh-CN") {
+  if (language === "en") return value === "xhigh" ? "Extra high" : value[0].toUpperCase() + value.slice(1);
   if (value === "low") return "低";
   if (value === "medium") return "中";
   if (value === "high") return "高";
@@ -168,4 +173,25 @@ function reasoningLabel(value: string) {
   if (value === "max") return "最大";
   if (value === "ultra") return "Ultra";
   return value;
+}
+
+function newConversationCopy(language: MobileLanguage) {
+  const en = language === "en";
+  return {
+    back: en ? "Back to conversations" : "返回对话列表",
+    title: en ? "New conversation" : "新对话",
+    project: en ? "Project" : "项目",
+    direct: en ? "Direct conversation" : "直接对话",
+    projectHint: en ? "Run in the selected project directory" : "在所选项目目录中运行",
+    directHint: en ? "Use the service default directory without assigning a project" : "使用服务默认目录，不归入指定项目",
+    permission: en ? "Permission" : "权限",
+    permissionHint: en ? "Sensitive actions can still be controlled through approvals" : "可在后续审批中继续控制敏感操作",
+    model: en ? "Model" : "模型",
+    reasoning: en ? "Reasoning effort" : "思考强度",
+    retry: en ? "Retry" : "重试读取",
+    loading: en ? "Loading models and permissions from this Mac…" : "正在读取本机模型和权限…",
+    create: en ? "Create conversation" : "创建对话",
+    creating: en ? "Creating…" : "正在创建…",
+    createFailed: en ? "Failed to create conversation" : "创建对话失败",
+  };
 }

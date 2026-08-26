@@ -11,6 +11,7 @@ import { isDirectThread, projectsFromThreads, TaskList } from "./components/task
 import { Timeline, TodoListDock } from "./components/timeline";
 import { TokenDialog } from "./components/token-dialog";
 import { useCodex, type CreateThreadOptions } from "./state/use-codex";
+import type { MobileLanguage, MobileMessageSendMode } from "../mobile/settings-store";
 import "./styles.css";
 
 export type NativeRemoteSession = {
@@ -19,10 +20,15 @@ export type NativeRemoteSession = {
   baseUrl: string;
   token: string;
   requestedThreadId?: string;
+  language?: MobileLanguage;
+  messageSendMode?: MobileMessageSendMode;
   onManageConnections(): void;
 };
 
 export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
+  const language = remote?.language ?? "zh-CN";
+  const copy = appCopy(language);
+  const separator = language === "en" ? ", " : "，";
   const codex = useCodex(undefined, remote ? { baseUrl: remote.baseUrl, token: remote.token } : {});
   const autoConnectAttempted = useRef(false);
   const [decisionNotice, setDecisionNotice] = useState<string>();
@@ -138,7 +144,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               type="button"
               className="mobile-thread-back"
               onClick={returnToList}
-              aria-label="返回对话列表"
+              aria-label={copy.backToList}
             >
               ‹
             </button>
@@ -147,7 +153,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
           <h1>{codex.selectedThread?.title ?? "Remote"}</h1>
           {remote && codex.selectedThread ? (
             <span className={`mobile-thread-status status-${codex.selectedThread.status}`}>
-              {statusLabel(codex.selectedThread.status)}
+              {statusLabel(codex.selectedThread.status, language)}
             </span>
           ) : null}
         </div>
@@ -156,7 +162,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
             type="button"
             className="manage-connections-button remote-connection-pill"
             onClick={remote.onManageConnections}
-            aria-label={`管理连接 ${remote.name}，${connectionLabel(codex.connection)}`}
+            aria-label={`${copy.manageConnection} ${remote.name}${separator}${connectionLabel(codex.connection, language)}`}
           >
             <span aria-hidden="true" className={`remote-connection-indicator connection-${codex.connection}`} />
             <span>{remote.name}</span>
@@ -178,15 +184,15 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
         <div className="connect-stage">
           {remote ? (
             <section className="native-connect-error">
-              <h2>无法连接 {remote.name}</h2>
-              <p>{codex.error ?? "请确认 Mac 在线、VPN 已连接且 Remote 地址可访问。"}</p>
+              <h2>{copy.cannotConnect} {remote.name}</h2>
+              <p>{codex.error ?? copy.connectionHint}</p>
               <div>
-                <button type="button" className="secondary-button" onClick={remote.onManageConnections}>返回连接列表</button>
+                <button type="button" className="secondary-button" onClick={remote.onManageConnections}>{copy.backToConnections}</button>
                 <button
                   type="button"
                   className="primary-button"
                   onClick={() => window.location.reload()}
-                >重试</button>
+                >{copy.retry}</button>
               </div>
             </section>
           ) : (
@@ -224,12 +230,13 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 ? undefined
                 : codex.deleteThread}
               onLoadArchived={codex.refreshArchivedThreads}
+              language={language}
             />
           </aside>
 
-          <section className="task-pane" aria-label="当前对话">
+          <section className="task-pane" aria-label={copy.currentConversation}>
             {codex.state.stale ? (
-              <div className="stale-banner" role="status">连接暂时中断，正在自动恢复…</div>
+              <div className="stale-banner" role="status">{copy.recovering}</div>
             ) : null}
             {showNewConversation ? (
               <NewConversation
@@ -242,6 +249,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 onRetry={(cwd) => codex.refreshCreationOptions(cwd || undefined)}
                 onCreate={createThread}
                 onCancel={returnToList}
+                language={language}
               />
             ) : codex.selectedThread ? (
               <>
@@ -250,36 +258,36 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                   type="button"
                   className="back-button"
                   onClick={returnToList}
-                  aria-label="返回对话列表"
+                  aria-label={copy.backToList}
                 >
                   ‹
                 </button>
                 <div>
                   <p className="eyebrow desktop-thread-context">
                     {isDirectThread(codex.selectedThread, codex.defaultCwd)
-                      ? "直接对话"
-                      : codex.selectedThread.cwd ?? "直接对话"}
+                      ? copy.directConversation
+                      : codex.selectedThread.cwd ?? copy.directConversation}
                   </p>
                 </div>
                 <span className={`task-status status-${codex.selectedThread.status}`}>
-                  {statusLabel(codex.selectedThread.status)}
+                  {statusLabel(codex.selectedThread.status, language)}
                 </span>
               </header> : null}
               {codex.selectedThreadError ? (
                 <div className="thread-load-error" role="alert">
-                  <span>对话加载失败：{codex.selectedThreadError}</span>
+                  <span>{copy.loadFailed}: {codex.selectedThreadError}</span>
                   <button
                     type="button"
                     className="secondary-button"
                     onClick={() => void codex.selectThread(codex.selectedThread!.id).catch(() => undefined)}
                   >
-                    重试
+                    {copy.retry}
                   </button>
                 </div>
               ) : null}
               {codex.selectedThread.desktopMirror && !codex.desktopControlAvailable ? (
                 <div className="desktop-mirror-banner" role="status">
-                  Desktop 桥当前不可用；正在读取本地快照，网页为只读查看。
+                  {copy.desktopUnavailable}
                 </div>
               ) : null}
               <ConversationViewport
@@ -294,7 +302,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 />
                 {codex.selectedThread.diff ? (
                   <details className="diff-panel">
-                    <summary>查看代码变更</summary>
+                    <summary>{copy.viewCodeChanges}</summary>
                     <DiffViewer diff={codex.selectedThread.diff} />
                   </details>
                 ) : null}
@@ -304,12 +312,16 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 <QueuedFollowUps
                   messages={codex.selectedQueuedMessages ?? []}
                   onSteer={codex.steerQueuedMessage}
+                  language={language}
                 />
                 <Composer
                 draftKey={codex.selectedThread.id}
-                onSend={codex.sendInstruction}
+                onSend={(text, images) => codex.sendInstruction(text, images, remote?.messageSendMode)}
                 running={codex.selectedThread.status === "running"}
-                runningMode={codex.selectedThread.desktopMirror ? "queue" : "steer"}
+                runningMode={codex.selectedThread.desktopMirror
+                  ? remote?.messageSendMode ?? "queue"
+                  : "steer"}
+                language={remote?.language}
                 onStop={codex.selectedThread.status === "running" ? codex.interrupt : undefined}
                 models={codex.creationOptions.models}
                 permissions={codex.creationOptions.permissions}
@@ -355,16 +367,40 @@ function asRemoteView(value: unknown) {
   return view === "list" || view === "thread" || view === "new" ? view : undefined;
 }
 
-function statusLabel(status: "running" | "idle" | "error" | "unknown") {
-  if (status === "running") return "运行中";
-  if (status === "idle") return "空闲";
-  if (status === "error") return "出错";
-  return "未知";
+function statusLabel(status: "running" | "idle" | "error" | "unknown", language: MobileLanguage = "zh-CN") {
+  const en = language === "en";
+  if (status === "running") return en ? "Running" : "运行中";
+  if (status === "idle") return en ? "Idle" : "空闲";
+  if (status === "error") return en ? "Error" : "出错";
+  return en ? "Unknown" : "未知";
 }
 
-function connectionLabel(connection: "disconnected" | "connecting" | "reconnecting" | "ready") {
-  if (connection === "ready") return "已连接";
-  if (connection === "reconnecting") return "正在重连";
-  if (connection === "connecting") return "正在连接";
-  return "离线";
+function connectionLabel(connection: "disconnected" | "connecting" | "reconnecting" | "ready", language: MobileLanguage = "zh-CN") {
+  const en = language === "en";
+  if (connection === "ready") return en ? "Connected" : "已连接";
+  if (connection === "reconnecting") return en ? "Reconnecting" : "正在重连";
+  if (connection === "connecting") return en ? "Connecting" : "正在连接";
+  return en ? "Offline" : "离线";
+}
+
+function appCopy(language: MobileLanguage) {
+  const en = language === "en";
+  return {
+    backToList: en ? "Back to conversations" : "返回对话列表",
+    manageConnection: en ? "Manage connection" : "管理连接",
+    cannotConnect: en ? "Cannot connect to" : "无法连接",
+    connectionHint: en
+      ? "Make sure the Mac is online, the VPN is connected, and the Remote address is reachable."
+      : "请确认 Mac 在线、VPN 已连接且 Remote 地址可访问。",
+    backToConnections: en ? "Back to connections" : "返回连接列表",
+    retry: en ? "Retry" : "重试",
+    currentConversation: en ? "Current conversation" : "当前对话",
+    recovering: en ? "Connection interrupted. Recovering automatically…" : "连接暂时中断，正在自动恢复…",
+    directConversation: en ? "Direct conversation" : "直接对话",
+    loadFailed: en ? "Conversation failed to load" : "对话加载失败",
+    desktopUnavailable: en
+      ? "The Desktop bridge is unavailable. Reading the local snapshot in read-only mode."
+      : "Desktop 桥当前不可用；正在读取本地快照，网页为只读查看。",
+    viewCodeChanges: en ? "View code changes" : "查看代码变更",
+  };
 }

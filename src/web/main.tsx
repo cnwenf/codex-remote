@@ -15,6 +15,12 @@ watchAppVersion();
 
 createRoot(root).render(
   <StrictMode>
-    {Capacitor.isNativePlatform() ? <MobileShell /> : <App />}
+    {Capacitor.isNativePlatform() || isLocalMobilePreview() ? <MobileShell /> : <App />}
   </StrictMode>,
 );
+
+function isLocalMobilePreview() {
+  if (typeof window === "undefined") return false;
+  const loopback = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
+  return loopback && new URLSearchParams(window.location.search).get("mobile-shell-preview") === "1";
+}

@@ -4,6 +4,24 @@ import { describe, expect, it, vi } from "vitest";
 import { NewConversation } from "./new-conversation";
 
 describe("NewConversation", () => {
+  it("renders the creation flow in English", () => {
+    render(
+      <NewConversation
+        projects={[]}
+        models={[]}
+        permissions={[]}
+        catalogLoading
+        onCreate={vi.fn()}
+        onCancel={vi.fn()}
+        language="en"
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "New conversation" })).toBeVisible();
+    expect(screen.getByLabelText("Project")).toBeVisible();
+    expect(screen.getByText("Loading models and permissions from this Mac…")).toBeVisible();
+  });
+
   it("submits the selected project permission model and supported reasoning effort", async () => {
     const onCreate = vi.fn();
     const onProjectChange = vi.fn();
