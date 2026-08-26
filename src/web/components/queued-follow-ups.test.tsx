@@ -16,4 +16,25 @@ describe("QueuedFollowUps", () => {
     await userEvent.click(screen.getByRole("button", { name: "转为引导" }));
     expect(onSteer).toHaveBeenCalledWith("queued-1");
   });
+
+  it("keeps a promoted message visible with a non-repeatable transition state", () => {
+    render(<QueuedFollowUps
+      messages={[{ id: "queued-1", text: "Guide this now", lifecycle: "promoting" }]}
+      onSteer={vi.fn()}
+    />);
+
+    expect(screen.getByText("Guide this now")).toBeVisible();
+    expect(screen.getByRole("button", { name: "正在转为引导…" })).toBeDisabled();
+  });
+
+  it("shows a failed promotion as retryable", async () => {
+    const onSteer = vi.fn();
+    render(<QueuedFollowUps
+      messages={[{ id: "queued-1", text: "Retry this", lifecycle: "failed" }]}
+      onSteer={onSteer}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "重试引导" }));
+    expect(onSteer).toHaveBeenCalledWith("queued-1");
+  });
 });

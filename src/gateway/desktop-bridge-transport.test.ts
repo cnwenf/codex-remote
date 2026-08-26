@@ -380,6 +380,7 @@ describe("DesktopBridgeTransport", () => {
       params: {
         threadId: "thread-1",
         expectedTurnId: "turn-1",
+        clientMessageId: "client-message-1",
         cwd: "/safe/project",
         input: [
           { type: "text", text: "Continue from the phone" },
@@ -410,8 +411,8 @@ describe("DesktopBridgeTransport", () => {
       },
     });
     expect(ownerRequest?.params).toMatchObject({
-      clientUserMessageId: expect.any(String),
-      restoreMessage: { id: expect.any(String), createdAt: expect.any(Number) },
+      clientUserMessageId: "client-message-1",
+      restoreMessage: { id: "client-message-1", createdAt: expect.any(Number) },
     });
     expect(messages).toContainEqual({ id: 22, result: { turnId: "turn-1" } });
     expect(client.sent).toEqual([]);

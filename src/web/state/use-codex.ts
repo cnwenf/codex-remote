@@ -43,7 +43,128 @@ export type QueuedFollowUp = {
   text: string;
   createdAt?: number;
   cwd?: string;
+  lifecycle?: "queued" | "promoting" | "failed";
+  promotedAt?: number;
 };
+
+export class ConversationReconciler {
+  reduceEvent(state: CodexState, message: import("../../protocol/types").RpcMessage) {
+    return reduceCodexState(state, message);
+  }
+
+  hydrate(
+    state: CodexState,
+    value: unknown,
+    placement: "snapshot" | "prepend" | "append" = "snapshot",
+  ) {
+    return hydrateThread(state, value, placement);
+  }
+
+  stageUserMessage(
+    state: CodexState,
+    threadId: string,
+    turnId: string,
+    itemId: string,
+    text: string,
+    imageIds: string[],
+  ) {
+    return addOptimisticUserMessage(state, threadId, turnId, itemId, text, imageIds);
+  }
+
+  failUserMessage(state: CodexState, threadId: string, turnId: string, itemId: string) {
+    return removeOptimisticItem(state, threadId, turnId, itemId);
+  }
+
+  reconcileQueueSnapshot(
+    current: Record<string, QueuedFollowUp[]>,
+    threadId: string,
+    messages: QueuedFollowUp[],
+    _now = Date.now(),
+  ) {
+    const promoted = (current[threadId] ?? []).filter((message) =>
+      message.lifecycle === "promoting" &&
+      !messages.some((queued) => queued.id === message.id)
+    );
+    return { ...current, [threadId]: [...messages, ...promoted] };
+  }
+
+  confirmQueuedFromSnapshot(
+    current: Record<string, QueuedFollowUp[]>,
+    value: unknown,
+  ) {
+    const outer = asRecord(value);
+    const thread = asRecord(outer.thread ?? value);
+    const threadId = stringValue(thread.id);
+    if (!threadId) return current;
+    let next = current;
+    for (const turnValue of Array.isArray(thread.turns) ? thread.turns : []) {
+      const turn = asRecord(turnValue);
+      for (const itemValue of Array.isArray(turn.items) ? turn.items : []) {
+        const item = asRecord(itemValue);
+        const type = stringValue(item.type)?.toLocaleLowerCase() ?? "";
+        if (!type.includes("user")) continue;
+        next = this.confirmQueuedMessage(next, {
+          threadId,
+          text: extractItemText(item),
+          clientMessageId: stringValue(item.clientMessageId) ??
+            stringValue(item.clientUserMessageId) ??
+            stringValue(item.client_message_id),
+        });
+      }
+    }
+    return next;
+  }
+
+  stageQueuePromotion(
+    current: Record<string, QueuedFollowUp[]>,
+    threadId: string,
+    message: QueuedFollowUp,
+    now = Date.now(),
+  ) {
+    return {
+      ...current,
+      [threadId]: [
+        ...(current[threadId] ?? []).filter((item) => item.id !== message.id),
+        { ...message, lifecycle: "promoting" as const, promotedAt: now },
+      ],
+    };
+  }
+
+  failQueuePromotion(
+    current: Record<string, QueuedFollowUp[]>,
+    threadId: string,
+    messageId: string,
+  ) {
+    return {
+      ...current,
+      [threadId]: (current[threadId] ?? []).map((message) =>
+        message.id === messageId ? { ...message, lifecycle: "failed" as const } : message
+      ),
+    };
+  }
+
+  confirmQueuedMessage(
+    current: Record<string, QueuedFollowUp[]>,
+    confirmed: { threadId: string; text: string; clientMessageId?: string },
+  ) {
+    const messages = current[confirmed.threadId] ?? [];
+    const exactIndex = confirmed.clientMessageId
+      ? messages.findIndex((item) => item.id === confirmed.clientMessageId)
+      : -1;
+    const fallbackMatches = exactIndex < 0
+      ? messages.flatMap((item, index) =>
+        item.lifecycle === "promoting" && item.text === confirmed.text ? [index] : []
+      )
+      : [];
+    const fallbackIndex = fallbackMatches.length === 1 ? fallbackMatches[0] : -1;
+    const matchIndex = exactIndex >= 0 ? exactIndex : fallbackIndex;
+    if (matchIndex < 0) return current;
+    return {
+      ...current,
+      [confirmed.threadId]: messages.filter((_, index) => index !== matchIndex),
+    };
+  }
+}
 
 export type CreateThreadOptions = {
   cwd?: string;
@@ -70,6 +191,7 @@ const emptyCreationOptions = {
 
 export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptions = {}) {
   const [socket] = useState(() => socketOverride ?? new CodexSocket());
+  const [reconciler] = useState(() => new ConversationReconciler());
   const [state, setState] = useState<CodexState>(initialCodexState);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
   const [defaultCwd, setDefaultCwd] = useState<string>();
@@ -95,6 +217,14 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const optimisticItemSequence = useRef(0);
   const turnStartedWaiters = useRef(new Map<string, Set<() => void>>());
 
+  const reconcileSnapshot = useCallback((
+    value: unknown,
+    placement: "snapshot" | "prepend" | "append" = "snapshot",
+  ) => {
+    setState((current) => reconciler.hydrate(current, value, placement));
+    setQueuedByThread((current) => reconciler.confirmQueuedFromSnapshot(current, value));
+  }, [reconciler]);
+
   useEffect(() => {
     const unsubscribeRpc = socket.subscribe((message) => {
       if (isRpcRequest(message)) {
@@ -109,7 +239,11 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
           for (const resolve of waiters ?? []) resolve();
         }
       }
-      setState((current) => reduceCodexState(current, message));
+      const confirmed = confirmedUserMessage(message);
+      if (confirmed) {
+        setQueuedByThread((current) => reconciler.confirmQueuedMessage(current, confirmed));
+      }
+      setState((current) => reconciler.reduceEvent(current, message));
     });
     const unsubscribeSession = socket.subscribeSession((envelope) => {
       if (envelope.type !== "session") return;
@@ -134,7 +268,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       unsubscribeRpc();
       unsubscribeSession();
     };
-  }, [socket]);
+  }, [reconciler, socket]);
 
   const connect = useCallback(
     async (token: string, url?: string, reuseTokenOnReconnect = false) => {
@@ -375,11 +509,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
           }
           if (mirror !== undefined) {
             if (version === selectionRequestVersion.current) {
-              setState((current) => hydrateThread(
-                current,
-                mirror,
-                preserveDesktopHistory ? "append" : "snapshot",
-              ));
+              reconcileSnapshot(mirror, preserveDesktopHistory ? "append" : "snapshot");
               setThreadHistory((current) => ({
                 ...current,
                 [threadId]: preserveDesktopHistory
@@ -397,7 +527,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         }
         const result = await socket.request("thread/resume", { threadId });
         if (version === selectionRequestVersion.current) {
-          setState((current) => hydrateThread(current, result));
+          reconcileSnapshot(result);
           setThreadHistory((current) => ({ ...current, [threadId]: emptyThreadHistory }));
           desktopHistoryThreads.current.delete(threadId);
         }
@@ -417,11 +547,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
             history: HISTORY_PAGE,
           });
           if (version === selectionRequestVersion.current) {
-            setState((current) => hydrateThread(
-              current,
-              mirror,
-              preserveDesktopHistory ? "append" : "snapshot",
-            ));
+            reconcileSnapshot(mirror, preserveDesktopHistory ? "append" : "snapshot");
             setThreadHistory((current) => ({
               ...current,
               [threadId]: preserveDesktopHistory
@@ -443,7 +569,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         if (version === selectionRequestVersion.current) setLoadingThreadId(undefined);
       }
     },
-    [desktopControlAvailable, desktopStateAvailable, socket],
+    [desktopControlAvailable, desktopStateAvailable, reconcileSnapshot, socket],
   );
 
   const loadEarlierThreadHistory = useCallback(async () => {
@@ -460,7 +586,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         threadId: selectedThreadId,
         history: { ...HISTORY_PAGE, beforeCursor: currentHistory.beforeCursor },
       });
-      setState((current) => hydrateThread(current, value, "prepend"));
+      reconcileSnapshot(value, "prepend");
       setThreadHistory((current) => ({
         ...current,
         [selectedThreadId]: historyState(value),
@@ -472,7 +598,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         [selectedThreadId]: { ...(current[selectedThreadId] ?? emptyThreadHistory), loading: false },
       }));
     }
-  }, [selectedThreadId, socket, threadHistory]);
+  }, [reconcileSnapshot, selectedThreadId, socket, threadHistory]);
 
   const selectedDesktopMirror = selectedThreadId
     ? state.threads[selectedThreadId]?.desktopMirror === true
@@ -486,11 +612,11 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         threadId: selectedThreadId,
         history: { ...HISTORY_PAGE, limitTurns: 1 },
       })
-        .then((value) => setState((current) => hydrateThread(current, value, "append")))
+        .then((value) => reconcileSnapshot(value, "append"))
         .catch(() => undefined);
     }, 2_000);
     return () => window.clearInterval(timer);
-  }, [connection, selectedDesktopMirror, selectedThreadId, socket]);
+  }, [connection, reconcileSnapshot, selectedDesktopMirror, selectedThreadId, socket]);
 
   const clearSelection = useCallback(() => setSelectedThreadId(undefined), []);
 
@@ -498,8 +624,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     if (!desktopControlAvailable) return;
     const result = await socket.request("desktop/queue/list", { threadId });
     const messages = normalizeQueuedMessages(asRecord(result).messages);
-    setQueuedByThread((current) => ({ ...current, [threadId]: messages }));
-  }, [desktopControlAvailable, socket]);
+    setQueuedByThread((current) => reconciler.reconcileQueueSnapshot(current, threadId, messages));
+  }, [desktopControlAvailable, reconciler, socket]);
 
   useEffect(() => {
     if (connection !== "ready" || !selectedThreadId || !selectedDesktopMirror || !desktopControlAvailable) return;
@@ -565,15 +691,21 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
           });
           const [message] = normalizeQueuedMessages([asRecord(result).message]);
           if (runningMessageMode === "steer" && message) {
-            await socket.request("desktop/queue/steer", {
-              threadId: selectedThreadId,
-              messageId: message.id,
-              expectedTurnId: thread.activeTurnId,
-            });
-            setQueuedByThread((current) => ({
-              ...current,
-              [selectedThreadId]: (current[selectedThreadId] ?? []).filter((item) => item.id !== message.id),
-            }));
+            setQueuedByThread((current) =>
+              reconciler.stageQueuePromotion(current, selectedThreadId, message)
+            );
+            try {
+              await socket.request("desktop/queue/steer", {
+                threadId: selectedThreadId,
+                messageId: message.id,
+                expectedTurnId: thread.activeTurnId,
+              });
+            } catch (cause) {
+              setQueuedByThread((current) =>
+                reconciler.failQueuePromotion(current, selectedThreadId, message.id)
+              );
+              throw cause;
+            }
             return;
           }
           if (message) {
@@ -590,7 +722,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         const turnId = thread.activeTurnId ?? thread.turnOrder.at(-1);
         const itemId = `web-steer-${Date.now()}-${optimisticItemSequence.current++}`;
         if (turnId) {
-          setState((current) => addOptimisticUserMessage(
+          setState((current) => reconciler.stageUserMessage(
             current,
             selectedThreadId,
             turnId,
@@ -605,10 +737,11 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
             expectedTurnId: thread.activeTurnId,
             input,
             cwd: thread.cwd,
+            clientMessageId: itemId,
           });
         } catch (cause) {
           if (turnId) {
-            setState((current) => removeOptimisticItem(current, selectedThreadId, turnId, itemId));
+            setState((current) => reconciler.failUserMessage(current, selectedThreadId, turnId, itemId));
           }
           throw cause;
         }
@@ -649,22 +782,31 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         }
       }
     },
-    [desktopControlAvailable, remoteApi.baseUrl, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
+    [desktopControlAvailable, reconciler, remoteApi.baseUrl, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
   );
 
   const steerQueuedMessage = useCallback(async (messageId: string) => {
     if (!selectedThreadId) throw new Error("Select a task first");
     const thread = state.threads[selectedThreadId];
-    await socket.request("desktop/queue/steer", {
-      threadId: selectedThreadId,
-      messageId,
-      expectedTurnId: thread?.activeTurnId,
+    setQueuedByThread((current) => {
+      const message = (current[selectedThreadId] ?? []).find((item) => item.id === messageId);
+      return message
+        ? reconciler.stageQueuePromotion(current, selectedThreadId, message)
+        : current;
     });
-    setQueuedByThread((current) => ({
-      ...current,
-      [selectedThreadId]: (current[selectedThreadId] ?? []).filter((message) => message.id !== messageId),
-    }));
-  }, [selectedThreadId, socket, state.threads]);
+    try {
+      await socket.request("desktop/queue/steer", {
+        threadId: selectedThreadId,
+        messageId,
+        expectedTurnId: thread?.activeTurnId,
+      });
+    } catch (cause) {
+      setQueuedByThread((current) =>
+        reconciler.failQueuePromotion(current, selectedThreadId, messageId)
+      );
+      throw cause;
+    }
+  }, [reconciler, selectedThreadId, socket, state.threads]);
 
   const updateSelectedThreadSettings = useCallback((settings: CreateThreadOptions) => {
     if (!selectedThreadId) return;
@@ -812,7 +954,7 @@ export function addOptimisticUserMessage(
   itemId: string,
   text: string,
   imageIds: string[],
-) {
+): CodexState {
   const thread = state.threads[threadId];
   const turn = thread?.turns[turnId];
   if (!thread || !turn) return state;
@@ -844,6 +986,8 @@ export function addOptimisticUserMessage(
                 text,
                 imageIds: imageIds.length > 0 ? imageIds : undefined,
                 status: "completed",
+                clientMessageId: itemId,
+                lifecycle: "pending" as const,
               },
             },
           },
@@ -1064,6 +1208,10 @@ function hydrateThread(
         id: itemId,
         type: itemType,
         text: extractItemText(item),
+        clientMessageId: stringValue(item.clientMessageId) ??
+          stringValue(item.clientUserMessageId) ??
+          stringValue(item.client_message_id),
+        lifecycle: itemType.toLocaleLowerCase().includes("user") ? "confirmed" : undefined,
         status: stringValue(item.status),
         imageIds: stringArray(item.imageIds),
       };
@@ -1112,6 +1260,19 @@ function hydrateThread(
     : undefined;
   const activeTurnId = currentActiveTurnId ?? snapshotActiveTurnId;
   const deduplicatedTurns = dedupeOptimisticUserMessages(hydratedTurns, turnOrder);
+  const snapshotStatus = normalizeStatus(record.status, current.status);
+  const reconciledStatus = activeTurnId
+    ? "running"
+    : current.status === "idle" && snapshotStatus === "running" &&
+        snapshotTurnOrder.length > 0 &&
+        !snapshotTurnOrder.some((turnId) => deduplicatedTurns[turnId]?.status === "inProgress")
+      ? "idle"
+      : snapshotStatus;
+  const reconciledTodoList = latestTodoList &&
+      !latestTodoList.items.every((item) => item.status === "completed") &&
+      (!latestTodoList.turnId || !isTerminalTurnStatus(deduplicatedTurns[latestTodoList.turnId]?.status))
+    ? latestTodoList
+    : undefined;
   return {
     ...state,
     stale: false,
@@ -1126,7 +1287,7 @@ function hydrateThread(
         projectName: stringValue(record.projectName) ?? stringValue(outer.projectName) ?? current.projectName,
         projectRootPaths:
           stringArray(record.projectRootPaths) ?? stringArray(outer.projectRootPaths) ?? current.projectRootPaths,
-        status: activeTurnId ? "running" : normalizeStatus(record.status, current.status),
+        status: reconciledStatus,
         turns: deduplicatedTurns,
         turnOrder,
         activeTurnId,
@@ -1137,7 +1298,7 @@ function hydrateThread(
         sectionId: stringValue(asRecord(record.section).id) ?? current.sectionId,
         sectionName: stringValue(asRecord(record.section).name) ?? current.sectionName,
         desktopMirror: outer.desktopMirror === true,
-        todoList: latestTodoList,
+        todoList: reconciledTodoList,
       },
     },
   };
@@ -1147,6 +1308,11 @@ function sameUserMessage(
   left: CodexTurn["items"][string],
   right: CodexTurn["items"][string],
 ) {
+  if (
+    left.clientMessageId &&
+    right.clientMessageId &&
+    left.clientMessageId !== right.clientMessageId
+  ) return false;
   if (!isUserMessage(left) || !isUserMessage(right) || !sameUserInput(
     left.text,
     right.text,
@@ -1382,8 +1548,27 @@ function normalizeQueuedMessages(value: unknown): QueuedFollowUp[] {
       text,
       createdAt: typeof record.createdAt === "number" ? record.createdAt : undefined,
       cwd: stringValue(record.cwd),
+      lifecycle: "queued",
     }];
   });
+}
+
+function confirmedUserMessage(message: import("../../protocol/types").RpcMessage) {
+  if (!("method" in message) ||
+    (message.method !== "item/started" && message.method !== "item/completed")) return undefined;
+  const params = asRecord(message.params);
+  const item = asRecord(params.item);
+  const type = stringValue(item.type)?.toLocaleLowerCase() ?? "";
+  if (!type.includes("user")) return undefined;
+  const threadId = stringValue(params.threadId);
+  if (!threadId) return undefined;
+  return {
+    threadId,
+    text: extractItemText(item),
+    clientMessageId: stringValue(item.clientMessageId) ??
+      stringValue(item.clientUserMessageId) ??
+      stringValue(item.client_message_id),
+  };
 }
 
 function numberValue(value: unknown) {

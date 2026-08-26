@@ -1,8 +1,8 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CodexSocket, type BrowserSocket } from "../api/socket";
-import type { CodexState } from "../../protocol/thread-store";
-import { addOptimisticUserMessage, useCodex } from "./use-codex";
+import { initialCodexState, type CodexState } from "../../protocol/thread-store";
+import { addOptimisticUserMessage, ConversationReconciler, useCodex } from "./use-codex";
 
 class FakeBrowserSocket implements BrowserSocket {
   readonly OPEN = 1;
@@ -21,6 +21,122 @@ class FakeBrowserSocket implements BrowserSocket {
     this.onmessage?.({ data: JSON.stringify(payload) });
   }
 }
+
+describe("ConversationReconciler", () => {
+  it("does not restore a completed turn todo from a stale Desktop snapshot", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Task",
+          status: "idle",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "completed",
+              itemOrder: ["agent-1"],
+              items: {
+                "agent-1": { id: "agent-1", type: "agentMessage", text: "newer final text" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "active" },
+        turns: [{
+          id: "turn-1",
+          status: "inProgress",
+          items: [
+            { id: "agent-1", type: "agentMessage", text: "older" },
+            {
+              id: "todo-1",
+              type: "todoList",
+              plan: [{ step: "Already done", status: "inProgress" }],
+            },
+          ],
+        }],
+      },
+    });
+
+    expect(next.threads.t1.status).toBe("idle");
+    expect(next.threads.t1.turns["turn-1"].status).toBe("completed");
+    expect(next.threads.t1.turns["turn-1"].items["agent-1"].text).toBe("newer final text");
+    expect(next.threads.t1.todoList).toBeUndefined();
+  });
+
+  it("keeps an accepted queue promotion until an authoritative message confirms it", () => {
+    const reconciler = new ConversationReconciler();
+    const current = {
+      t1: [{
+        id: "client-1",
+        text: "continue",
+        lifecycle: "promoting" as const,
+        promotedAt: 1,
+      }],
+    };
+
+    const reconciled = reconciler.reconcileQueueSnapshot(current, "t1", [], 120_000);
+    expect(reconciled.t1).toEqual([expect.objectContaining({ id: "client-1", lifecycle: "promoting" })]);
+  });
+
+  it("confirms only the matching promoted message from a Desktop snapshot", () => {
+    const reconciler = new ConversationReconciler();
+    const current = {
+      t1: [
+        { id: "client-1", text: "continue", lifecycle: "promoting" as const },
+        { id: "client-2", text: "continue", lifecycle: "promoting" as const },
+      ],
+    };
+
+    const reconciled = reconciler.confirmQueuedFromSnapshot(current, {
+      thread: {
+        id: "t1",
+        turns: [{
+          id: "turn-1",
+          items: [{
+            id: "user-2",
+            type: "userMessage",
+            clientMessageId: "client-2",
+            text: "continue",
+          }],
+        }],
+      },
+    });
+
+    expect(reconciled.t1).toEqual([expect.objectContaining({ id: "client-1" })]);
+  });
+
+  it("keeps client message identity while hydrating a Desktop snapshot", () => {
+    const reconciler = new ConversationReconciler();
+    const next = reconciler.hydrate(initialCodexState, {
+      thread: {
+        id: "t1",
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          items: [{
+            id: "desktop-user-1",
+            type: "userMessage",
+            clientUserMessageId: "client-1",
+            text: "continue",
+          }],
+        }],
+      },
+    });
+
+    expect(next.threads.t1.turns["turn-1"].items["desktop-user-1"].clientMessageId).toBe("client-1");
+  });
+});
 
 describe("useCodex", () => {
   it("loads and normalizes the task list", async () => {
@@ -919,7 +1035,9 @@ describe("useCodex", () => {
     });
     fake.serverSend({ type: "rpc", payload: { id: promoteRequest.id, result: { messageId: "queued-1" } } });
     await act(() => promoting);
-    expect(result.current.selectedQueuedMessages).toEqual([]);
+    expect(result.current.selectedQueuedMessages).toEqual([
+      expect.objectContaining({ id: "queued-1", text: "Continue from the phone", lifecycle: "promoting" }),
+    ]);
 
     let steering: Promise<void>;
     act(() => { steering = result.current.sendInstruction("Guide immediately", [], "steer"); });
@@ -943,7 +1061,10 @@ describe("useCodex", () => {
     });
     fake.serverSend({ type: "rpc", payload: { id: immediateSteerRequest.id, result: { messageId: "queued-steer-1" } } });
     await act(() => steering);
-    expect(result.current.selectedQueuedMessages).toEqual([]);
+    expect(result.current.selectedQueuedMessages).toEqual([
+      expect.objectContaining({ id: "queued-1", text: "Continue from the phone", lifecycle: "promoting" }),
+      expect.objectContaining({ id: "queued-steer-1", text: "Guide immediately", lifecycle: "promoting" }),
+    ]);
     vi.unstubAllGlobals();
   });
 

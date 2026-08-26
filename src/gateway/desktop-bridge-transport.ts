@@ -570,7 +570,7 @@ export class DesktopBridgeTransport implements CodexTransport {
           ],
           restoreMessage: message,
           attachments: [],
-          clientUserMessageId: randomUUID(),
+          clientUserMessageId: typeof message.id === "string" ? message.id : randomUUID(),
         },
       );
       this.onMessage?.({ id: request.id, result: { messageId: message.id } });
@@ -779,7 +779,9 @@ function createOwnerRequest(message: RpcMessage) {
       : undefined)
     .filter((value): value is string => typeof value === "string")
     .join("\n");
-  const clientUserMessageId = randomUUID();
+  const clientUserMessageId = typeof params.clientMessageId === "string"
+    ? params.clientMessageId
+    : randomUUID();
   const cwd = typeof params.cwd === "string" ? params.cwd : null;
   return {
     method: "thread-follower-steer-turn",
@@ -787,7 +789,7 @@ function createOwnerRequest(message: RpcMessage) {
       conversationId,
       input,
       restoreMessage: {
-        id: randomUUID(),
+        id: clientUserMessageId,
         text,
         context: {
           prompt: text,

@@ -35,6 +35,78 @@ describe("reduceCodexState", () => {
     expect(state.threads.t1.turns["turn-1"].items.i1.text).toBe("hello");
   });
 
+  it("ignores a retransmitted full assistant delta for the same item", () => {
+    const first = reduceCodexState(initialCodexState, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "Full response" },
+    });
+    const repeated = reduceCodexState(first, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "Full response" },
+    });
+
+    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].text).toBe("Full response");
+    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].streamedText).toBe("Full response");
+  });
+
+  it("keeps identical short assistant deltas because they can be legitimate tokens", () => {
+    const first = reduceCodexState(initialCodexState, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "哈" },
+    });
+    const repeated = reduceCodexState(first, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "哈" },
+    });
+
+    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].text).toBe("哈哈");
+    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].streamedText).toBe("哈哈");
+  });
+
+  it("does not duplicate a delta already present in the Desktop visible text", () => {
+    const started = reduceCodexState(initialCodexState, {
+      method: "turn/started",
+      params: { threadId: "t1", turn: { id: "turn-1" } },
+    });
+    const visible = reduceCodexState(started, {
+      method: "desktop/visibleAgentMessage",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        itemId: "agent-1",
+        text: "hello world",
+      },
+    });
+    const duplicatedDelta = reduceCodexState(visible, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: " world" },
+    });
+
+    expect(duplicatedDelta.threads.t1.turns["turn-1"].items["agent-1"].text).toBe("hello world");
+  });
+
+  it("continues streaming after the Desktop visible text catches up", () => {
+    const streamed = reduceCodexState(initialCodexState, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "hello" },
+    });
+    const visible = reduceCodexState(streamed, {
+      method: "desktop/visibleAgentMessage",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        itemId: "agent-1",
+        text: "hello world",
+      },
+    });
+    const continued = reduceCodexState(visible, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "!" },
+    });
+
+    expect(continued.threads.t1.turns["turn-1"].items["agent-1"].text).toBe("hello world!");
+  });
+
   it("creates a streamed item inside its server turn when the start notification was missed", () => {
     const next = reduceCodexState(initialCodexState, {
       method: "item/agentMessage/delta",
@@ -307,6 +379,152 @@ describe("reduceCodexState", () => {
     expect(repeated.threads.t1.turns["turn-2"].itemOrder).toEqual(["user-2"]);
   });
 
+  it("keeps consecutive equal user messages when their client identities differ", () => {
+    const first = reduceCodexState(initialCodexState, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          id: "user-1",
+          clientMessageId: "client-1",
+          type: "userMessage",
+          content: [{ type: "text", text: "继续" }],
+        },
+      },
+    });
+    const second = reduceCodexState(first, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-2",
+        item: {
+          id: "user-2",
+          clientMessageId: "client-2",
+          type: "userMessage",
+          content: [{ type: "text", text: "继续" }],
+        },
+      },
+    });
+
+    expect(second.threads.t1.turns["turn-1"].itemOrder).toEqual(["user-1"]);
+    expect(second.threads.t1.turns["turn-2"].itemOrder).toEqual(["user-2"]);
+  });
+
+  it("replaces one identified optimistic message when Desktop omits the client identity", () => {
+    const state = {
+      ...initialCodexState,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live task",
+          status: "running" as const,
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "inProgress" as const,
+              itemOrder: ["web-steer-client-1"],
+              items: {
+                "web-steer-client-1": {
+                  id: "web-steer-client-1",
+                  clientMessageId: "client-1",
+                  lifecycle: "pending" as const,
+                  type: "userMessage",
+                  text: "继续",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const confirmed = reduceCodexState(state, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-2",
+        item: {
+          id: "desktop-user-1",
+          type: "userMessage",
+          content: [{ type: "text", text: "继续" }],
+        },
+      },
+    });
+
+    expect(confirmed.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
+    expect(confirmed.threads.t1.turns["turn-2"].itemOrder).toEqual(["desktop-user-1"]);
+  });
+
+  it("does not let an old turn completion stop a newer active turn", () => {
+    const first = reduceCodexState(initialCodexState, {
+      method: "turn/started",
+      params: { threadId: "t1", turn: { id: "turn-1" } },
+    });
+    const second = reduceCodexState(first, {
+      method: "turn/started",
+      params: { threadId: "t1", turn: { id: "turn-2" } },
+    });
+    const lateCompletion = reduceCodexState(second, {
+      method: "turn/completed",
+      params: { threadId: "t1", turn: { id: "turn-1", status: "completed" } },
+    });
+
+    expect(lateCompletion.threads.t1).toMatchObject({
+      status: "running",
+      activeTurnId: "turn-2",
+    });
+    expect(lateCompletion.threads.t1.turns["turn-1"].status).toBe("completed");
+    expect(lateCompletion.threads.t1.turns["turn-2"].status).toBe("inProgress");
+  });
+
+  it("keeps a completed turn terminal when a late tool event arrives", () => {
+    const started = reduceCodexState(initialCodexState, {
+      method: "turn/started",
+      params: { threadId: "t1", turn: { id: "turn-1" } },
+    });
+    const completed = reduceCodexState(started, {
+      method: "turn/completed",
+      params: { threadId: "t1", turn: { id: "turn-1", status: "completed" } },
+    });
+    const lateTool = reduceCodexState(completed, {
+      method: "item/mcpToolCall/progress",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        itemId: "tool-1",
+        message: "late progress",
+      },
+    });
+
+    expect(lateTool.threads.t1.status).toBe("idle");
+    expect(lateTool.threads.t1.activeTurnId).toBeUndefined();
+    expect(lateTool.threads.t1.turns["turn-1"].status).toBe("completed");
+    expect(lateTool.threads.t1.turns["turn-1"].items["tool-1"].status).toBe("completed");
+  });
+
+  it("finishes still-running items when their turn completes", () => {
+    const started = reduceCodexState(initialCodexState, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: { id: "tool-1", type: "commandExecution", command: "pnpm test" },
+      },
+    });
+
+    const completed = reduceCodexState(started, {
+      method: "turn/completed",
+      params: { threadId: "t1", turn: { id: "turn-1", status: "completed" } },
+    });
+
+    expect(completed.threads.t1.turns["turn-1"].status).toBe("completed");
+    expect(completed.threads.t1.turns["turn-1"].items["tool-1"].status).toBe("completed");
+  });
+
   it("renders a Desktop image event immediately without exposing its local path envelope", () => {
     const next = reduceCodexState(initialCodexState, {
       method: "item/started",
@@ -364,6 +582,27 @@ describe("reduceCodexState", () => {
         { step: "Run tests", status: "pending" },
       ],
     });
+  });
+
+  it("clears a turn todo list when that turn reaches a terminal state", () => {
+    const started = reduceCodexState(initialCodexState, {
+      method: "turn/started",
+      params: { threadId: "t1", turn: { id: "turn-1" } },
+    });
+    const planned = reduceCodexState(started, {
+      method: "turn/plan/updated",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        plan: [{ step: "Finish", status: "inProgress" }],
+      },
+    });
+    const completed = reduceCodexState(planned, {
+      method: "turn/completed",
+      params: { threadId: "t1", turn: { id: "turn-1", status: "completed" } },
+    });
+
+    expect(completed.threads.t1.todoList).toBeUndefined();
   });
 
   it("aggregates command, plan, tool, file, and terminal event streams in their turn", () => {

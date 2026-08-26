@@ -18,6 +18,10 @@ export type CodexItem = {
   text: string;
   status?: string;
   imageIds?: string[];
+  clientMessageId?: string;
+  lifecycle?: "pending" | "queued" | "promoting" | "accepted" | "confirmed" | "failed";
+  streamedText?: string;
+  visibleText?: string;
 };
 
 export type CodexTurn = {
@@ -81,13 +85,19 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           type: "agentMessage",
           text: "",
         };
+        const priorStream = previous.streamedText ?? (previous.visibleText === undefined ? previous.text : "");
+        const retransmittedFullDelta = delta.length >= 8 &&
+          previous.streamedText === delta &&
+          previous.text === delta;
+        const streamedText = retransmittedFullDelta ? priorStream : `${priorStream}${delta}`;
+        const text = reconcileAssistantDelta(previous, streamedText, delta);
         return {
           ...turn,
           status: "inProgress",
           itemOrder: appendUnique(turn.itemOrder, itemId),
           items: {
             ...turn.items,
-            [itemId]: { ...previous, text: previous.text + delta, status: "running" },
+            [itemId]: { ...previous, text, streamedText, status: "running" },
           },
         };
       }, "inProgress", true);
@@ -114,7 +124,8 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
             [itemId]: {
               ...previous,
               type: "agentMessage",
-              text,
+              text: reconcileVisibleAssistantText(previous, text),
+              visibleText: text,
               status: previous.status ?? "running",
             },
           },
@@ -209,10 +220,13 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
   }
 
   if (message.method === "thread/status/changed" && threadId) {
-    return updateThread(state, threadId, (thread) => ({
-      ...thread,
-      status: normalizeStatus(params.status),
-    }));
+    return updateThread(state, threadId, (thread) => {
+      const status = normalizeStatus(params.status);
+      return {
+        ...thread,
+        status: thread.activeTurnId && status !== "running" ? "running" : status,
+      };
+    });
   }
 
   if (message.method === "thread/name/updated" && threadId) {
@@ -237,30 +251,43 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     const turnValue = asRecord(params.turn);
     const turnId = stringValue(turnValue.id) ?? stringValue(params.turnId);
     if (!turnId) return state;
-    return updateThread(state, threadId, (thread) => ({
-      ...updateTurn(thread, turnId, (turn) => ({
-        ...turn,
-        status: "inProgress",
-        startedAt: numberValue(turnValue.startedAt) ?? turn.startedAt,
-      }), "inProgress"),
-      status: "running",
-      activeTurnId: turnId,
-    }));
+    return updateThread(state, threadId, (thread) => {
+      if (isTerminalTurnStatus(thread.turns[turnId]?.status)) return thread;
+      return {
+        ...updateTurn(thread, turnId, (turn) => ({
+          ...turn,
+          status: "inProgress",
+          startedAt: numberValue(turnValue.startedAt) ?? turn.startedAt,
+        }), "inProgress"),
+        status: "running",
+        activeTurnId: turnId,
+      };
+    });
   }
 
   if (message.method === "turn/completed" && threadId) {
     const turnValue = asRecord(params.turn);
     const turnId = stringValue(turnValue.id) ?? stringValue(params.turnId);
     return updateThread(state, threadId, (thread) => {
-      const next = turnId
-        ? updateTurn(thread, turnId, (turn) => ({
+      const completedTurnId = turnId ?? thread.activeTurnId;
+      const next = completedTurnId
+        ? updateTurn(thread, completedTurnId, (turn) => ({
             ...turn,
             status: normalizeTurnStatus(turnValue.status, "completed"),
             completedAt: numberValue(turnValue.completedAt) ?? turn.completedAt,
             durationMs: numberValue(turnValue.durationMs) ?? turn.durationMs,
           }))
         : thread;
-      return { ...next, status: "idle", activeTurnId: undefined };
+      const completesActiveTurn = !thread.activeTurnId || completedTurnId === thread.activeTurnId;
+      return {
+        ...next,
+        status: completesActiveTurn ? "idle" : next.status,
+        activeTurnId: completesActiveTurn ? undefined : next.activeTurnId,
+        todoList: completedTurnId && next.todoList &&
+            (!next.todoList.turnId || next.todoList.turnId === completedTurnId)
+          ? undefined
+          : next.todoList,
+      };
     });
   }
 
@@ -273,15 +300,21 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
 
   if (message.method === "turn/plan/updated" && threadId) {
     const items = todoItems(params.plan);
-    if (items.length === 0) return state;
-    return updateThread(state, threadId, (thread) => ({
-      ...thread,
-      todoList: {
-        turnId: stringValue(params.turnId),
-        explanation: stringValue(params.explanation),
-        items,
-      },
-    }));
+    return updateThread(state, threadId, (thread) => {
+      const todoTurnId = stringValue(params.turnId) ?? thread.activeTurnId;
+      const terminal = todoTurnId ? isTerminalTurnStatus(thread.turns[todoTurnId]?.status) : false;
+      if (items.length === 0 || items.every((item) => item.status === "completed") || terminal) {
+        return { ...thread, todoList: undefined };
+      }
+      return {
+        ...thread,
+        todoList: {
+          turnId: todoTurnId,
+          explanation: stringValue(params.explanation),
+          items,
+        },
+      };
+    });
   }
 
   const item = asRecord(params.item);
@@ -293,11 +326,18 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
       const itemType = stringValue(item.type) ?? thread.turns[turnId]?.items[itemId]?.type ?? "item";
       const rawText = itemText(item);
       const text = isUserMessageType(itemType) ? displayUserInput(rawText) : rawText;
+      const clientMessageId = messageIdentity(item);
       const optimisticMatch = isUserMessageType(itemType)
-        ? findMatchingOptimisticUserMessage(thread, text, itemId)
+        ? findMatchingOptimisticUserMessage(thread, text, itemId, clientMessageId)
         : undefined;
       const confirmedDuplicate = isUserMessageType(itemType) && !optimisticMatch
-        ? findRecentConfirmedUserMessage(thread, text, itemId, stringArray(item.imageIds).length > 0)
+        ? findRecentConfirmedUserMessage(
+          thread,
+          text,
+          itemId,
+          stringArray(item.imageIds).length > 0,
+          clientMessageId,
+        )
         : undefined;
       const reconciledMatch = optimisticMatch ?? confirmedDuplicate;
       const baseThread = reconciledMatch
@@ -316,6 +356,8 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           id: itemId,
           type: itemType,
           text: resolvedText,
+          clientMessageId: clientMessageId ?? previous?.clientMessageId ?? reconciledMatch?.item.clientMessageId,
+          lifecycle: isUserMessageType(itemType) ? "confirmed" : previous?.lifecycle,
           ...(imageIds.length > 0 ? { imageIds } : {}),
           status: message.method === "item/completed"
             ? stringValue(item.status) ?? "completed"
@@ -359,12 +401,26 @@ function updateTurn(
   markRunning = false,
 ): CodexThread {
   const current = thread.turns[turnId] ?? emptyTurn(turnId, initialStatus);
+  const terminal = isTerminalTurnStatus(current.status);
+  const updated = update(current);
+  const normalized = terminal || isTerminalTurnStatus(updated.status)
+    ? {
+        ...updated,
+        status: terminal ? current.status : updated.status,
+        items: Object.fromEntries(Object.entries(updated.items).map(([itemId, item]) => [
+          itemId,
+          item.status === "running" || item.status === "inProgress"
+            ? { ...item, status: "completed" }
+            : item,
+        ])),
+      }
+    : updated;
   return {
     ...thread,
-    status: markRunning ? "running" : thread.status,
-    activeTurnId: markRunning ? turnId : thread.activeTurnId,
+    status: markRunning && !terminal ? "running" : thread.status,
+    activeTurnId: markRunning && !terminal ? turnId : thread.activeTurnId,
     turnOrder: appendUnique(thread.turnOrder, turnId),
-    turns: { ...thread.turns, [turnId]: update(current) },
+    turns: { ...thread.turns, [turnId]: normalized },
   };
 }
 
@@ -388,13 +444,15 @@ function findMatchingOptimisticUserMessage(
   thread: CodexThread,
   text: string,
   authoritativeId: string,
+  clientMessageId?: string,
 ) {
   if (thread.turnOrder.some((turnId) => thread.turns[turnId]?.items[authoritativeId])) return undefined;
   for (const turnId of thread.turnOrder) {
     const turn = thread.turns[turnId];
     const itemId = turn?.itemOrder.find((id) => {
       const candidate = turn.items[id];
-      return Boolean(candidate) && id.startsWith("web-steer-") &&
+      return Boolean(candidate) && isOptimisticMessage(candidate, id) &&
+        optimisticIdentitiesMatch(candidate, clientMessageId) &&
         isUserMessageType(candidate?.type) &&
         sameUserInput(
           candidate?.text ?? "",
@@ -413,6 +471,7 @@ function findRecentConfirmedUserMessage(
   text: string,
   authoritativeId: string,
   incomingHasImages: boolean,
+  clientMessageId?: string,
 ) {
   if (thread.turnOrder.some((turnId) => thread.turns[turnId]?.items[authoritativeId])) return undefined;
   for (const turnId of [...thread.turnOrder].reverse()) {
@@ -421,6 +480,7 @@ function findRecentConfirmedUserMessage(
       const candidate = turn.items[itemId];
       if (!candidate) continue;
       if (isUserMessageType(candidate.type)) {
+        if (!identitiesMatch(candidate, clientMessageId)) return undefined;
         return sameUserInput(
           candidate.text,
           text,
@@ -432,6 +492,57 @@ function findRecentConfirmedUserMessage(
     }
   }
   return undefined;
+}
+
+function isOptimisticMessage(item: CodexItem | undefined, itemId: string) {
+  return Boolean(item) && (
+    itemId.startsWith("web-steer-") ||
+    item?.lifecycle === "pending" ||
+    item?.lifecycle === "promoting" ||
+    item?.lifecycle === "accepted"
+  );
+}
+
+function identitiesMatch(item: CodexItem | undefined, clientMessageId?: string) {
+  if (!clientMessageId) return !item?.clientMessageId;
+  return item?.clientMessageId === clientMessageId;
+}
+
+function optimisticIdentitiesMatch(item: CodexItem | undefined, clientMessageId?: string) {
+  if (!clientMessageId) return true;
+  return item?.clientMessageId === clientMessageId;
+}
+
+function messageIdentity(item: Record<string, unknown>) {
+  return stringValue(item.clientMessageId) ??
+    stringValue(item.clientUserMessageId) ??
+    stringValue(item.client_message_id);
+}
+
+function reconcileAssistantDelta(previous: CodexItem, streamedText: string, delta: string) {
+  const visibleText = previous.visibleText;
+  if (visibleText === undefined) return streamedText;
+  const normalizedStream = streamedText.trim();
+  if (normalizedStream && visibleText.includes(normalizedStream)) return visibleText;
+  if (streamedText.includes(visibleText)) return streamedText;
+  const priorStream = previous.streamedText ?? "";
+  if (priorStream && visibleText.startsWith(priorStream)) {
+    return visibleText.endsWith(delta) ? visibleText : `${visibleText}${delta}`;
+  }
+  if (visibleText.endsWith(delta)) return visibleText;
+  return streamedText.length > visibleText.length ? streamedText : visibleText;
+}
+
+function reconcileVisibleAssistantText(previous: CodexItem, visibleText: string) {
+  const streamedText = previous.streamedText;
+  if (!streamedText) return visibleText;
+  if (visibleText.startsWith(streamedText)) return visibleText;
+  if (streamedText.startsWith(visibleText)) return streamedText;
+  return visibleText.length >= streamedText.length ? visibleText : streamedText;
+}
+
+function isTerminalTurnStatus(status: TurnStatus | undefined) {
+  return status === "completed" || status === "interrupted" || status === "failed";
 }
 
 function removeItemFromTurn(thread: CodexThread, turnId: string, itemId: string): CodexThread {

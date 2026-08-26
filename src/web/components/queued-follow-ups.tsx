@@ -40,9 +40,13 @@ export function QueuedFollowUps({ messages, onSteer, language = "zh-CN" }: Queue
             <button
               type="button"
               onClick={() => void steer(message.id)}
-              disabled={Boolean(busyId)}
+              disabled={Boolean(busyId) || message.lifecycle === "promoting"}
             >
-              {busyId === message.id ? (en ? "Working…" : "处理中…") : (en ? "Steer now" : "转为引导")}
+              {busyId === message.id || message.lifecycle === "promoting"
+                ? (en ? "Promoting to steer…" : "正在转为引导…")
+                : message.lifecycle === "failed"
+                  ? (en ? "Retry steer" : "重试引导")
+                  : (en ? "Steer now" : "转为引导")}
             </button>
           </article>
         ))}
