@@ -16,8 +16,8 @@ describe("findMobileUpdate", () => {
     await expect(findMobileUpdate("0.4.1", "android", fetcher)).resolves.toEqual({
       state: "available",
       latestVersion: "0.4.2",
-      downloadUrl: "https://raw.githubusercontent.com/cnwenf/codex-remote/android-download/v0.4.2/Codex-Remote-android-arm64.apk",
-      checksumUrl: "https://raw.githubusercontent.com/cnwenf/codex-remote/android-download/v0.4.2/Codex-Remote-android-arm64.apk.sha256",
+      downloadUrl: "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote@android-download/v0.4.2/Codex-Remote-android-arm64.apk",
+      checksumUrl: "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote@android-download/v0.4.2/Codex-Remote-android-arm64.apk.sha256",
     });
   });
 

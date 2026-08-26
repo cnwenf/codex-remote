@@ -20,7 +20,7 @@ type GitHubRelease = {
 };
 
 const latestReleaseUrl = "https://api.github.com/repos/cnwenf/codex-remote/releases/latest";
-const androidDownloadRoot = "https://raw.githubusercontent.com/cnwenf/codex-remote/android-download";
+const androidDownloadRoot = "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote@android-download";
 
 export async function findMobileUpdate(
   currentVersion: string,

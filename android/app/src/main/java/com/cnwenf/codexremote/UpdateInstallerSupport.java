@@ -20,7 +20,8 @@ final class UpdateInstallerSupport {
             return host.equals("github.com")
                 || host.endsWith(".github.com")
                 || host.equals("githubusercontent.com")
-                || host.endsWith(".githubusercontent.com");
+                || host.endsWith(".githubusercontent.com")
+                || host.equals("cdn.jsdelivr.net");
         } catch (RuntimeException ignored) {
             return false;
         }

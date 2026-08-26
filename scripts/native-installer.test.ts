@@ -37,6 +37,9 @@ describe("native installer contract", () => {
     expect(releaseWorkflow).not.toContain("app-debug.apk");
     expect(releaseWorkflow).toContain("android-download");
     expect(releaseWorkflow).toContain("Codex-Remote-android-arm64.apk.sha256");
+    expect(releaseWorkflow).toContain("gh release view");
+    expect(releaseWorkflow).toContain("gh release upload");
+    expect(releaseWorkflow).toContain("--clobber");
 
     expect(androidBuild).toContain("ANDROID_RELEASE_KEYSTORE_PATH");
     expect(androidBuild).toContain("signingConfig signingConfigs.release");
