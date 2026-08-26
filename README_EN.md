@@ -64,7 +64,7 @@ The password is stored at `~/Library/Application Support/Codex Remote/token` wit
 The installer creates two explicit user LaunchAgents:
 
 - `local.codex-remote.app` starts the native app at login but does not repeatedly relaunch it after the user deliberately quits.
-- `local.codex-remote.desktop` starts Desktop with `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9229`.
+- `local.codex-remote.desktop` starts Desktop once at login with `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9229`. It never uses `KeepAlive` to relaunch Desktop repeatedly; during installation or an upgrade, an already-running Desktop is left alone until the user exits it normally, then one debug-enabled instance is started.
 
 ```bash
 launchctl print "gui/$(id -u)/local.codex-remote.app"

@@ -2,12 +2,15 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const supportPath = join(dirname(fileURLToPath(import.meta.url)), "runtime-support.sh");
+const desktopLauncherPath = join(dirname(fileURLToPath(import.meta.url)), "launch-codex-desktop.sh");
 
 describe("Desktop runtime shell support", () => {
   it("uses an explicit executable Node runtime without embedding a user home path", () => {
@@ -56,5 +59,48 @@ describe("Desktop runtime shell support", () => {
 
     const [status] = await exitPromise;
     expect(status).toBe(0);
+  });
+
+  it("waits for an existing Desktop process and launches it only once", () => {
+    const root = mkdtempSync(join(tmpdir(), "codex-desktop-launcher-test-"));
+    const app = join(root, "ChatGPT.app");
+    const desktop = join(app, "Contents", "MacOS", "ChatGPT");
+    const ps = join(root, "ps");
+    const counter = join(root, "ps-count");
+    const invocation = join(root, "desktop-invocation");
+    mkdirSync(dirname(desktop), { recursive: true });
+    writeFileSync(desktop, `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(invocation)}\n`);
+    writeFileSync(ps, `#!/bin/sh
+count=0
+test -f ${JSON.stringify(counter)} && count=$(cat ${JSON.stringify(counter)})
+count=$((count + 1))
+printf '%s\\n' "$count" > ${JSON.stringify(counter)}
+if test "$count" -lt 3; then
+  printf '%s\\n' ${JSON.stringify(desktop)}
+fi
+`);
+    chmodSync(desktop, 0o755);
+    chmodSync(ps, 0o755);
+
+    try {
+      const result = spawnSync("/bin/zsh", [desktopLauncherPath], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_DESKTOP_APP_PATH: app,
+          CODEX_REMOTE_PS_BIN: ps,
+          CODEX_REMOTE_DESKTOP_WAIT_SECONDS: "0.01",
+          CODEX_REMOTE_CDP_PORT: "9333",
+        },
+      });
+      expect(result.status).toBe(0);
+      expect(readFileSync(counter, "utf8").trim()).toBe("3");
+      expect(readFileSync(invocation, "utf8").trim().split("\n")).toEqual([
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-debugging-port=9333",
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

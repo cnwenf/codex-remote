@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 describe("persistent LaunchAgent rendering", () => {
-  it("renders an always-on Desktop job with loopback-only DevTools arguments", () => {
+  it("renders a one-shot Desktop launcher with loopback-only DevTools arguments", () => {
     const fixture = createFixture();
     const result = render(fixture);
 
@@ -24,15 +24,17 @@ describe("persistent LaunchAgent rendering", () => {
     const desktop = readPlist(join(fixture.output, "local.codex-web.desktop.plist"));
     expect(desktop).toMatchObject({
       Label: "local.codex-web.desktop",
-      KeepAlive: true,
+      KeepAlive: false,
       RunAtLoad: true,
       LimitLoadToSessionType: "Aqua",
       ProcessType: "Interactive",
       ProgramArguments: [
-        join(fixture.app, "Contents/MacOS/ChatGPT"),
-        "--remote-debugging-address=127.0.0.1",
-        "--remote-debugging-port=9229",
+        join(fixture.project, "scripts/launch-codex-desktop.sh"),
       ],
+    });
+    expect(desktop.EnvironmentVariables).toMatchObject({
+      CODEX_DESKTOP_APP_PATH: fixture.app,
+      CODEX_REMOTE_CDP_PORT: "9229",
     });
   });
 

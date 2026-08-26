@@ -139,10 +139,10 @@ printf 'sha256 Fingerprint=%s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/.
     expect(installer).toContain('chmod 600 "$support/token"');
   });
 
-  it("starts at login without relaunching a deliberately closed menu app", () => {
+  it("starts at login without keeping either desktop app alive", () => {
     expect(agents).toContain("RunAtLoad");
     expect(agents).toContain('render "$APP_PLIST" local.codex-remote.app false');
-    expect(agents).toContain('render "$DESKTOP_PLIST" local.codex-remote.desktop true');
+    expect(agents).toContain('render "$DESKTOP_PLIST" local.codex-remote.desktop false');
     expect(`${installer}\n${agents}`).not.toMatch(/launchctl\s+submit/);
   });
 

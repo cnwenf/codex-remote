@@ -64,7 +64,7 @@ GitHub 仓库：git@github.com:cnwenf/codex-remote.git
 安装器创建两个明确的当前用户 LaunchAgent：
 
 - `local.codex-remote.app`：登录后启动 Codex Remote App；用户主动退出后不会反复拉起。
-- `local.codex-remote.desktop`：使用 `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9229` 启动 Codex Desktop。
+- `local.codex-remote.desktop`：登录后使用 `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9229` 启动一次 Codex Desktop。它不会通过 `KeepAlive` 反复拉起 Desktop；安装或升级时如果 Desktop 已运行，只等待用户下一次正常退出后再启动一次调试实例。
 
 检查状态：
 
