@@ -925,8 +925,8 @@ function visibleThreadSettingsHelperExpression(): string {
 
 function ownerHelperExpression(): string {
   return `(() => {
-    if (window.__codexRemoteRequestThreadOwnerVersion !== 4) {
-      window.__codexRemoteRequestThreadOwnerVersion = 4;
+    if (window.__codexRemoteRequestThreadOwnerVersion !== 5) {
+      window.__codexRemoteRequestThreadOwnerVersion = 5;
       let coordinationPromise;
       const getCoordination = async () => {
         if (coordinationPromise) return coordinationPromise;
@@ -938,9 +938,16 @@ function ownerHelperExpression(): string {
           const moduleUrl = urls.find((url) => /\\/app-initial-[^/]+\\.js(?:$|\\?)/.test(url));
           if (!moduleUrl) throw new Error('desktop-owner-module-not-found');
           const loaded = await import(moduleUrl);
-          const createRemoteMain = Object.values(loaded).find((value) =>
-            typeof value === 'function' && String(value).includes('getRemoteMain')
-          );
+          const createRemoteMain = Object.values(loaded).find((value) => {
+            if (typeof value !== 'function') return false;
+            try {
+              return String(value).includes('getRemoteMain');
+            } catch {
+              // Desktop can export callable proxies whose primitive/string
+              // conversion intentionally throws. They are not RPC factories.
+              return false;
+            }
+          });
           if (!createRemoteMain) throw new Error('desktop-owner-rpc-factory-not-found');
           const channel = new MessageChannel();
           window.postMessage(

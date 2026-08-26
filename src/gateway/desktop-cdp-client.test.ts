@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeCdpServer } from "../../tests/fixtures/fake-cdp-server";
+import * as poisonedDesktopModule from "../../tests/fixtures/app-initial-poisoned";
 import { DesktopCdpClient } from "./desktop-cdp-client";
 
 let server: FakeCdpServer | undefined;
@@ -126,6 +127,43 @@ describe("DesktopCdpClient", () => {
       { value: "thread-1" },
       { value: [{ id: "queued-1", text: "Run next" }] },
     ]);
+    await client.stop();
+  });
+
+  it("skips callable Desktop exports whose string conversion throws", async () => {
+    server = new FakeCdpServer();
+    const endpoint = await server.start();
+    const client = new DesktopCdpClient({ endpoint });
+    await client.start(() => undefined, () => undefined);
+    await client.broadcastQueuedFollowUps("thread-1", []);
+
+    const expression = String(server.ownerRequests[1]?.params?.expression).replace(
+      "const loaded = await import(moduleUrl);",
+      "const loaded = window.__testDesktopModule;",
+    );
+    const window = {
+      location: { origin: "app://-" },
+      postMessage: vi.fn(),
+      __testDesktopModule: poisonedDesktopModule,
+    } as Record<string, unknown>;
+    const document = {
+      querySelectorAll: () => [{ href: "app://-/assets/app-initial-fixture.js" }],
+    };
+    const performance = { getEntriesByType: () => [] };
+    class MessageChannel {
+      port1 = {};
+      port2 = {};
+    }
+
+    const installedWindow = eval(expression) as typeof window;
+    const broadcast = installedWindow.__codexRemoteBroadcastQueuedFollowUps as (
+      conversationId: string,
+      messages: unknown[],
+    ) => Promise<unknown>;
+    await expect(broadcast("thread-1", [])).resolves.toEqual({
+      conversationId: "thread-1",
+      messages: [],
+    });
     await client.stop();
   });
 
