@@ -19,8 +19,13 @@ type GitHubRelease = {
   assets?: Array<{ name?: unknown; browser_download_url?: unknown }>;
 };
 
+type GitHubRef = {
+  object?: { sha?: unknown };
+};
+
 const latestReleaseUrl = "https://api.github.com/repos/cnwenf/codex-remote/releases/latest";
-const androidDownloadRoot = "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote@android-download";
+const androidDownloadRefUrl = "https://api.github.com/repos/cnwenf/codex-remote/git/ref/heads/android-download";
+const androidDownloadRoot = "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote";
 
 export async function findMobileUpdate(
   currentVersion: string,
@@ -54,11 +59,20 @@ export async function findMobileUpdate(
     const releaseTag = typeof release.tag_name === "string" ? release.tag_name : `v${latestVersion}`;
     const assetName = typeof asset?.name === "string" ? asset.name : "";
     if (!assetName) throw new Error("update-download-invalid");
+    const refResponse = await fetcher(androidDownloadRefUrl, {
+      cache: "no-store",
+      headers: { accept: "application/vnd.github+json" },
+    });
+    if (!refResponse.ok) throw new Error(`update-download-ref-failed:${refResponse.status}`);
+    const downloadRef = await refResponse.json() as GitHubRef;
+    const downloadCommit = typeof downloadRef.object?.sha === "string" ? downloadRef.object.sha : "";
+    if (!/^[0-9a-f]{40}$/i.test(downloadCommit)) throw new Error("update-download-ref-invalid");
+    const immutableDownloadRoot = `${androidDownloadRoot}@${downloadCommit}`;
     return {
       state: "available",
       latestVersion,
-      downloadUrl: `${androidDownloadRoot}/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}`,
-      checksumUrl: `${androidDownloadRoot}/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}.sha256`,
+      downloadUrl: `${immutableDownloadRoot}/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}`,
+      checksumUrl: `${immutableDownloadRoot}/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}.sha256`,
     };
   }
   return { state: "available", latestVersion, downloadUrl };
