@@ -171,6 +171,12 @@ printf 'sha256 Fingerprint=%s\\n' "$(printf '%s' "$FAKE_ANDROID_CERT" | sed 's/.
     expect(gatewayLauncher).toContain("kill -TERM");
   });
 
+  it("starts the Web listener without waiting for the Desktop debug bridge", () => {
+    expect(gatewayLauncher).not.toContain("for _ in {1..120}");
+    expect(gatewayLauncher).not.toContain('curl -fsS "$CDP_ENDPOINT/json/list"');
+    expect(gatewayLauncher).toContain('CODEX_DESKTOP_CDP_ENDPOINT="$CDP_ENDPOINT"');
+  });
+
   it("ships executable install and packaging scripts", () => {
     for (const file of ["install.sh", "scripts/build-macos-app.sh", "scripts/package-macos-dmg.sh", "scripts/create-macos-dmg.sh"]) {
       expect(statSync(join(root, file)).mode & 0o111).not.toBe(0);

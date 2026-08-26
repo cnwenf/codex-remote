@@ -126,11 +126,20 @@ export class DesktopBridgeTransport implements CodexTransport {
     }
     this.onMessage = onMessage;
     this.onDiagnostic = onDiagnostic;
-    await this.options.client.start(
-      (message) => this.receiveDesktopMessage(message),
-      (cause) => this.markDisconnected(true, cause),
-    );
-    this.bridgeState = "live";
+    try {
+      await this.options.client.start(
+        (message) => this.receiveDesktopMessage(message),
+        (cause) => this.markDisconnected(true, cause),
+      );
+      this.bridgeState = "live";
+    } catch {
+      this.bridgeState = "read-only";
+      this.onDiagnostic?.({
+        category: "protocol",
+        message: "Desktop bridge is unavailable; Desktop threads are read-only",
+      });
+      this.scheduleReconnect();
+    }
   }
 
   send(message: RpcMessage): void {

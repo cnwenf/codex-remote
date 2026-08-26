@@ -30,11 +30,6 @@ umask 077
 print -r -- "$$" > "$PID_FILE.tmp"
 /bin/mv -f "$PID_FILE.tmp" "$PID_FILE"
 
-for _ in {1..120}; do
-  /usr/bin/curl -fsS "$CDP_ENDPOINT/json/list" >/dev/null 2>&1 && break
-  sleep 0.5
-done
-/usr/bin/curl -fsS "$CDP_ENDPOINT/json/list" >/dev/null
 CODEX_VERSION=$("$APP_PATH/Contents/Resources/codex" --version | /usr/bin/sed -E 's/^codex-cli[[:space:]]+//')
 ADDITIONAL_HOSTS=""
 ORIGINS="http://$BIND_HOST:$PORT"

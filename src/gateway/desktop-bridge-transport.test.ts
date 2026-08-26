@@ -11,11 +11,16 @@ class FakeBridgeClient implements DesktopBridgeClient {
   ownerRequestResult: unknown = { method: "thread-follower-update-thread-settings", result: { ok: true } };
   ownerRequestError?: Error;
   startCalls = 0;
+  startFailures = 0;
   onMessage?: (message: unknown) => void;
   onDisconnect?: () => void;
 
   async start(onMessage: (message: unknown) => void, onDisconnect: () => void) {
     this.startCalls += 1;
+    if (this.startFailures > 0) {
+      this.startFailures -= 1;
+      throw new Error("desktop-cdp-unavailable");
+    }
     this.onMessage = onMessage;
     this.onDisconnect = onDisconnect;
   }
@@ -58,6 +63,29 @@ function createStartedTransport() {
 }
 
 describe("DesktopBridgeTransport", () => {
+  it("starts read-only and reconnects when Desktop CDP is initially unavailable", async () => {
+    const client = new FakeBridgeClient();
+    client.startFailures = 1;
+    const diagnostics: string[] = [];
+    const transport = new DesktopBridgeTransport({
+      client,
+      appServerVersion: "0.148.0-alpha.15",
+      reconnectDelayMs: 0,
+    });
+
+    await expect(transport.start(
+      () => undefined,
+      (diagnostic) => diagnostics.push(diagnostic.message),
+    )).resolves.toBeUndefined();
+
+    expect(transport.state).toBe("read-only");
+    expect(diagnostics).toContain("Desktop bridge is unavailable; Desktop threads are read-only");
+    await vi.waitFor(() => expect(client.startCalls).toBe(2));
+    expect(transport.state).toBe("live");
+    expect(diagnostics).toContain("Desktop bridge reconnected");
+    await transport.stop();
+  });
+
   it("sends client requests through Desktop's existing local host", async () => {
     const { client, transport } = await createStartedTransport();
     transport.send({ id: 3, method: "thread/list", params: { limit: 20 } });
