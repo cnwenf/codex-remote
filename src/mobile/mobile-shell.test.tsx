@@ -7,13 +7,17 @@ const mocks = vi.hoisted(() => ({
   nativePlugin: {
     addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
     getLaunchTarget: vi.fn(async () => ({})),
+    openExternalUrl: vi.fn(async () => undefined),
     startMonitoring: vi.fn(async () => undefined),
   },
 }));
 
 vi.mock("../web/app", () => ({
-  App: ({ remote }: { remote: { connectionId: string } }) => (
-    <main><span data-testid="active-connection">{remote.connectionId}</span></main>
+  App: ({ remote }: { remote: { connectionId: string; onOpenExternalUrl?(url: string): void } }) => (
+    <main>
+      <span data-testid="active-connection">{remote.connectionId}</span>
+      <button type="button" onClick={() => remote.onOpenExternalUrl?.("https://docs.example.test/path")}>Open docs</button>
+    </main>
   ),
 }));
 
@@ -49,6 +53,7 @@ describe("MobileShell updates", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.clearAllMocks();
   });
   it("checks for a new native app version automatically on launch", async () => {
     mocks.findMobileUpdate.mockResolvedValue({
@@ -102,6 +107,30 @@ describe("MobileShell updates", () => {
     expect(store.select).toHaveBeenCalledWith(home.id);
     expect(mocks.nativePlugin.startMonitoring).toHaveBeenCalledWith(expect.objectContaining({ connectionId: home.id }));
     expect(mocks.nativePlugin.startMonitoring).not.toHaveBeenCalledWith(expect.objectContaining({ connectionId: office.id }));
+  });
+
+  it("asks before opening a conversation link in the system browser", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+      select: vi.fn(async () => undefined),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Open docs" }));
+
+    expect(confirm).toHaveBeenLastCalledWith("将在浏览器中打开 docs.example.test，是否继续？");
+    expect(mocks.nativePlugin.openExternalUrl).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Open docs" }));
+    expect(mocks.nativePlugin.openExternalUrl).toHaveBeenCalledWith({ url: "https://docs.example.test/path" });
   });
 
   it("opens on the connection list and checks saved connections without auto-opening the last one", async () => {

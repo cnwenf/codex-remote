@@ -584,6 +584,13 @@ export class DesktopBridgeTransport implements CodexTransport {
       );
       this.onMessage?.({ id: request.id, result: { messageId: message.id } });
     } catch (cause) {
+      if (isOwnerTimeout(cause)) {
+        this.onMessage?.({
+          id: request.id,
+          result: { messageId: message.id, pendingConfirmation: true },
+        });
+        return;
+      }
       this.onMessage?.({
         id: request.id,
         error: {
@@ -840,6 +847,12 @@ function isOwnerUnavailable(cause: unknown) {
     message.includes("no-client-found") ||
     message.includes("client-disconnected") ||
     message.includes("webcontents-destroyed");
+}
+
+function isOwnerTimeout(cause: unknown) {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  return message === "desktop-cdp-owner-call-timeout" ||
+    (message.includes("desktop-thread-owner-request-failed") && message.endsWith("Error: timeout"));
 }
 
 function isDesktopEnvelope(value: unknown): value is DesktopEnvelope {

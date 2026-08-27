@@ -113,8 +113,23 @@ describe("ConversationReconciler", () => {
       }],
     };
 
-    const reconciled = reconciler.reconcileQueueSnapshot(current, "t1", [], 120_000);
+    const reconciled = reconciler.reconcileQueueSnapshot(current, "t1", [], 20_000);
     expect(reconciled.t1).toEqual([expect.objectContaining({ id: "client-1", lifecycle: "promoting" })]);
+  });
+
+  it("marks an unconfirmed queue promotion failed after the confirmation window", () => {
+    const reconciler = new ConversationReconciler();
+    const current = {
+      t1: [{
+        id: "client-1",
+        text: "continue",
+        lifecycle: "promoting" as const,
+        promotedAt: 1,
+      }],
+    };
+
+    const reconciled = reconciler.reconcileQueueSnapshot(current, "t1", [], 30_002);
+    expect(reconciled.t1).toEqual([expect.objectContaining({ id: "client-1", lifecycle: "failed" })]);
   });
 
   it("confirms only the matching promoted message from a Desktop snapshot", () => {
@@ -142,6 +157,129 @@ describe("ConversationReconciler", () => {
     });
 
     expect(reconciled.t1).toEqual([expect.objectContaining({ id: "client-1" })]);
+  });
+
+  it("confirms a promoted message when Desktop wraps the user text in an attachment envelope", () => {
+    const reconciler = new ConversationReconciler();
+    const current = {
+      t1: [{ id: "client-1", text: "continue", lifecycle: "promoting" as const }],
+    };
+
+    const reconciled = reconciler.confirmQueuedFromSnapshot(current, {
+      thread: {
+        id: "t1",
+        turns: [{
+          id: "turn-1",
+          items: [{
+            id: "user-1",
+            type: "userMessage",
+            text: "# Files mentioned by the user:\n\n## My request:\ncontinue",
+          }],
+        }],
+      },
+    });
+
+    expect(reconciled.t1).toEqual([]);
+  });
+
+  it("normalizes both sides of fallback confirmation when queued text contains a request marker", () => {
+    const reconciler = new ConversationReconciler();
+    const current = {
+      t1: [{
+        id: "client-1",
+        text: "## My request:\ncontinue",
+        lifecycle: "promoting" as const,
+      }],
+    };
+
+    const reconciled = reconciler.confirmQueuedFromSnapshot(current, {
+      thread: {
+        id: "t1",
+        turns: [{
+          id: "turn-1",
+          items: [{ id: "user-1", type: "userMessage", text: "## My request:\ncontinue" }],
+        }],
+      },
+    });
+
+    expect(reconciled.t1).toEqual([]);
+  });
+
+  it("uses an authoritative idle Desktop snapshot to close retained running state", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Task",
+          status: "running",
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "inProgress",
+              itemOrder: ["tool-1"],
+              items: {
+                "tool-1": { id: "tool-1", type: "commandExecution", text: "", status: "running" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: { id: "t1", status: { type: "idle" }, turns: [] },
+    });
+
+    expect(next.threads.t1.status).toBe("idle");
+    expect(next.threads.t1.activeTurnId).toBeUndefined();
+    expect(next.threads.t1.turns["turn-1"].status).toBe("completed");
+    expect(next.threads.t1.turns["turn-1"].items["tool-1"].status).toBe("completed");
+  });
+
+  it("does not let an idle older-history page close the current running turn", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Task",
+          status: "running",
+          activeTurnId: "turn-current",
+          turnOrder: ["turn-current"],
+          turns: {
+            "turn-current": {
+              id: "turn-current",
+              status: "inProgress",
+              itemOrder: ["agent-current"],
+              items: {
+                "agent-current": { id: "agent-current", type: "agentMessage", text: "working" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "idle" },
+        turns: [{ id: "turn-old", status: "completed", items: [] }],
+      },
+    }, "prepend");
+
+    expect(next.threads.t1.status).toBe("running");
+    expect(next.threads.t1.activeTurnId).toBe("turn-current");
+    expect(next.threads.t1.turns["turn-current"].status).toBe("inProgress");
   });
 
   it("keeps client message identity while hydrating a Desktop snapshot", () => {

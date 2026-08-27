@@ -364,6 +364,50 @@ describe("DesktopBridgeTransport", () => {
     await transport.stop();
   });
 
+  it.each([
+    "desktop-thread-owner-request-failed:Error: timeout",
+    "desktop-cdp-owner-call-timeout",
+  ])("keeps a timed-out Desktop queue promotion pending for authoritative confirmation: %s", async (timeoutError) => {
+    const { client, messages, transport } = await createStartedTransport();
+    client.queuePromotionResult = false;
+    client.ownerRequestError = new Error(timeoutError);
+    transport.send({
+      id: 18,
+      method: "desktop/queue/steer",
+      params: { threadId: "thread-1", messageId: "queued-1", expectedTurnId: "turn-1" },
+    });
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const readRequest = client.sent[0] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: readRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ value: {
+        "thread-1": [{ id: "queued-1", text: "Guide now", createdAt: 7 }],
+      } }),
+    });
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    const writeRequest = client.sent[1] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: writeRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ success: true }),
+    });
+
+    await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(1));
+    expect(messages).toContainEqual({
+      id: 18,
+      result: { messageId: "queued-1", pendingConfirmation: true },
+    });
+    expect(messages).not.toContainEqual(expect.objectContaining({ id: 18, error: expect.anything() }));
+    await transport.stop();
+  });
+
   it("updates settings through the Desktop thread owner so the Desktop UI stays in sync", async () => {
     const { client, messages, transport } = await createStartedTransport();
     transport.send({

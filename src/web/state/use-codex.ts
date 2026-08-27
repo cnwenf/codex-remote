@@ -10,7 +10,7 @@ import {
   type ThreadStatus,
   type TurnStatus,
 } from "../../protocol/thread-store";
-import { sameUserInput } from "../../protocol/user-message-identity";
+import { displayUserInput, sameUserInput } from "../../protocol/user-message-identity";
 import { isRpcRequest, type RpcRequest } from "../../protocol/types";
 import {
   permissionModeOptions,
@@ -47,6 +47,8 @@ export type QueuedFollowUp = {
   promotedAt?: number;
 };
 
+const QUEUE_PROMOTION_CONFIRMATION_TIMEOUT_MS = 30_000;
+
 export class ConversationReconciler {
   reduceEvent(state: CodexState, message: import("../../protocol/types").RpcMessage) {
     return reduceCodexState(state, message);
@@ -79,12 +81,18 @@ export class ConversationReconciler {
     current: Record<string, QueuedFollowUp[]>,
     threadId: string,
     messages: QueuedFollowUp[],
-    _now = Date.now(),
+    now = Date.now(),
   ) {
-    const promoted = (current[threadId] ?? []).filter((message) =>
-      message.lifecycle === "promoting" &&
-      !messages.some((queued) => queued.id === message.id)
-    );
+    const promoted = (current[threadId] ?? []).flatMap((message) => {
+      if (message.lifecycle !== "promoting" || messages.some((queued) => queued.id === message.id)) return [];
+      if (
+        message.promotedAt !== undefined &&
+        now - message.promotedAt > QUEUE_PROMOTION_CONFIRMATION_TIMEOUT_MS
+      ) {
+        return [{ ...message, lifecycle: "failed" as const }];
+      }
+      return [message];
+    });
     return { ...current, [threadId]: [...messages, ...promoted] };
   }
 
@@ -105,7 +113,7 @@ export class ConversationReconciler {
         if (!type.includes("user")) continue;
         next = this.confirmQueuedMessage(next, {
           threadId,
-          text: extractItemText(item),
+          text: displayUserInput(extractItemText(item)),
           clientMessageId: stringValue(item.clientMessageId) ??
             stringValue(item.clientUserMessageId) ??
             stringValue(item.client_message_id),
@@ -153,7 +161,7 @@ export class ConversationReconciler {
       : -1;
     const fallbackMatches = exactIndex < 0
       ? messages.flatMap((item, index) =>
-        item.lifecycle === "promoting" && item.text === confirmed.text ? [index] : []
+        item.lifecycle === "promoting" && sameUserInput(item.text, confirmed.text) ? [index] : []
       )
       : [];
     const fallbackIndex = fallbackMatches.length === 1 ? fallbackMatches[0] : -1;
@@ -1195,6 +1203,7 @@ function hydrateThread(
     };
   }
   const snapshotTurnOrder: string[] = [];
+  let snapshotHasInProgressTurn = false;
   const turnValues = Array.isArray(record.turns) ? record.turns : [];
   for (const turnValue of turnValues) {
     const turnRecord = asRecord(turnValue);
@@ -1203,6 +1212,7 @@ function hydrateThread(
     snapshotTurnOrder.push(turnId);
     const existing = current.turns[turnId];
     const snapshotStatus = normalizeTurnStatus(turnRecord.status);
+    if (snapshotStatus === "inProgress") snapshotHasInProgressTurn = true;
     const snapshotTerminal = isTerminalTurnStatus(snapshotStatus);
     const snapshotItems: CodexTurn["items"] = {};
     const snapshotItemOrder: string[] = [];
@@ -1269,25 +1279,28 @@ function hydrateThread(
   const turnOrder = placement === "append"
     ? appendMissing(current.turnOrder, snapshotTurnOrder)
     : appendMissing(snapshotTurnOrder, current.turnOrder);
+  const snapshotStatus = normalizeStatus(record.status, current.status);
+  if (
+    placement !== "prepend" &&
+    outer.desktopMirror === true &&
+    snapshotStatus === "idle" &&
+    !snapshotHasInProgressTurn
+  ) {
+    for (const turnId of turnOrder) {
+      const turn = hydratedTurns[turnId];
+      if (!turn || turn.status !== "inProgress") continue;
+      hydratedTurns[turnId] = completeRetainedTurn(turn);
+    }
+  }
   const activeTurnId = [...turnOrder].reverse().find(
     (turnId) => hydratedTurns[turnId]?.status === "inProgress",
   );
   for (const turnId of turnOrder) {
     const turn = hydratedTurns[turnId];
     if (!turn || turnId === activeTurnId || turn.status !== "inProgress") continue;
-    hydratedTurns[turnId] = {
-      ...turn,
-      status: "completed",
-      items: Object.fromEntries(Object.entries(turn.items).map(([itemId, item]) => [
-        itemId,
-        item.status === "running" || item.status === "inProgress"
-          ? { ...item, status: "completed" }
-          : item,
-      ])),
-    };
+    hydratedTurns[turnId] = completeRetainedTurn(turn);
   }
   const deduplicatedTurns = dedupeOptimisticUserMessages(hydratedTurns, turnOrder);
-  const snapshotStatus = normalizeStatus(record.status, current.status);
   const reconciledStatus = activeTurnId
     ? "running"
     : current.status === "idle" && snapshotStatus === "running" &&
@@ -1328,6 +1341,19 @@ function hydrateThread(
         todoList: reconciledTodoList,
       },
     },
+  };
+}
+
+function completeRetainedTurn(turn: CodexTurn): CodexTurn {
+  return {
+    ...turn,
+    status: "completed",
+    items: Object.fromEntries(Object.entries(turn.items).map(([itemId, item]) => [
+      itemId,
+      item.status === "running" || item.status === "inProgress"
+        ? { ...item, status: "completed" }
+        : item,
+    ])),
   };
 }
 
@@ -1591,7 +1617,7 @@ function confirmedUserMessage(message: import("../../protocol/types").RpcMessage
   if (!threadId) return undefined;
   return {
     threadId,
-    text: extractItemText(item),
+    text: displayUserInput(extractItemText(item)),
     clientMessageId: stringValue(item.clientMessageId) ??
       stringValue(item.clientUserMessageId) ??
       stringValue(item.client_message_id),

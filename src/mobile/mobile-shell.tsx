@@ -250,6 +250,7 @@ export function MobileShell({
         },
         onOpenConnection: (connectionId) => { void openConnectionId(connectionId); },
         onOpenExternalUrl: (url) => {
+          if (!window.confirm(mobileCopy(settings.language).openExternalConfirmation(externalUrlHost(url)))) return;
           void CodexRemoteNative.openExternalUrl({ url }).catch(() => undefined);
         },
       });
@@ -406,6 +407,14 @@ async function ensureNotificationPermission() {
     if (current.display !== "granted") await LocalNotifications.requestPermissions();
   } catch {
     // The remote remains usable when notifications are unavailable or denied.
+  }
+}
+
+function externalUrlHost(url: string) {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
   }
 }
 

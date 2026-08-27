@@ -57,6 +57,9 @@ export function mobileCopy(language: MobileLanguage) {
     updateConfirmation: (version: string) => english
       ? `Version ${version} is available. Download and update now?`
       : `发现新版本 ${version}，是否下载并更新？`,
+    openExternalConfirmation: (host: string) => english
+      ? `Open ${host} in your browser?`
+      : `将在浏览器中打开 ${host}，是否继续？`,
     downloadingVersion: (version: string) => english ? `Downloading ${version}` : `正在下载 ${version}`,
     preparingInstall: english ? "Preparing install…" : "准备安装…",
     connectionActions: english ? "Connection actions" : "连接操作",
