@@ -13,6 +13,15 @@ const gatewayLauncher = readFileSync(join(root, "scripts/launch-bundled-gateway.
 const macosUpdater = readFileSync(join(root, "scripts/perform-macos-update.sh"), "utf8");
 
 describe("native installer contract", () => {
+  it("keeps Android and iOS package versions aligned with the release version", () => {
+    const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version as string;
+    const androidBuild = readFileSync(join(root, "android/app/build.gradle"), "utf8");
+    const iosProject = readFileSync(join(root, "ios/App/App.xcodeproj/project.pbxproj"), "utf8");
+
+    expect(androidBuild).toContain(`versionName "${packageVersion}"`);
+    expect(iosProject).toContain(`MARKETING_VERSION = ${packageVersion};`);
+  });
+
   it("uses an interactive tty and stable checksum-verified release assets", () => {
     expect(installer).toContain("</dev/tty");
     expect(installer).toContain('"$BASE_URL/$ASSET.sha256"');

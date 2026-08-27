@@ -23,6 +23,34 @@ class FakeBrowserSocket implements BrowserSocket {
 }
 
 describe("ConversationReconciler", () => {
+  it("selects the latest in-progress turn from a recovered Desktop snapshot", () => {
+    const reconciler = new ConversationReconciler();
+
+    const next = reconciler.hydrate(initialCodexState, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "active" },
+        turns: [
+          {
+            id: "turn-stale",
+            status: "inProgress",
+            items: [{ id: "old-tool", type: "commandExecution", status: "running" }],
+          },
+          {
+            id: "turn-current",
+            status: "inProgress",
+            items: [{ id: "new-agent", type: "agentMessage", text: "current output" }],
+          },
+        ],
+      },
+    });
+
+    expect(next.threads.t1.activeTurnId).toBe("turn-current");
+    expect(next.threads.t1.turns["turn-stale"]).toMatchObject({ status: "completed" });
+    expect(next.threads.t1.turns["turn-stale"].items["old-tool"]).toMatchObject({ status: "completed" });
+  });
+
   it("does not restore a completed turn todo from a stale Desktop snapshot", () => {
     const reconciler = new ConversationReconciler();
     const state: CodexState = {

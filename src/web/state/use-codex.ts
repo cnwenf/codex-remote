@@ -1269,14 +1269,23 @@ function hydrateThread(
   const turnOrder = placement === "append"
     ? appendMissing(current.turnOrder, snapshotTurnOrder)
     : appendMissing(snapshotTurnOrder, current.turnOrder);
-  const snapshotActiveTurnId = turnOrder.find(
+  const activeTurnId = [...turnOrder].reverse().find(
     (turnId) => hydratedTurns[turnId]?.status === "inProgress",
   );
-  const currentActiveTurnId = current.activeTurnId &&
-    hydratedTurns[current.activeTurnId]?.status === "inProgress"
-    ? current.activeTurnId
-    : undefined;
-  const activeTurnId = currentActiveTurnId ?? snapshotActiveTurnId;
+  for (const turnId of turnOrder) {
+    const turn = hydratedTurns[turnId];
+    if (!turn || turnId === activeTurnId || turn.status !== "inProgress") continue;
+    hydratedTurns[turnId] = {
+      ...turn,
+      status: "completed",
+      items: Object.fromEntries(Object.entries(turn.items).map(([itemId, item]) => [
+        itemId,
+        item.status === "running" || item.status === "inProgress"
+          ? { ...item, status: "completed" }
+          : item,
+      ])),
+    };
+  }
   const deduplicatedTurns = dedupeOptimisticUserMessages(hydratedTurns, turnOrder);
   const snapshotStatus = normalizeStatus(record.status, current.status);
   const reconciledStatus = activeTurnId
