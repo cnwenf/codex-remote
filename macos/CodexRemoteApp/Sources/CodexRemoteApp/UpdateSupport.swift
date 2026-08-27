@@ -214,7 +214,7 @@ func runUpdateSelfTest(requirePackagedResources: Bool) throws {
   }
   guard requirePackagedResources else { return }
   guard let resources = Bundle.main.resourceURL else { throw UpdateError.invalidPackage("resources are missing") }
-  for relative in ["bin/node", "gateway/index.mjs", "web/index.html", "launch-gateway.sh", "perform-macos-update.sh"] {
+  for relative in ["bin/node", "gateway/index.mjs", "web/index.html", "launch-gateway.sh", "perform-macos-update.sh", "MenuBarIcon.png"] {
     guard FileManager.default.fileExists(atPath: resources.appendingPathComponent(relative).path) else {
       throw UpdateError.invalidPackage("packaged resource \(relative) is missing")
     }

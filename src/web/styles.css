@@ -313,6 +313,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .activity-duration { font-weight: 520; }
 .activity-list { display: grid; gap: 1px; margin: 2px 0 0 6px; padding: 0 0 0 14px; border-left: 1px solid var(--line); list-style: none; }
 .activity-list li { min-height: 44px; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 8px 6px; }
+.turn-process-content { display: grid; gap: 2px; margin: 2px 0 0 6px; padding: 4px 0 4px 14px; border-left: 1px solid var(--line); }
+.turn-process-content .activity-list { margin: 0; padding: 0; border-left: 0; }
+.turn-process-content .message { margin: 0; padding: 8px 6px; }
+.turn-process-content .message-agent .markdown-body { color: var(--ink-muted); font-size: 0.8rem; line-height: 1.56; }
 .activity-icon { color: var(--ink-muted); font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
 .activity-copy { min-width: 0; display: grid; gap: 3px; }
 .activity-copy strong { font-size: 0.73rem; font-weight: 680; }

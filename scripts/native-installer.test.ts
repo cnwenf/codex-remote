@@ -261,14 +261,16 @@ touch "\${@: -1}"
     }
   });
 
-  it("derives the monochrome menu-bar glyph from the same application icon artwork", () => {
+  it("loads the menu-bar template from a dedicated transparent bundle resource", () => {
     expect(appSource).toContain("menuBarIcon()");
     expect(appSource).toContain("menuIcon?.isTemplate = true");
     const menuBarIcon = appSource.match(
       /private func menuBarIcon\(\)[\s\S]*?\n  \}\n\n  private func appBrandIcon/,
     )?.[0] ?? "";
-    expect(menuBarIcon).toContain("NSApplication.shared.applicationIconImage");
-    expect(menuBarIcon).toContain("alphaFromApplicationIcon");
+    expect(buildScript).toContain('cp assets/app-icon.png "$RES/MenuBarIcon.png"');
+    expect(menuBarIcon).toContain('Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png")');
+    expect(menuBarIcon).not.toContain("NSApplication.shared.applicationIconImage");
+    expect(menuBarIcon).not.toContain("alphaFromApplicationIcon");
     expect(menuBarIcon).not.toContain("connectionMarkPaths");
   });
 

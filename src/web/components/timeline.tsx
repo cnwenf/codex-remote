@@ -69,6 +69,54 @@ function TurnView({
 }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const segments = segmentItems(items);
+  const completedLayout = completedTurnLayout(segments, turn.status);
+
+  if (completedLayout) {
+    return (
+      <li className="conversation-turn" data-turn-id={turn.id}>
+        {completedLayout.leading.map((segment) => (
+          <MessageSegment
+            key={segment.item.id}
+            segment={segment}
+            imageRequest={imageRequest}
+            onOpenExternalUrl={onOpenExternalUrl}
+          />
+        ))}
+        {completedLayout.process.length > 0 ? (
+          <details className="activity-group turn-process-group">
+            <summary>
+              <span className={`run-indicator run-${turn.status === "failed" ? "failed" : "completed"}`} aria-hidden="true" />
+              <span>执行过程（{segmentItemCount(completedLayout.process)} 项）</span>
+              <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
+            </summary>
+            <div className="turn-process-content">
+              {completedLayout.process.map((segment) => (
+                segment.kind === "activity" ? (
+                  <ol className="activity-list" key={segment.key}>
+                    {segment.items.map((item) => <ActivityItem key={item.id} item={item} />)}
+                  </ol>
+                ) : (
+                  <MessageSegment
+                    key={segment.item.id}
+                    segment={segment}
+                    imageRequest={imageRequest}
+                    onOpenExternalUrl={onOpenExternalUrl}
+                  />
+                )
+              ))}
+            </div>
+          </details>
+        ) : null}
+        {completedLayout.final ? (
+          <MessageSegment
+            segment={completedLayout.final}
+            imageRequest={imageRequest}
+            onOpenExternalUrl={onOpenExternalUrl}
+          />
+        ) : null}
+      </li>
+    );
+  }
 
   return (
     <li className="conversation-turn" data-turn-id={turn.id}>
@@ -92,32 +140,13 @@ function TurnView({
             </details>
           );
         }
-        const item = segment.item;
-        if (segment.kind === "user") {
-          return (
-            <article key={item.id} className="message message-user">
-              <span className="message-author">你</span>
-              <MarkdownContent text={item.text || "等待输入…"} onOpenExternalUrl={onOpenExternalUrl} />
-              {item.imageIds?.length ? (
-                <div className="message-images">
-                  {item.imageIds.map((imageId, index) => (
-                    <AuthenticatedImage
-                      key={`${imageId}-${index}`}
-                      imageId={imageId}
-                      request={imageRequest}
-                      alt={`用户上传的图片 ${index + 1}`}
-                    />
-                  ))}
-                </div>
-              ) : null}
-            </article>
-          );
-        }
         return (
-          <article key={item.id} className="message message-agent">
-            <span className="message-author">Codex</span>
-            <MarkdownContent text={item.text || "等待输出…"} onOpenExternalUrl={onOpenExternalUrl} />
-          </article>
+          <MessageSegment
+            key={segment.item.id}
+            segment={segment}
+            imageRequest={imageRequest}
+            onOpenExternalUrl={onOpenExternalUrl}
+          />
         );
       })}
 
@@ -129,6 +158,44 @@ function TurnView({
         </div>
       ) : null}
     </li>
+  );
+}
+
+function MessageSegment({
+  segment,
+  imageRequest,
+  onOpenExternalUrl,
+}: {
+  segment: Extract<TurnSegment, { kind: "user" | "agent" }>;
+  imageRequest?: ImageRequest;
+  onOpenExternalUrl?: (url: string) => void;
+}) {
+  const item = segment.item;
+  if (segment.kind === "user") {
+    return (
+      <article className="message message-user">
+        <span className="message-author">你</span>
+        <MarkdownContent text={item.text || "等待输入…"} onOpenExternalUrl={onOpenExternalUrl} />
+        {item.imageIds?.length ? (
+          <div className="message-images">
+            {item.imageIds.map((imageId, index) => (
+              <AuthenticatedImage
+                key={`${imageId}-${index}`}
+                imageId={imageId}
+                request={imageRequest}
+                alt={`用户上传的图片 ${index + 1}`}
+              />
+            ))}
+          </div>
+        ) : null}
+      </article>
+    );
+  }
+  return (
+    <article className="message message-agent">
+      <span className="message-author">Codex</span>
+      <MarkdownContent text={item.text || "等待输出…"} onOpenExternalUrl={onOpenExternalUrl} />
+    </article>
   );
 }
 
@@ -160,6 +227,30 @@ function AuthenticatedImage({ imageId, request, alt }: { imageId: string; reques
 type TurnSegment =
   | { kind: "user" | "agent"; item: CodexItem }
   | { kind: "activity"; key: string; items: CodexItem[] };
+
+type MessageTurnSegment = Extract<TurnSegment, { kind: "user" | "agent" }>;
+
+function completedTurnLayout(segments: TurnSegment[], status: CodexTurn["status"]) {
+  if (status === "inProgress" || status === "unknown") return undefined;
+  let finalIndex = -1;
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    if (segments[index].kind !== "agent") continue;
+    finalIndex = index;
+    break;
+  }
+  let processStart = 0;
+  while (processStart < segments.length && segments[processStart].kind === "user") processStart += 1;
+  const process = segments.filter((_, index) => index >= processStart && index !== finalIndex);
+  return {
+    leading: segments.slice(0, processStart) as MessageTurnSegment[],
+    process,
+    final: finalIndex >= 0 ? segments[finalIndex] as MessageTurnSegment : undefined,
+  };
+}
+
+function segmentItemCount(segments: TurnSegment[]) {
+  return segments.reduce((count, segment) => count + (segment.kind === "activity" ? segment.items.length : 1), 0);
+}
 
 function segmentItems(items: CodexItem[]): TurnSegment[] {
   const segments: TurnSegment[] = [];

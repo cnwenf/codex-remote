@@ -359,51 +359,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   private func menuBarIcon() -> NSImage? {
-    guard let source = NSApplication.shared.applicationIconImage,
-          let image = alphaFromApplicationIcon(source, pixelSize: 64) else { return nil }
+    guard let iconURL = Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png"),
+          let image = NSImage(contentsOf: iconURL) else { return nil }
     image.size = NSSize(width: 18, height: 18)
     image.isTemplate = true
     image.accessibilityDescription = "Codex Remote"
-    return image
-  }
-
-  private func alphaFromApplicationIcon(_ source: NSImage, pixelSize: Int) -> NSImage? {
-    guard let bitmap = NSBitmapImageRep(
-      bitmapDataPlanes: nil,
-      pixelsWide: pixelSize,
-      pixelsHigh: pixelSize,
-      bitsPerSample: 8,
-      samplesPerPixel: 4,
-      hasAlpha: true,
-      isPlanar: false,
-      colorSpaceName: .deviceRGB,
-      bytesPerRow: 0,
-      bitsPerPixel: 0
-    ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
-
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = context
-    NSColor.clear.setFill()
-    NSRect(x: 0, y: 0, width: pixelSize, height: pixelSize).fill()
-    source.draw(
-      in: NSRect(x: 0, y: 0, width: pixelSize, height: pixelSize),
-      from: .zero,
-      operation: .sourceOver,
-      fraction: 1
-    )
-    NSGraphicsContext.restoreGraphicsState()
-
-    for y in 0..<pixelSize {
-      for x in 0..<pixelSize {
-        guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
-        let luminance = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
-        let symbolAlpha = min(1, max(0, (luminance - 0.42) / 0.36)) * color.alphaComponent
-        bitmap.setColor(NSColor(white: 0, alpha: symbolAlpha), atX: x, y: y)
-      }
-    }
-
-    let image = NSImage(size: NSSize(width: pixelSize, height: pixelSize))
-    image.addRepresentation(bitmap)
     return image
   }
 

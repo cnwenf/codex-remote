@@ -76,7 +76,12 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
-  await expect(page.getByText("执行过程（2 项）")).toBeVisible();
+  const completedProcess = page.getByText("执行过程（3 项）");
+  await expect(completedProcess).toBeVisible();
+  await expect(page.getByText("Initial inspection complete")).toBeVisible();
+  await expect(page.getByText("I checked the message grouping before running tests.")).not.toBeVisible();
+  await completedProcess.click();
+  await expect(page.getByText("I checked the message grouping before running tests.")).toBeVisible();
   await page.getByRole("textbox", { name: "Instruction" }).click();
   await expect(page.getByRole("combobox", { name: "模型" })).toHaveValue("gpt-fixture");
   await expect(page.getByRole("combobox", { name: "思考强度" })).toHaveValue("medium");

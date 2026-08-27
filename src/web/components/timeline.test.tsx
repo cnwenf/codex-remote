@@ -92,6 +92,47 @@ describe("Timeline", () => {
     expect(screen.getByText("pnpm test")).toBeVisible();
   });
 
+  it("collapses every intermediate assistant output into one completed turn process", async () => {
+    const thread: CodexThread = {
+      id: "completed-process",
+      title: "Completed process",
+      status: "idle",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          durationMs: 62_000,
+          itemOrder: ["user", "reason", "agent-progress-1", "tool", "agent-progress-2", "agent-final"],
+          items: {
+            user: { id: "user", type: "userMessage", text: "把问题修好" },
+            reason: { id: "reason", type: "reasoning", text: "先定位根因" },
+            "agent-progress-1": { id: "agent-progress-1", type: "agentMessage", text: "我先检查消息分组。" },
+            tool: { id: "tool", type: "commandExecution", text: "pnpm test", status: "completed" },
+            "agent-progress-2": { id: "agent-progress-2", type: "agentMessage", text: "测试已经通过。" },
+            "agent-final": { id: "agent-final", type: "agentMessage", text: "问题已经修好。" },
+          },
+        },
+      },
+    };
+
+    render(<Timeline thread={thread} />);
+
+    expect(screen.getByText("把问题修好")).toBeVisible();
+    expect(screen.getByText("问题已经修好。")).toBeVisible();
+    expect(screen.getByText("执行过程（4 项）")).toBeVisible();
+    expect(screen.getByText("1 分 2 秒")).toBeVisible();
+    expect(screen.queryByText("我先检查消息分组。")).not.toBeVisible();
+    expect(screen.queryByText("测试已经通过。")).not.toBeVisible();
+
+    await userEvent.click(screen.getByText("执行过程（4 项）"));
+
+    expect(screen.getByText("先定位根因")).toBeVisible();
+    expect(screen.getByText("我先检查消息分组。")).toBeVisible();
+    expect(screen.getByText("pnpm test")).toBeVisible();
+    expect(screen.getByText("测试已经通过。")).toBeVisible();
+  });
+
   it("keeps tool activity after the assistant text that preceded it and shows a running ellipsis", () => {
     const thread: CodexThread = {
       id: "ordered",

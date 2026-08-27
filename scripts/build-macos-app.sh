@@ -35,6 +35,7 @@ cp scripts/install-launch-agents.sh "$RES/install-launch-agents.sh"
 cp scripts/launch-codex-desktop.sh "$RES/launch-codex-desktop.sh"
 cp scripts/restart-codex-desktop.sh "$RES/restart-codex-desktop.sh"
 cp scripts/perform-macos-update.sh "$RES/perform-macos-update.sh"
+cp assets/app-icon.png "$RES/MenuBarIcon.png"
 print "$VERSION" > "$RES/VERSION"
 chmod 755 "$RES"/*.sh "$RES/bin/node" "$APP/Contents/MacOS/Codex Remote"
 

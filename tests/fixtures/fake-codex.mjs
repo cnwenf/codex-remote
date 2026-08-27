@@ -292,6 +292,7 @@ function fixtureThreadWithTurns() {
     items: [
       { id: "history-user", type: "userMessage", content: [{ type: "text", text: "Inspect the fixture" }] },
       { id: "history-reason", type: "reasoning", summary: ["Inspecting the repository"], content: [] },
+      { id: "history-progress", type: "agentMessage", text: "I checked the message grouping before running tests." },
       { id: "history-command", type: "commandExecution", command: "pnpm test", status: "completed" },
       { id: "history-agent", type: "agentMessage", text: "Initial inspection complete" },
     ],
