@@ -86,7 +86,10 @@ export function ConnectionList({
             {connections.map((connection) => (
               <li key={connection.id}>
                 <button type="button" className="connection-open" onClick={() => onOpen(connection)}>
-                  <span className="device-icon" aria-hidden="true" />
+                  <span className="connection-device">
+                    <span className="device-icon" aria-hidden="true" />
+                    <ConnectionStatusDot connection={connection} language={language} />
+                  </span>
                   <span>
                     <strong>{connection.name}</strong>
                     <small>{connection.baseUrl}</small>
@@ -104,6 +107,25 @@ export function ConnectionList({
         )}
       </section>
     </main>
+  );
+}
+
+function ConnectionStatusDot({ connection, language = "zh-CN" }: { connection: RemoteConnection; language?: MobileLanguage }) {
+  const copy = mobileCopy(language);
+  const status = connection.connectionStatus ?? (
+    connection.pairingStatus === "error" ? "unavailable" : "checking"
+  );
+  const label = status === "available"
+    ? copy.connectionAvailable
+    : status === "unavailable"
+      ? copy.connectionUnavailable
+      : copy.connectionChecking;
+  return (
+    <span
+      className={`connection-reachability connection-status-${status}`}
+      role="img"
+      aria-label={label}
+    />
   );
 }
 

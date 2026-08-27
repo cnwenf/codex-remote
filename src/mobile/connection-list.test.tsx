@@ -134,4 +134,45 @@ describe("ConnectionList", () => {
     expect(screen.getByText("正在配对…")).toBeVisible();
     expect(screen.getByText("连接不可用，请重新扫码")).toBeVisible();
   });
+
+  it("shows checking, available, and unavailable dots for saved connections", () => {
+    const connections = [
+      {
+        id: "checking",
+        name: "Checking Mac",
+        baseUrl: "http://192.168.1.20:4321",
+        lastUsedAt: 3,
+        connectionStatus: "checking",
+      },
+      {
+        id: "available",
+        name: "Available Mac",
+        baseUrl: "http://192.168.1.21:4321",
+        lastUsedAt: 2,
+        connectionStatus: "available",
+      },
+      {
+        id: "unavailable",
+        name: "Unavailable Mac",
+        baseUrl: "http://192.168.1.22:4321",
+        lastUsedAt: 1,
+        connectionStatus: "unavailable",
+      },
+    ] as Array<import("./types").RemoteConnection & { connectionStatus: string }>;
+
+    render(
+      <ConnectionList
+        connections={connections}
+        onNew={vi.fn()}
+        onScan={vi.fn()}
+        onOpen={vi.fn()}
+        onEdit={vi.fn()}
+        onRemove={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText("检测中")).toHaveClass("connection-status-checking");
+    expect(screen.getByLabelText("可用")).toHaveClass("connection-status-available");
+    expect(screen.getByLabelText("不可用")).toHaveClass("connection-status-unavailable");
+  });
 });

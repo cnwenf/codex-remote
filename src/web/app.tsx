@@ -38,6 +38,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
   const separator = language === "en" ? ", " : "，";
   const codex = useCodex(undefined, remote ? { baseUrl: remote.baseUrl, token: remote.token } : {});
   const autoConnectAttempted = useRef(false);
+  const remoteSwipeOrigin = useRef<{ x: number; y: number } | null>(null);
   const [decisionNotice, setDecisionNotice] = useState<string>();
   const [showNewConversation, setShowNewConversation] = useState(false);
   const [composerExpanded, setComposerExpanded] = useState(false);
@@ -143,6 +144,26 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     }, "");
   }
 
+  function beginRemoteListSwipe(event: React.TouchEvent) {
+    if (!remote || codex.selectedThreadId || showNewConversation) return;
+    const touch = event.touches[0];
+    remoteSwipeOrigin.current = touch && touch.clientX <= 40
+      ? { x: touch.clientX, y: touch.clientY }
+      : null;
+  }
+
+  function finishRemoteListSwipe(event: React.TouchEvent) {
+    const origin = remoteSwipeOrigin.current;
+    remoteSwipeOrigin.current = null;
+    const touch = event.changedTouches[0];
+    if (!origin || !touch) return;
+    const horizontal = touch.clientX - origin.x;
+    const vertical = Math.abs(touch.clientY - origin.y);
+    if (horizontal >= 72 && vertical <= Math.max(48, horizontal * 0.5)) {
+      remote?.onManageConnections();
+    }
+  }
+
   function selectThread(id: string) {
     setComposerExpanded(false);
     setShowNewConversation(false);
@@ -201,7 +222,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
   }
 
   return (
-    <main className="app-root">
+    <main className="app-root" onTouchStart={beginRemoteListSwipe} onTouchEnd={finishRemoteListSwipe}>
       <header className={`topbar ${remote ? "topbar-native" : ""} ${remote && codex.selectedThread ? "topbar-native-thread" : ""}`}>
         <div className="brand-lockup">
           {codex.selectedThread ? (

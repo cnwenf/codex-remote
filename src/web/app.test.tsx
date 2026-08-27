@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
@@ -244,6 +244,49 @@ describe("App", () => {
     expect(switcher).toHaveClass("remote-connection-switcher");
     await userEvent.click(within(switcher).getByRole("button", { name: /Home Mac/ }));
     expect(onOpenConnection).toHaveBeenCalledWith("mac-2");
+  });
+
+  it("returns from a native connection conversation list with a left-edge swipe", () => {
+    const onManageConnections = vi.fn();
+    useCodexMock.mockReturnValue(codexState({ connection: "ready" }));
+
+    const { container } = render(<App remote={{
+      connectionId: "mac-1",
+      name: "Office Mac",
+      baseUrl: "http://192.168.1.10:4321",
+      token: "test-token",
+      onManageConnections,
+    }} />);
+
+    const app = container.querySelector(".app-root") as HTMLElement;
+    fireEvent.touchStart(app, { touches: [{ clientX: 12, clientY: 240 }] });
+    fireEvent.touchEnd(app, { changedTouches: [{ clientX: 118, clientY: 246 }] });
+
+    expect(onManageConnections).toHaveBeenCalledOnce();
+  });
+
+  it("does not leave a selected native thread while that thread is still loading", () => {
+    const onManageConnections = vi.fn();
+    useCodexMock.mockReturnValue(codexState({
+      connection: "ready",
+      selectedThreadId: "thread-loading",
+      selectedThread: undefined,
+      selectedThreadLoading: true,
+    }));
+
+    const { container } = render(<App remote={{
+      connectionId: "mac-1",
+      name: "Office Mac",
+      baseUrl: "http://192.168.1.10:4321",
+      token: "test-token",
+      onManageConnections,
+    }} />);
+
+    const app = container.querySelector(".app-root") as HTMLElement;
+    fireEvent.touchStart(app, { touches: [{ clientX: 12, clientY: 240 }] });
+    fireEvent.touchEnd(app, { changedTouches: [{ clientX: 118, clientY: 246 }] });
+
+    expect(onManageConnections).not.toHaveBeenCalled();
   });
 
   it("opens the active connection conversation list without leaving connection view", async () => {

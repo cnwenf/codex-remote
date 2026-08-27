@@ -528,13 +528,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .connection-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .connection-list > li { overflow: hidden; border-bottom: 1px solid var(--line); background: transparent; }
 .connection-open { display: grid; width: 100%; grid-template-columns: 42px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 15px; border: 0; color: var(--ink); background: transparent; text-align: left; }
+.connection-device { position: relative; width: 42px; min-height: 26px; display: grid; place-items: center; }
+.connection-reachability { position: absolute; right: 2px; bottom: 0; width: 9px; height: 9px; border: 2px solid var(--canvas); border-radius: 999px; background: var(--warning); }
+.connection-status-available { background: var(--success); }
+.connection-status-unavailable { background: var(--danger); }
 .connection-open > span:nth-child(2) { display: grid; min-width: 0; gap: 3px; }
 .connection-open strong, .connection-open small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-open small { color: var(--ink-muted); }
 .connection-open .connection-pairing-status { font-weight: 680; }
 .connection-open .connection-pairing-status.pairing { color: var(--accent); }
 .connection-open .connection-pairing-status.error { color: var(--danger); }
-.connection-open > .device-icon { margin-left: 4px; }
+.connection-open .device-icon { margin-left: 4px; }
 .connection-row-actions { display: flex; justify-content: flex-end; gap: 3px; padding: 0 10px 10px; }
 .connection-row-actions button { min-height: 36px; padding: 0 10px; border: 0; border-radius: 8px; color: var(--ink-muted); background: transparent; }
 .mobile-connection-form { display: grid; gap: 18px; touch-action: pan-y; }
@@ -544,7 +548,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .connection-form-actions { display: grid; grid-template-columns: 1fr 1.5fr; gap: 9px; }
 .connection-form-actions button { min-height: 48px; }
 
-.mobile-settings { overflow-y: auto; touch-action: pan-y; }
+.mobile-settings { height: 100dvh; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; }
 .mobile-settings-header { position: sticky; z-index: 2; top: 0; width: min(100%, 720px); min-height: calc(68px + env(safe-area-inset-top)); display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px; align-items: end; margin: 0 auto; padding: env(safe-area-inset-top) 18px 10px; background: color-mix(in oklch, var(--canvas) 94%, transparent); }
 .mobile-settings-header h1 { align-self: center; margin: 0; font-size: 1.15rem; text-align: center; }
 .mobile-settings-header button { width: 44px; height: 44px; display: grid; place-items: center; padding: 0 0 3px; border: 0; border-radius: 999px; color: var(--ink); background: var(--surface-muted); font-size: 1.9rem; line-height: 1; }
@@ -589,9 +593,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .app-root > .topbar .brand-lockup h1 { max-width: 42vw; font-size: 0.92rem; }
   .app-root > .topbar-native { gap: 10px; }
   .app-root > .topbar-native .brand-lockup { min-width: 0; flex: 0 1 auto; gap: 8px; }
+  .app-root > .topbar-native:not(.topbar-native-thread) .brand-lockup { flex: 0 0 auto; }
   .app-root > .topbar-native .brand-lockup h1 { max-width: none; flex: 1 1 auto; font-size: 0.96rem; }
   .app-root > .topbar-native .connection-state { display: none; }
-  .app-root > .topbar-native .remote-connection-switcher { max-width: 54vw; flex: 1 1 auto; }
+  .app-root > .topbar-native .remote-connection-switcher { max-width: min(54vw, calc(100% - 88px)); flex: 0 1 auto; }
   .app-root > .topbar-native .remote-connection-pill { min-width: 0; max-width: 112px; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; margin-left: 0; padding: 0 12px; }
   .app-root > .topbar-native .remote-connection-pill > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .app-root > .topbar-native .remote-connection-indicator { display: block; }

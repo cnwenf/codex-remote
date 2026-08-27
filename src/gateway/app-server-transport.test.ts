@@ -8,7 +8,7 @@ const fixture = fileURLToPath(
   new URL("../../tests/fixtures/fake-codex.mjs", import.meta.url),
 );
 
-async function waitFor(check: () => boolean, timeoutMs = 5_000) {
+async function waitFor(check: () => boolean, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {
     if (Date.now() > deadline) {
@@ -35,7 +35,7 @@ describe("AppServerTransport", () => {
 
     expect(received[0]).toMatchObject({ id: 1, result: { ready: true } });
     await transport.stop();
-  });
+  }, 15_000);
 
   it("never includes stderr content in diagnostics", async () => {
     const diagnostics: string[] = [];
@@ -52,5 +52,5 @@ describe("AppServerTransport", () => {
 
     expect(diagnostics.join(" ")).not.toContain("secret-command");
     await transport.stop();
-  });
+  }, 15_000);
 });

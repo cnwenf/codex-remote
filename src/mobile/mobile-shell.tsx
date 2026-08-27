@@ -29,6 +29,13 @@ import {
 import { mobileCopy } from "./mobile-copy";
 
 type MobileView = "connections" | "form" | "remote" | "settings";
+const CONNECTION_STATUS_TIMEOUT_MS = 8_000;
+
+type ConnectionStatusCheck = {
+  controller: AbortController;
+  timeout: number;
+  reject(reason: Error): void;
+};
 
 export function MobileShell({
   storeOverride,
@@ -56,6 +63,8 @@ export function MobileShell({
   const [updateStatus, setUpdateStatus] = useState<MobileUpdateStatus>({ state: "idle" });
   const [settings, setSettings] = useState<MobileSettings>(DEFAULT_MOBILE_SETTINGS);
   const connectionOpenGeneration = useRef(0);
+  const connectionStatusGeneration = useRef(0);
+  const connectionStatusChecks = useRef(new Set<ConnectionStatusCheck>());
   const connectionOpenQueue = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
@@ -76,14 +85,11 @@ export function MobileShell({
     };
     void store.list().then(async (values) => {
       if (disposed) return;
-      setConnections(values);
+      refreshConnectionStatuses(values);
       const launch = await CodexRemoteNative.getLaunchTarget().catch(() => ({}));
       if ("connectionId" in launch && "threadId" in launch) {
         openTarget(launch as MobileThreadTarget);
-        return;
       }
-      const selected = await store.getSelected();
-      if (selected) await openConnectionId(selected.id);
     });
     const nativeListener = CodexRemoteNative.addListener("openThread", openTarget).catch(() => undefined);
     const urlListener = CapacitorApp.addListener("appUrlOpen", ({ url }) => {
@@ -106,6 +112,8 @@ export function MobileShell({
     });
     return () => {
       disposed = true;
+      connectionStatusGeneration.current += 1;
+      abortConnectionStatusChecks();
       void nativeListener.then((listener) => listener?.remove());
       void urlListener.then((listener) => listener?.remove());
       void notificationListener.then((listener) => listener?.remove());
@@ -145,7 +153,63 @@ export function MobileShell({
   }, [view]);
 
   async function reloadConnections() {
-    setConnections(await store.list());
+    refreshConnectionStatuses(await store.list());
+  }
+
+  function refreshConnectionStatuses(values: RemoteConnection[]) {
+    const generation = connectionStatusGeneration.current + 1;
+    connectionStatusGeneration.current = generation;
+    abortConnectionStatusChecks();
+    setConnections(values.map((connection) => ({
+      ...connection,
+      connectionStatus: connection.pairingStatus === "error" ? "unavailable" : "checking",
+    })));
+    for (const connection of values) {
+      if (connection.pairingStatus === "pending" || connection.pairingStatus === "error") continue;
+      const controller = new AbortController();
+      let rejectTimeout!: (reason: Error) => void;
+      const timeoutPromise = new Promise<never>((_resolve, reject) => { rejectTimeout = reject; });
+      const check: ConnectionStatusCheck = {
+        controller,
+        timeout: window.setTimeout(() => {
+          controller.abort();
+          rejectTimeout(new Error("remote-status-timeout"));
+        }, CONNECTION_STATUS_TIMEOUT_MS),
+        reject: rejectTimeout,
+      };
+      connectionStatusChecks.current.add(check);
+      void Promise.race([
+        store.credentials(connection.id)
+          .then(({ token }) => verifyRemote(connection.baseUrl, token, controller.signal)),
+        timeoutPromise,
+      ])
+        .then(() => setConnectionStatus(connection.id, "available", generation))
+        .catch(() => setConnectionStatus(connection.id, "unavailable", generation))
+        .finally(() => {
+          window.clearTimeout(check.timeout);
+          connectionStatusChecks.current.delete(check);
+        });
+    }
+  }
+
+  function abortConnectionStatusChecks() {
+    for (const check of connectionStatusChecks.current) {
+      window.clearTimeout(check.timeout);
+      check.controller.abort();
+      check.reject(new Error("remote-status-cancelled"));
+    }
+    connectionStatusChecks.current.clear();
+  }
+
+  function setConnectionStatus(
+    connectionId: string,
+    connectionStatus: NonNullable<RemoteConnection["connectionStatus"]>,
+    generation: number,
+  ) {
+    if (generation !== connectionStatusGeneration.current) return;
+    setConnections((current) => current.map((connection) => connection.id === connectionId
+      ? { ...connection, connectionStatus }
+      : connection));
   }
 
   function openConnectionId(id: string, requestedThreadId?: string) {
@@ -180,7 +244,10 @@ export function MobileShell({
           name,
           pairingStatus,
         })),
-        onManageConnections: () => setView("connections"),
+        onManageConnections: () => {
+          setView("connections");
+          void reloadConnections();
+        },
         onOpenConnection: (connectionId) => { void openConnectionId(connectionId); },
         onOpenExternalUrl: (url) => {
           void CodexRemoteNative.openExternalUrl({ url }).catch(() => undefined);
@@ -342,10 +409,11 @@ async function ensureNotificationPermission() {
   }
 }
 
-async function verifyRemote(baseUrl: string, token: string) {
+async function verifyRemote(baseUrl: string, token: string, signal?: AbortSignal) {
   const normalized = normalizeRemoteUrl(baseUrl);
   const response = await fetch(`${normalized}/api/mobile/status`, {
     headers: { authorization: `Bearer ${token}` },
+    signal,
   });
   if (response.status === 401) throw new Error("remote-auth-failed");
   if (!response.ok) throw new Error("remote-unreachable");

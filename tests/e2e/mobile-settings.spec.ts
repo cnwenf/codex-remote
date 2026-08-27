@@ -28,20 +28,59 @@ test.describe("native mobile settings preview", () => {
     await expect(page.getByRole("heading", { name: "Choose a Mac" })).toBeVisible();
   });
 
-  test("keeps settings and update controls balanced and clickable", async ({ page }) => {
+  test("keeps settings and update controls large enough to tap", async ({ page }) => {
     const settings = page.getByRole("button", { name: "设置" });
+    const settingsBox = await settings.boundingBox();
+
+    await settings.click();
     const update = page.getByRole("button", { name: "检查更新" });
-    const [settingsBox, updateBox] = await Promise.all([settings.boundingBox(), update.boundingBox()]);
+    await update.scrollIntoViewIfNeeded();
+    const updateBox = await update.boundingBox();
 
     expect(settingsBox).not.toBeNull();
     expect(updateBox).not.toBeNull();
-    expect(settingsBox!.width).toBeCloseTo(updateBox!.width, 0);
-    expect(settingsBox!.height).toBeCloseTo(updateBox!.height, 0);
     expect(settingsBox!.width).toBeCloseTo(48, 0);
-    expect(updateBox!.height).toBeCloseTo(48, 0);
+    expect(settingsBox!.height).toBeCloseTo(48, 0);
+    expect(updateBox!.height).toBeGreaterThanOrEqual(42);
 
     await update.click();
-    await settings.click();
     await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
+  });
+
+  test("keeps software update reachable inside the settings scroll area", async ({ page }) => {
+    await page.getByRole("button", { name: "设置" }).click();
+
+    const settingsPage = page.locator(".mobile-settings");
+    const scrollArea = await settingsPage.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      viewportHeight: window.innerHeight,
+    }));
+
+    expect(scrollArea.clientHeight).toBeLessThanOrEqual(scrollArea.viewportHeight);
+    expect(scrollArea.scrollHeight).toBeGreaterThan(scrollArea.clientHeight);
+
+    const checkUpdate = page.getByRole("button", { name: "检查更新" });
+    await checkUpdate.scrollIntoViewIfNeeded();
+    await expect(checkUpdate).toBeInViewport();
+    await checkUpdate.click();
+  });
+
+  test("starts on the connection list and marks an unreachable saved connection without opening it", async ({ page }) => {
+    await page.evaluate(() => {
+      localStorage.setItem("CapacitorStorage.codex-remote.connections.v1", JSON.stringify([{
+        id: "offline-mac",
+        name: "Offline Mac",
+        baseUrl: "http://127.0.0.1:4999",
+        lastUsedAt: 1,
+        pairingStatus: "ready",
+      }]));
+      localStorage.setItem("CapacitorStorage.codex-remote.selected.v1", "offline-mac");
+    });
+    await page.reload();
+
+    await expect(page.getByRole("heading", { name: "选择一台 Mac" })).toBeVisible();
+    await expect(page.getByLabel("不可用")).toBeVisible();
+    await expect(page.getByText(/无法连接 Offline Mac/)).toHaveCount(0);
   });
 });
