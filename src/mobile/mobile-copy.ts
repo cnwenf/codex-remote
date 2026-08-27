@@ -46,9 +46,11 @@ export function mobileCopy(language: MobileLanguage) {
     checking: english ? "Checking…" : "检查中…",
     retryUpdate: english ? "Retry update" : "重试更新",
     downloadVersion: (version: string) => english ? `Download ${version}` : `下载 ${version}`,
+    updateConfirmation: (version: string) => english
+      ? `Version ${version} is available. Download and update now?`
+      : `发现新版本 ${version}，是否下载并更新？`,
     downloadingVersion: (version: string) => english ? `Downloading ${version}` : `正在下载 ${version}`,
     preparingInstall: english ? "Preparing install…" : "准备安装…",
-    latestVersion: english ? "You’re up to date" : "已是最新版本",
     connectionActions: english ? "Connection actions" : "连接操作",
     deleteConfirmation: (name: string) => english ? `Delete “${name}”?` : `删除连接“${name}”？`,
     loginIncorrect: english ? "The login password is incorrect" : "登录密码不正确",

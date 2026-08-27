@@ -16,7 +16,7 @@ describe("ConnectionList", () => {
     expect(actions).toContainElement(within(actions).getByRole("button", { name: "扫码添加" }));
   });
 
-  it("uses balanced header controls and a line-based settings symbol", () => {
+  it("uses flat header controls and a line-based settings symbol", () => {
     const { container } = render(
       <ConnectionList
         connections={[]}
@@ -37,6 +37,8 @@ describe("ConnectionList", () => {
     const update = screen.getByRole("button", { name: "检查更新" });
     expect(settings).toHaveClass("mobile-header-control");
     expect(update).toHaveClass("mobile-header-control");
+    expect(settings).toHaveClass("mobile-header-flat-control");
+    expect(update).toHaveClass("mobile-header-flat-control");
     expect(settings.querySelector('svg[data-icon="settings-sliders"]')).not.toBeNull();
     expect(container.querySelector(".mobile-settings-button > span")).not.toBeInTheDocument();
   });
@@ -69,9 +71,10 @@ describe("ConnectionList", () => {
     expect(onEdit).toHaveBeenCalledWith(connection);
   });
 
-  it("shows the installed version and exposes mobile update actions", async () => {
+  it("keeps the installed version visible and confirms before starting an available update", async () => {
     const onCheckUpdate = vi.fn();
     const onDownloadUpdate = vi.fn();
+    const confirm = vi.spyOn(window, "confirm");
     const common = {
       connections: [],
       onNew: vi.fn(),
@@ -84,12 +87,15 @@ describe("ConnectionList", () => {
       onDownloadUpdate,
     };
 
-    const { rerender } = render(<ConnectionList {...common} updateStatus={{ state: "idle" }} />);
+    const { container, rerender } = render(<ConnectionList {...common} updateStatus={{ state: "idle" }} />);
     const header = screen.getByRole("banner");
     expect(within(header).getByText("v0.4.1")).toBeVisible();
     expect(screen.queryByLabelText("客户端更新")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "检查更新" }));
     expect(onCheckUpdate).toHaveBeenCalledOnce();
+
+    rerender(<ConnectionList {...common} updateStatus={{ state: "checking" }} />);
+    expect(within(header).getByText("v0.4.1")).toBeVisible();
 
     rerender(
       <ConnectionList
@@ -102,6 +108,15 @@ describe("ConnectionList", () => {
         }}
       />,
     );
+    expect(within(header).getByText("v0.4.1")).toBeVisible();
+    expect(container.querySelector(".mobile-update-available-dot")).toBeInTheDocument();
+
+    confirm.mockReturnValueOnce(false);
+    await userEvent.click(screen.getByRole("button", { name: "下载 0.4.2" }));
+    expect(confirm).toHaveBeenCalledWith("发现新版本 0.4.2，是否下载并更新？");
+    expect(onDownloadUpdate).not.toHaveBeenCalled();
+
+    confirm.mockReturnValueOnce(true);
     await userEvent.click(screen.getByRole("button", { name: "下载 0.4.2" }));
     expect(onDownloadUpdate).toHaveBeenCalledWith({
       latestVersion: "0.4.2",
@@ -121,11 +136,12 @@ describe("ConnectionList", () => {
     expect(screen.getByText("✓")).toBeVisible();
 
     rerender(<ConnectionList {...common} updateStatus={{ state: "current" }} />);
-    expect(screen.getByText("已是最新版本")).toBeVisible();
+    expect(within(header).getByText("v0.4.1")).toBeVisible();
+    expect(screen.queryByText("已是最新版本")).not.toBeInTheDocument();
 
     rerender(<ConnectionList {...common} updateStatus={{ state: "error", message: "安装包校验失败" }} />);
     expect(screen.getByRole("status")).toHaveTextContent("安装包校验失败");
-    expect(screen.getByRole("button", { name: "重试更新" })).toHaveTextContent("!");
+    expect(screen.getByRole("button", { name: "重试更新" })).toHaveTextContent("v0.4.1");
   });
 
   it("shows pairing progress and failure in the connection list", () => {

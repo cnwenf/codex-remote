@@ -35,7 +35,7 @@ export function ConnectionList({
     <main className="mobile-connections">
       <header className="mobile-remote-header">
         {onSettings ? (
-          <button type="button" className="mobile-header-control mobile-settings-button" aria-label={copy.settings} onClick={onSettings}>
+          <button type="button" className="mobile-header-control mobile-header-flat-control mobile-settings-button" aria-label={copy.settings} onClick={onSettings}>
             <svg data-icon="settings-sliders" aria-hidden="true" viewBox="0 0 24 24">
               <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6" />
               <circle cx="14" cy="7" r="2" />
@@ -48,15 +48,19 @@ export function ConnectionList({
           updateStatus.state === "available" ? (
             <button
               type="button"
-              className="mobile-header-control mobile-header-update is-available"
+              className="mobile-header-control mobile-header-flat-control mobile-header-update is-available"
               aria-label={copy.downloadVersion(updateStatus.latestVersion)}
-              onClick={() => onDownloadUpdate({
-                latestVersion: updateStatus.latestVersion,
-                downloadUrl: updateStatus.downloadUrl,
-                checksumUrl: updateStatus.checksumUrl,
-              })}
+              onClick={() => {
+                if (!window.confirm(copy.updateConfirmation(updateStatus.latestVersion))) return;
+                onDownloadUpdate({
+                  latestVersion: updateStatus.latestVersion,
+                  downloadUrl: updateStatus.downloadUrl,
+                  checksumUrl: updateStatus.checksumUrl,
+                });
+              }}
             >
-              <span className="mobile-header-control-label">v{updateStatus.latestVersion}</span>
+              <span className="mobile-header-control-label">v{currentVersion}</span>
+              <span className="mobile-update-available-dot" aria-hidden="true" />
             </button>
           ) : updateStatus.state === "downloading" ? (
             <div
@@ -82,23 +86,19 @@ export function ConnectionList({
           ) : (
             <button
               type="button"
-              className="mobile-header-control mobile-header-update"
+              className="mobile-header-control mobile-header-flat-control mobile-header-update"
               aria-label={updateStatus.state === "checking"
                 ? copy.checking
                 : updateStatus.state === "error" ? copy.retryUpdate : copy.checkUpdate}
               disabled={updateStatus.state === "checking"}
               onClick={onCheckUpdate}
             >
-              <span className="mobile-header-control-label">{updateStatus.state === "checking"
-                ? "…"
-                : updateStatus.state === "error" ? "!" : `v${currentVersion}`}</span>
+              <span className="mobile-header-control-label">v{currentVersion}</span>
             </button>
           )
         ) : <span className="mobile-header-spacer" aria-hidden="true" />}
       </header>
-      {updateStatus?.state === "current" ? (
-        <p className="mobile-update-feedback" role="status">{copy.latestVersion}</p>
-      ) : updateStatus?.state === "error" ? (
+      {updateStatus?.state === "error" ? (
         <p className="mobile-update-feedback mobile-update-error" role="status">{updateStatus.message}</p>
       ) : null}
       <div className="mobile-remote-actions" aria-label={copy.connectionActions}>

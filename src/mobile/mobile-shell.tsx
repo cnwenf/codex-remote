@@ -115,6 +115,10 @@ export function MobileShell({
   }, []);
 
   useEffect(() => {
+    void checkUpdate();
+  }, [currentVersion]);
+
+  useEffect(() => {
     const listener = CodexRemoteNative.addListener("updateDownloadProgress", (event) => {
       setUpdateStatus((current) => {
         const latestVersion = "latestVersion" in current ? current.latestVersion : "";

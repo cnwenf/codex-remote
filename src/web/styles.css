@@ -490,11 +490,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .mobile-remote-header h1 { align-self: center; margin: 0; font-size: 1.3rem; letter-spacing: -0.03em; }
 .mobile-header-spacer { width: 48px; height: 48px; }
 .mobile-header-control { width: 48px; height: 48px; min-width: 48px; min-height: 48px; display: grid; place-items: center; align-self: center; padding: 0; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--floating-surface); font: 680 0.62rem/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: center; }
+.mobile-header-flat-control { border: 0; border-radius: 0; background: transparent; }
 .mobile-settings-button { justify-self: start; }
 .mobile-settings-button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .mobile-header-update { position: relative; justify-self: end; }
 .mobile-header-control-label { position: relative; z-index: 1; display: block; max-width: 40px; overflow: hidden; text-overflow: clip; white-space: nowrap; }
-.mobile-header-update.is-available { border-color: color-mix(in oklch, var(--action) 55%, var(--line)); color: var(--action); }
+.mobile-header-update.is-available { color: var(--ink); }
+.mobile-update-available-dot { position: absolute; z-index: 2; top: 9px; right: 1px; width: 7px; height: 7px; border-radius: 999px; background: var(--success); }
 .mobile-header-update:disabled { cursor: wait; opacity: 0.62; }
 .mobile-update-feedback { width: min(calc(100% - 36px), 680px); margin: 4px auto -8px; color: var(--ink-muted); font-size: 0.72rem; text-align: right; }
 .mobile-update-error { color: var(--danger); }
