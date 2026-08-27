@@ -1,5 +1,5 @@
 import type { RemoteConnection } from "./types";
-import type { MobileUpdateArtifact, MobileUpdateStatus } from "./app-update";
+import type { MobileUpdateStatus } from "./app-update";
 import { mobileCopy } from "./mobile-copy";
 import type { MobileLanguage } from "./settings-store";
 
@@ -10,10 +10,7 @@ export function ConnectionList({
   onScan,
   onEdit,
   onRemove,
-  currentVersion,
   updateStatus,
-  onCheckUpdate,
-  onDownloadUpdate,
   onSettings,
   language = "zh-CN",
 }: {
@@ -23,10 +20,7 @@ export function ConnectionList({
   onScan(): void;
   onEdit(connection: RemoteConnection): void;
   onRemove(connection: RemoteConnection): void;
-  currentVersion?: string;
   updateStatus?: MobileUpdateStatus;
-  onCheckUpdate?(): void;
-  onDownloadUpdate?(artifact: MobileUpdateArtifact): void;
   onSettings?(): void;
   language?: MobileLanguage;
 }) {
@@ -34,35 +28,9 @@ export function ConnectionList({
   return (
     <main className="mobile-connections">
       <header className="mobile-remote-header">
-        {onSettings ? (
-          <button type="button" className="mobile-header-control mobile-header-flat-control mobile-settings-button" aria-label={copy.settings} onClick={onSettings}>
-            <svg data-icon="settings-sliders" aria-hidden="true" viewBox="0 0 24 24">
-              <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6" />
-              <circle cx="14" cy="7" r="2" />
-              <circle cx="7" cy="17" r="2" />
-            </svg>
-          </button>
-        ) : <span className="mobile-header-spacer" aria-hidden="true" />}
+        <span className="mobile-header-spacer" aria-hidden="true" />
         <h1>Remote</h1>
-        {currentVersion && updateStatus && onCheckUpdate && onDownloadUpdate ? (
-          updateStatus.state === "available" ? (
-            <button
-              type="button"
-              className="mobile-header-control mobile-header-flat-control mobile-header-update is-available"
-              aria-label={copy.downloadVersion(updateStatus.latestVersion)}
-              onClick={() => {
-                if (!window.confirm(copy.updateConfirmation(updateStatus.latestVersion))) return;
-                onDownloadUpdate({
-                  latestVersion: updateStatus.latestVersion,
-                  downloadUrl: updateStatus.downloadUrl,
-                  checksumUrl: updateStatus.checksumUrl,
-                });
-              }}
-            >
-              <span className="mobile-header-control-label">v{currentVersion}</span>
-              <span className="mobile-update-available-dot" aria-hidden="true" />
-            </button>
-          ) : updateStatus.state === "downloading" ? (
+        {updateStatus?.state === "downloading" ? (
             <div
               className="mobile-header-control mobile-header-update mobile-header-progress-ring"
               role="progressbar"
@@ -74,7 +42,7 @@ export function ConnectionList({
             >
               <span className="mobile-header-control-label">{updateStatus.progress}%</span>
             </div>
-          ) : updateStatus.state === "installing" ? (
+          ) : updateStatus?.state === "installing" ? (
             <div
               className="mobile-header-control mobile-header-update is-complete"
               role="status"
@@ -83,24 +51,18 @@ export function ConnectionList({
             >
               <span className="mobile-header-complete" aria-hidden="true">✓</span>
             </div>
-          ) : (
-            <button
-              type="button"
-              className="mobile-header-control mobile-header-flat-control mobile-header-update"
-              aria-label={updateStatus.state === "checking"
-                ? copy.checking
-                : updateStatus.state === "error" ? copy.retryUpdate : copy.checkUpdate}
-              disabled={updateStatus.state === "checking"}
-              onClick={onCheckUpdate}
-            >
-              <span className="mobile-header-control-label">v{currentVersion}</span>
+          ) : onSettings ? (
+            <button type="button" className="mobile-header-control mobile-header-flat-control mobile-settings-button" aria-label={copy.settings} onClick={onSettings}>
+              <svg data-icon="settings-sliders" aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M7 14v6" />
+                <circle cx="14" cy="7" r="2" />
+                <circle cx="7" cy="17" r="2" />
+              </svg>
+              {updateStatus?.state === "available" ? <span className="mobile-update-available-dot" aria-hidden="true" /> : null}
             </button>
-          )
-        ) : <span className="mobile-header-spacer" aria-hidden="true" />}
+          ) : <span className="mobile-header-spacer" aria-hidden="true" />
+        }
       </header>
-      {updateStatus?.state === "error" ? (
-        <p className="mobile-update-feedback mobile-update-error" role="status">{updateStatus.message}</p>
-      ) : null}
       <div className="mobile-remote-actions" aria-label={copy.connectionActions}>
         <button type="button" className="connection-scan-button" onClick={onScan}>
           <span className="scan-icon" aria-hidden="true" />{copy.scanAdd}

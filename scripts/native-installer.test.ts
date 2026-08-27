@@ -51,6 +51,14 @@ describe("native installer contract", () => {
     expect(releaseWorkflow).toContain("gh release upload");
     expect(releaseWorkflow).toContain("--clobber");
     expect(releaseWorkflow).toContain("purge.jsdelivr.net");
+    expect(releaseWorkflow).toContain("latest.json");
+    expect(releaseWorkflow).toContain("androidDownloadCommit");
+    expect(releaseWorkflow.indexOf("Stage Android download assets"))
+      .toBeLessThan(releaseWorkflow.indexOf("Publish GitHub Release"));
+    expect(releaseWorkflow.indexOf("Publish GitHub Release"))
+      .toBeLessThan(releaseWorkflow.indexOf("Publish Android update manifest"));
+    expect(releaseWorkflow).toContain("sha256sum -c");
+    expect(releaseWorkflow).toContain("Verify published mobile update");
 
     expect(androidBuild).toContain("ANDROID_RELEASE_KEYSTORE_PATH");
     expect(androidBuild).toContain("signingConfig signingConfigs.release");

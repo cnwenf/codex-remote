@@ -140,6 +140,28 @@ describe("TaskList", () => {
     expect(screen.queryByRole("button", { name: /default.*9 个对话/ })).not.toBeInTheDocument();
   });
 
+  it("keeps an explicitly assigned Desktop project even when it matches the gateway default directory", () => {
+    const assigned = {
+      ...thread,
+      projectId: "project-codex-remote",
+      projectName: "Codex Remote",
+      projectRootPaths: ["/code/codex-remote"],
+      cwd: "/code/codex-remote",
+    };
+
+    render(
+      <TaskList
+        threads={[assigned]}
+        directCwd="/code/codex-remote"
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Codex Remote.*1 个对话/ })).toBeVisible();
+    expect(screen.getByRole("region", { name: "最近" })).not.toHaveTextContent("Fix login race");
+  });
+
   it("renders pinned conversations before projects and recent without duplicating them", () => {
     const pinned = {
       ...thread,

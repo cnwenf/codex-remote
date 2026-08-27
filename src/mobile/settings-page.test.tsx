@@ -52,4 +52,33 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("radiogroup", { name: "Appearance" })).toBeVisible();
     expect(screen.getByText("Queue until the current turn finishes")).toBeVisible();
   });
+
+  it("shows the installed version and owns the update action", async () => {
+    const onCheckUpdate = vi.fn();
+    const onDownloadUpdate = vi.fn();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    render(
+      <SettingsPage
+        settings={settings}
+        currentVersion="0.5.11"
+        updateStatus={{ state: "available", latestVersion: "0.5.12", downloadUrl: "https://example.test/app.apk" }}
+        onCheckUpdate={onCheckUpdate}
+        onDownloadUpdate={onDownloadUpdate}
+        onChange={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("当前版本")).toBeVisible();
+    expect(screen.getByText("v0.5.11")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "检查更新" }));
+    expect(onCheckUpdate).toHaveBeenCalledOnce();
+    await userEvent.click(screen.getByRole("button", { name: "下载 0.5.12" }));
+    expect(confirm).toHaveBeenCalledWith("发现新版本 0.5.12，是否下载并更新？");
+    expect(onDownloadUpdate).toHaveBeenCalledWith({
+      latestVersion: "0.5.12",
+      downloadUrl: "https://example.test/app.apk",
+      checksumUrl: undefined,
+    });
+  });
 });

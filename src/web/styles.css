@@ -61,6 +61,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .brand-lockup { display: flex; align-items: center; gap: 11px; min-width: 0; }
 .brand-lockup h1 { max-width: min(48vw, 46rem); margin: 0; overflow: hidden; font-size: 1rem; letter-spacing: -0.015em; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-remote-home { padding: 0; border: 0; color: inherit; background: transparent; font: inherit; font-weight: inherit; letter-spacing: inherit; cursor: pointer; }
 .mobile-thread-back, .mobile-thread-status { display: none; }
 .brand-mark {
   display: grid;
@@ -477,10 +478,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .decision-toast { position: fixed; z-index: 12; top: 72px; left: 50%; transform: translateX(-50%); padding: 10px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); box-shadow: var(--shadow); font-size: 0.76rem; font-weight: 700; }
 
 .manage-connections-button { max-width: 190px; min-height: 38px; margin-left: auto; overflow: hidden; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--surface-muted); font-size: 0.72rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.remote-connection-switcher { min-width: 0; max-width: min(50vw, 420px); display: flex; flex: 0 1 auto; gap: 6px; margin-left: auto; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
+.remote-connection-switcher::-webkit-scrollbar { display: none; }
+.remote-connection-switcher .manage-connections-button { margin-left: 0; flex: 0 0 auto; }
+.remote-connection-switcher .remote-connection-pill.is-active { border-color: color-mix(in oklch, var(--action) 42%, var(--line)); background: var(--surface); }
 .remote-connection-indicator { display: none; width: 8px; height: 8px; flex: 0 0 auto; border-radius: 999px; background: var(--ink-muted); }
 .remote-connection-indicator.connection-ready { background: var(--success); }
 .remote-connection-indicator.connection-connecting,
 .remote-connection-indicator.connection-reconnecting { background: var(--warning); }
+.remote-connection-indicator.pairing-pending { background: var(--warning); }
+.remote-connection-indicator.pairing-error { background: var(--danger); }
 .native-connect-error { width: min(calc(100% - 32px), 520px); margin: auto; padding: 28px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
 .native-connect-error h2 { margin: 0; }
 .native-connect-error p { color: var(--ink-muted); line-height: 1.5; }
@@ -491,7 +498,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .mobile-header-spacer { width: 48px; height: 48px; }
 .mobile-header-control { width: 48px; height: 48px; min-width: 48px; min-height: 48px; display: grid; place-items: center; align-self: center; padding: 0; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--floating-surface); font: 680 0.62rem/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: center; }
 .mobile-header-flat-control { border: 0; border-radius: 0; background: transparent; }
-.mobile-settings-button { justify-self: start; }
+.mobile-settings-button { position: relative; justify-self: end; }
 .mobile-settings-button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .mobile-header-update { position: relative; justify-self: end; }
 .mobile-header-control-label { position: relative; z-index: 1; display: block; max-width: 40px; overflow: hidden; text-overflow: clip; white-space: nowrap; }
@@ -552,6 +559,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .mobile-preference-option:has(input:checked) { background: var(--surface-muted); }
 .mobile-preference-option input:checked + .preference-check { border-color: var(--action); color: oklch(0.985 0.006 252); background: var(--action); }
 .mobile-preference-option:has(input:focus-visible) { outline: 3px solid color-mix(in oklch, var(--accent) 45%, transparent); outline-offset: -3px; }
+.mobile-update-section h2 { margin: 0; font-size: 0.9rem; }
+.mobile-update-section > p { margin: 7px 0 14px; color: var(--ink-muted); font-size: 0.75rem; line-height: 1.45; }
+.mobile-update-card { overflow: hidden; padding: 4px 14px 14px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+.mobile-update-version-row { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); font-size: 0.8rem; }
+.mobile-update-version-row span { color: var(--ink-muted); }
+.mobile-update-latest-row strong { color: var(--success); }
+.mobile-update-status { margin: 13px 0 0; color: var(--success); font-size: 0.75rem; }
+.mobile-update-status.mobile-update-error { color: var(--danger); }
+.mobile-update-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.mobile-update-actions button { min-height: 42px; padding: 0 14px; }
+.mobile-settings-update-progress { position: relative; height: 28px; margin-top: 13px; overflow: hidden; border-radius: 8px; background: var(--surface-muted); }
+.mobile-settings-update-progress > span { display: block; height: 100%; background: color-mix(in oklch, var(--action) 28%, transparent); }
+.mobile-settings-update-progress > small { position: absolute; inset: 0; display: grid; place-items: center; font-size: 0.68rem; font-weight: 720; }
 
 .visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
@@ -564,12 +584,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .app-root > .topbar .brand-mark { display: none; }
   .app-root > .topbar .brand-lockup h1 { max-width: 42vw; font-size: 0.92rem; }
   .app-root > .topbar-native { gap: 10px; }
-  .app-root > .topbar-native .brand-lockup { min-width: 0; flex: 1 1 auto; gap: 8px; }
+  .app-root > .topbar-native .brand-lockup { min-width: 0; flex: 0 1 auto; gap: 8px; }
   .app-root > .topbar-native .brand-lockup h1 { max-width: none; flex: 1 1 auto; font-size: 0.96rem; }
   .app-root > .topbar-native .connection-state { display: none; }
+  .app-root > .topbar-native .remote-connection-switcher { max-width: 54vw; flex: 1 1 auto; }
   .app-root > .topbar-native .remote-connection-pill { min-width: 0; max-width: 112px; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; margin-left: 0; padding: 0 12px; }
   .app-root > .topbar-native .remote-connection-pill > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .app-root > .topbar-native .remote-connection-indicator { display: block; }
+  .app-root > .topbar-native-thread .remote-connection-switcher { max-width: 34vw; }
   .app-root > .topbar-native-thread .mobile-thread-back { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; padding: 0 0 3px; border: 0; border-radius: 999px; color: var(--ink); background: var(--surface-muted); font-size: 1.9rem; line-height: 1; }
   .app-root > .topbar-native-thread .mobile-thread-status { display: inline-flex; min-height: 28px; flex: 0 0 auto; align-items: center; padding: 0 9px; border-radius: 999px; color: var(--ink-muted); background: var(--surface-muted); font-size: 0.66rem; font-weight: 720; }
   .app-root > .topbar-native-thread .mobile-thread-status.status-running { color: var(--accent-strong); background: var(--accent-soft); }

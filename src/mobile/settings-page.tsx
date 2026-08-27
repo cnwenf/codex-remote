@@ -1,13 +1,22 @@
 import { useRef, type ReactNode, type TouchEvent } from "react";
+import type { MobileUpdateArtifact, MobileUpdateStatus } from "./app-update";
 import { mobileCopy } from "./mobile-copy";
 import type { MobileSettings } from "./settings-store";
 
 export function SettingsPage({
   settings,
+  currentVersion,
+  updateStatus,
+  onCheckUpdate,
+  onDownloadUpdate,
   onChange,
   onBack,
 }: {
   settings: MobileSettings;
+  currentVersion?: string;
+  updateStatus?: MobileUpdateStatus;
+  onCheckUpdate?(): void;
+  onDownloadUpdate?(artifact: MobileUpdateArtifact): void;
   onChange(settings: MobileSettings): void;
   onBack(): void;
 }) {
@@ -72,6 +81,70 @@ export function SettingsPage({
             onChange={() => onChange({ ...settings, messageSendMode: "steer" })}
           />
         </PreferenceGroup>
+
+        {currentVersion && updateStatus && onCheckUpdate && onDownloadUpdate ? (
+          <section className="mobile-update-section" aria-labelledby="software-update-heading">
+            <h2 id="software-update-heading">{copy.softwareUpdate}</h2>
+            <p>{copy.softwareUpdateDescription}</p>
+            <div className="mobile-update-card">
+              <div className="mobile-update-version-row">
+                <span>{copy.currentVersion}</span>
+                <strong>v{currentVersion}</strong>
+              </div>
+              {updateStatus.state === "available" ? (
+                <div className="mobile-update-version-row mobile-update-latest-row">
+                  <span>{copy.latestVersion}</span>
+                  <strong>v{updateStatus.latestVersion}</strong>
+                </div>
+              ) : null}
+              {updateStatus.state === "current" ? <p className="mobile-update-status">{copy.upToDate}</p> : null}
+              {updateStatus.state === "error" ? (
+                <p className="mobile-update-status mobile-update-error" role="status">{updateStatus.message}</p>
+              ) : null}
+              {updateStatus.state === "downloading" ? (
+                <div
+                  className="mobile-settings-update-progress"
+                  role="progressbar"
+                  aria-label={copy.downloadingVersion(updateStatus.latestVersion)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={updateStatus.progress}
+                >
+                  <span style={{ width: `${updateStatus.progress}%` }} />
+                  <small>{updateStatus.progress}%</small>
+                </div>
+              ) : null}
+              {updateStatus.state === "installing" ? (
+                <p className="mobile-update-status" role="status">{copy.preparingInstall}</p>
+              ) : null}
+              <div className="mobile-update-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={updateStatus.state === "checking" || updateStatus.state === "downloading" || updateStatus.state === "installing"}
+                  onClick={onCheckUpdate}
+                >
+                  {updateStatus.state === "checking" ? copy.checking : copy.checkUpdate}
+                </button>
+                {updateStatus.state === "available" ? (
+                  <button
+                    type="button"
+                    className="primary-button"
+                    aria-label={copy.downloadVersion(updateStatus.latestVersion)}
+                    onClick={() => {
+                      if (!window.confirm(copy.updateConfirmation(updateStatus.latestVersion))) return;
+                      onDownloadUpdate({
+                        latestVersion: updateStatus.latestVersion,
+                        downloadUrl: updateStatus.downloadUrl,
+                        checksumUrl: updateStatus.checksumUrl,
+                      });
+                    }}
+                  >{copy.downloadVersion(updateStatus.latestVersion)}</button>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        ) : null}
       </div>
     </main>
   );

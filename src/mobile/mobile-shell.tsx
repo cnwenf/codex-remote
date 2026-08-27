@@ -1,7 +1,7 @@
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { LocalNotifications } from "@capacitor/local-notifications";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import packageInfo from "../../package.json";
 import { App, type NativeRemoteSession } from "../web/app";
 import { CapacitorConnectionPersistence } from "./capacitor-persistence";
@@ -55,6 +55,8 @@ export function MobileShell({
   const [currentVersion, setCurrentVersion] = useState(packageInfo.version);
   const [updateStatus, setUpdateStatus] = useState<MobileUpdateStatus>({ state: "idle" });
   const [settings, setSettings] = useState<MobileSettings>(DEFAULT_MOBILE_SETTINGS);
+  const connectionOpenGeneration = useRef(0);
+  const connectionOpenQueue = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     let disposed = false;
@@ -146,10 +148,25 @@ export function MobileShell({
     setConnections(await store.list());
   }
 
-  async function openConnectionId(id: string, requestedThreadId?: string) {
+  function openConnectionId(id: string, requestedThreadId?: string) {
+    const generation = connectionOpenGeneration.current + 1;
+    connectionOpenGeneration.current = generation;
+    const request = connectionOpenQueue.current.then(() => performOpenConnection(id, requestedThreadId, generation));
+    connectionOpenQueue.current = request.catch(() => undefined);
+    return request;
+  }
+
+  async function performOpenConnection(id: string, requestedThreadId: string | undefined, generation: number) {
     try {
       const { connection, token } = await store.credentials(id);
+      if (generation !== connectionOpenGeneration.current) return;
       await store.select(id);
+      if (generation !== connectionOpenGeneration.current) return;
+      const availableConnections = await store.list();
+      if (generation !== connectionOpenGeneration.current) return;
+      await ensureNotificationPermission();
+      if (generation !== connectionOpenGeneration.current) return;
+      setConnections(availableConnections);
       setActive({
         connectionId: id,
         name: connection.name,
@@ -158,13 +175,18 @@ export function MobileShell({
         requestedThreadId,
         language: settings.language,
         messageSendMode: settings.messageSendMode,
+        connections: availableConnections.map(({ id: connectionId, name, pairingStatus }) => ({
+          id: connectionId,
+          name,
+          pairingStatus,
+        })),
         onManageConnections: () => setView("connections"),
+        onOpenConnection: (connectionId) => { void openConnectionId(connectionId); },
         onOpenExternalUrl: (url) => {
           void CodexRemoteNative.openExternalUrl({ url }).catch(() => undefined);
         },
       });
       setView("remote");
-      await ensureNotificationPermission();
       await CodexRemoteNative.startMonitoring({
         connectionId: id,
         name: connection.name,
@@ -172,6 +194,7 @@ export function MobileShell({
         token,
       }).catch(() => undefined);
     } catch (cause) {
+      if (generation !== connectionOpenGeneration.current) return;
       setError(messageForError(cause, settings.language));
       setView("connections");
     }
@@ -286,6 +309,10 @@ export function MobileShell({
     return (
       <SettingsPage
         settings={settings}
+        currentVersion={currentVersion}
+        updateStatus={updateStatus}
+        onCheckUpdate={() => void checkUpdate()}
+        onDownloadUpdate={(artifact) => void downloadUpdate(artifact)}
         onChange={(next) => void updateSettings(next)}
         onBack={() => setView("connections")}
       />
@@ -299,10 +326,7 @@ export function MobileShell({
       onNew={() => { setEditing(undefined); setError(undefined); setView("form"); }}
       onEdit={(connection) => { setEditing(connection); setError(undefined); setView("form"); }}
       onRemove={(connection) => void remove(connection)}
-      currentVersion={currentVersion}
       updateStatus={updateStatus}
-      onCheckUpdate={() => void checkUpdate()}
-      onDownloadUpdate={(url) => void downloadUpdate(url)}
       onSettings={() => setView("settings")}
       language={settings.language}
     />

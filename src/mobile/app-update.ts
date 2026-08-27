@@ -13,61 +13,37 @@ export type MobileUpdateArtifact = {
   checksumUrl?: string;
 };
 
-type GitHubRelease = {
-  tag_name?: unknown;
-  html_url?: unknown;
-  assets?: Array<{ name?: unknown; browser_download_url?: unknown }>;
+type MobileReleaseManifest = {
+  version?: unknown;
+  androidDownloadCommit?: unknown;
 };
 
-type GitHubRef = {
-  object?: { sha?: unknown };
-};
-
-const latestReleaseUrl = "https://api.github.com/repos/cnwenf/codex-remote/releases/latest";
-const androidDownloadRefUrl = "https://api.github.com/repos/cnwenf/codex-remote/git/ref/heads/android-download";
+const latestManifestUrl = "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote@android-download/latest.json";
 const androidDownloadRoot = "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote";
+const githubReleaseRoot = "https://github.com/cnwenf/codex-remote/releases/tag";
 
 export async function findMobileUpdate(
   currentVersion: string,
   platform: MobilePlatform,
   fetcher: typeof fetch = fetch,
 ): Promise<MobileUpdateStatus> {
-  const response = await fetcher(latestReleaseUrl, {
+  const response = await fetcher(latestManifestUrl, {
     cache: "no-store",
-    headers: { accept: "application/vnd.github+json" },
   });
   if (!response.ok) throw new Error(`update-check-failed:${response.status}`);
-  const release = await response.json() as GitHubRelease;
-  const latestVersion = typeof release.tag_name === "string" ? release.tag_name.replace(/^v/, "") : "";
+  const manifest = await response.json() as MobileReleaseManifest;
+  const latestVersion = typeof manifest.version === "string" ? manifest.version.replace(/^v/, "") : "";
   if (!latestVersion) throw new Error("update-release-invalid");
   if (compareVersions(latestVersion, currentVersion) <= 0) return { state: "current" };
 
-  const asset = platform === "android" ? release.assets?.find((candidate) => (
-    typeof candidate.name === "string" && candidate.name.toLowerCase().endsWith(".apk")
-  )) : undefined;
-  const checksumAsset = platform === "android" && typeof asset?.name === "string"
-    ? release.assets?.find((candidate) => candidate.name === `${asset.name}.sha256`)
-    : undefined;
-  const downloadUrl = platform === "android" && typeof asset?.browser_download_url === "string"
-    ? asset.browser_download_url
-    : typeof release.html_url === "string" ? release.html_url : "";
-  if (!downloadUrl.startsWith("https://")) throw new Error("update-download-invalid");
   if (platform === "android") {
-    if (typeof checksumAsset?.browser_download_url !== "string") {
-      throw new Error("update-checksum-invalid");
-    }
-    const releaseTag = typeof release.tag_name === "string" ? release.tag_name : `v${latestVersion}`;
-    const assetName = typeof asset?.name === "string" ? asset.name : "";
-    if (!assetName) throw new Error("update-download-invalid");
-    const refResponse = await fetcher(androidDownloadRefUrl, {
-      cache: "no-store",
-      headers: { accept: "application/vnd.github+json" },
-    });
-    if (!refResponse.ok) throw new Error(`update-download-ref-failed:${refResponse.status}`);
-    const downloadRef = await refResponse.json() as GitHubRef;
-    const downloadCommit = typeof downloadRef.object?.sha === "string" ? downloadRef.object.sha : "";
+    const downloadCommit = typeof manifest.androidDownloadCommit === "string"
+      ? manifest.androidDownloadCommit
+      : "";
     if (!/^[0-9a-f]{40}$/i.test(downloadCommit)) throw new Error("update-download-ref-invalid");
     const immutableDownloadRoot = `${androidDownloadRoot}@${downloadCommit}`;
+    const releaseTag = `v${latestVersion}`;
+    const assetName = "Codex-Remote-android-arm64.apk";
     return {
       state: "available",
       latestVersion,
@@ -75,7 +51,11 @@ export async function findMobileUpdate(
       checksumUrl: `${immutableDownloadRoot}/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}.sha256`,
     };
   }
-  return { state: "available", latestVersion, downloadUrl };
+  return {
+    state: "available",
+    latestVersion,
+    downloadUrl: `${githubReleaseRoot}/v${encodeURIComponent(latestVersion)}`,
+  };
 }
 
 function compareVersions(left: string, right: string) {

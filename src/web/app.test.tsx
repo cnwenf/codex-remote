@@ -213,10 +213,67 @@ describe("App", () => {
     expect(topbar).toContainElement(within(topbar as HTMLElement).getByRole("button", { name: "返回对话列表" }));
     expect(topbar).toContainElement(within(topbar as HTMLElement).getByRole("heading", { name: "Release signing repair" }));
     expect(topbar).toContainElement(within(topbar as HTMLElement).getByText("运行中"));
-    const connection = screen.getByRole("button", { name: "管理连接 macmini，已连接" });
+    const connection = screen.getByRole("button", { name: "打开 macmini 的会话列表，已连接" });
     expect(connection).toHaveTextContent("macmini");
     expect(connection.querySelector(".remote-connection-indicator.connection-ready")).not.toBeNull();
     expect(document.querySelector(".desktop-thread-context")).toBeNull();
+  });
+
+  it("returns to saved connections from the Remote title and switches connection tabs", async () => {
+    const onManageConnections = vi.fn();
+    const onOpenConnection = vi.fn();
+    useCodexMock.mockReturnValue(codexState({ connection: "ready" }));
+
+    render(<App remote={{
+      connectionId: "mac-1",
+      name: "Office Mac",
+      baseUrl: "http://192.168.1.10:4321",
+      token: "test-token",
+      connections: [
+        { id: "mac-1", name: "Office Mac", pairingStatus: "ready" },
+        { id: "mac-2", name: "Home Mac", pairingStatus: "ready" },
+      ],
+      onManageConnections,
+      onOpenConnection,
+    }} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "返回连接列表" }));
+    expect(onManageConnections).toHaveBeenCalledTimes(1);
+
+    const switcher = screen.getByRole("navigation", { name: "连接" });
+    expect(switcher).toHaveClass("remote-connection-switcher");
+    await userEvent.click(within(switcher).getByRole("button", { name: /Home Mac/ }));
+    expect(onOpenConnection).toHaveBeenCalledWith("mac-2");
+  });
+
+  it("opens the active connection conversation list without leaving connection view", async () => {
+    const thread = {
+      id: "thread-1",
+      title: "Active task",
+      status: "idle",
+      turnOrder: [],
+      turns: {},
+    };
+    const value = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+      selectedThreadId: thread.id,
+      selectedThread: thread,
+    });
+    useCodexMock.mockReturnValue(value);
+
+    render(<App remote={{
+      connectionId: "mac-1",
+      name: "Office Mac",
+      baseUrl: "http://192.168.1.10:4321",
+      token: "test-token",
+      connections: [{ id: "mac-1", name: "Office Mac", pairingStatus: "ready" }],
+      onManageConnections: vi.fn(),
+      onOpenConnection: vi.fn(),
+    }} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /Office Mac/ }));
+    expect(value.clearSelection).toHaveBeenCalledTimes(1);
   });
 
   it("uses the mobile default running-message mode for the composer", async () => {

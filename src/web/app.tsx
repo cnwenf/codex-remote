@@ -22,7 +22,13 @@ export type NativeRemoteSession = {
   requestedThreadId?: string;
   language?: MobileLanguage;
   messageSendMode?: MobileMessageSendMode;
+  connections?: Array<{
+    id: string;
+    name: string;
+    pairingStatus?: "pending" | "ready" | "error";
+  }>;
   onManageConnections(): void;
+  onOpenConnection?(connectionId: string): void;
   onOpenExternalUrl?(url: string): void;
 };
 
@@ -122,6 +128,21 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     codex.clearSelection();
   }
 
+  function openConnectionConversations(connectionId: string) {
+    if (!remote || connectionId !== remote.connectionId) {
+      remote?.onOpenConnection?.(connectionId);
+      return;
+    }
+    setComposerExpanded(false);
+    setShowNewConversation(false);
+    codex.clearSelection();
+    window.history.replaceState({
+      ...historyRecord(window.history.state),
+      codexRemoteView: "list",
+      codexRemoteThreadId: undefined,
+    }, "");
+  }
+
   function selectThread(id: string) {
     setComposerExpanded(false);
     setShowNewConversation(false);
@@ -194,7 +215,13 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
             </button>
           ) : null}
           <BrandMark compact />
-          <h1>{codex.selectedThread?.title ?? "Remote"}</h1>
+          {remote && !codex.selectedThread ? (
+            <h1>
+              <button type="button" className="mobile-remote-home" aria-label={copy.backToConnections} onClick={remote.onManageConnections}>
+                Remote
+              </button>
+            </h1>
+          ) : <h1>{codex.selectedThread?.title ?? "Remote"}</h1>}
           {remote && codex.selectedThread ? (
             <span className={`mobile-thread-status status-${codex.selectedThread.status}`}>
               {statusLabel(codex.selectedThread.status, language)}
@@ -202,15 +229,30 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
           ) : null}
         </div>
         {remote ? (
-          <button
-            type="button"
-            className="manage-connections-button remote-connection-pill"
-            onClick={remote.onManageConnections}
-            aria-label={`${copy.manageConnection} ${remote.name}${separator}${connectionLabel(codex.connection, language)}`}
-          >
-            <span aria-hidden="true" className={`remote-connection-indicator connection-${codex.connection}`} />
-            <span>{remote.name}</span>
-          </button>
+          <nav className="remote-connection-switcher" aria-label={copy.connections}>
+            {(remote.connections?.length ? remote.connections : [{ id: remote.connectionId, name: remote.name }]).map((connection) => {
+              const activeConnection = connection.id === remote.connectionId;
+              const label = activeConnection
+                ? connectionLabel(codex.connection, language)
+                : pairingLabel(connection.pairingStatus, language);
+              const indicator = activeConnection
+                ? `connection-${codex.connection}`
+                : `pairing-${connection.pairingStatus ?? "ready"}`;
+              return (
+                <button
+                  type="button"
+                  className={`manage-connections-button remote-connection-pill ${activeConnection ? "is-active" : ""}`}
+                  aria-current={activeConnection ? "page" : undefined}
+                  aria-label={`${copy.openConnectionConversations(connection.name)}${separator}${label}`}
+                  onClick={() => openConnectionConversations(connection.id)}
+                  key={connection.id}
+                >
+                  <span aria-hidden="true" className={`remote-connection-indicator ${indicator}`} />
+                  <span>{connection.name}</span>
+                </button>
+              );
+            })}
+          </nav>
         ) : null}
         <div className={`connection-state connection-${codex.connection}`}>
           <span aria-hidden="true" />
@@ -454,11 +496,21 @@ function connectionLabel(connection: "disconnected" | "connecting" | "reconnecti
   return en ? "Offline" : "离线";
 }
 
+function pairingLabel(status: "pending" | "ready" | "error" | undefined, language: MobileLanguage = "zh-CN") {
+  const en = language === "en";
+  if (status === "pending") return en ? "Pairing" : "正在配对";
+  if (status === "error") return en ? "Unavailable" : "不可用";
+  return en ? "Paired" : "已配对";
+}
+
 function appCopy(language: MobileLanguage) {
   const en = language === "en";
   return {
     backToList: en ? "Back to conversations" : "返回对话列表",
-    manageConnection: en ? "Manage connection" : "管理连接",
+    connections: en ? "Connections" : "连接",
+    openConnectionConversations: (name: string) => en
+      ? `Open ${name} conversations`
+      : `打开 ${name} 的会话列表`,
     cannotConnect: en ? "Cannot connect to" : "无法连接",
     connectionHint: en
       ? "Make sure the Mac is online, the VPN is connected, and the Remote address is reachable."

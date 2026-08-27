@@ -616,6 +616,7 @@ function groupProjects(threads: CodexThread[], directCwd?: string): ProjectGroup
 }
 
 export function isDirectThread(thread: CodexThread, directCwd?: string) {
+  if (thread.projectId) return false;
   if (!thread.cwd) return true;
   if (directCwd && thread.cwd === directCwd) return true;
   return thread.cwd.replaceAll("\\", "/").includes("/Documents/Codex/");
