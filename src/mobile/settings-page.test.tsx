@@ -24,8 +24,8 @@ describe("SettingsPage", () => {
     expect(onChange).toHaveBeenCalledWith({ ...settings, theme: "dark" });
     await userEvent.click(screen.getByRole("radio", { name: /English/ }));
     expect(onChange).toHaveBeenCalledWith({ ...settings, language: "en" });
-    await userEvent.click(screen.getByRole("radio", { name: /引导/ }));
-    expect(onChange).toHaveBeenCalledWith({ ...settings, messageSendMode: "steer" });
+    expect(screen.getByRole("radio", { name: /排队/ })).toBeChecked();
+    expect(screen.queryByRole("radio", { name: /引导/ })).not.toBeInTheDocument();
   });
 
   it("supports a deliberate left-edge swipe back", () => {

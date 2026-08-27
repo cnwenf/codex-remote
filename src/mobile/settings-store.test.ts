@@ -26,9 +26,23 @@ describe("MobileSettingsStore", () => {
     await expect(second.read()).resolves.toEqual({
       theme: "dark",
       language: "en",
-      messageSendMode: "steer",
+      messageSendMode: "queue",
     });
     expect(DEFAULT_MOBILE_SETTINGS.messageSendMode).toBe("queue");
+  });
+
+  it("migrates a previously saved steer mode to queue so a new message cannot interrupt the active turn", async () => {
+    const store = new MobileSettingsStore(new InMemoryMobileSettingsPersistence({
+      theme: "system",
+      language: "zh-CN",
+      messageSendMode: "steer",
+    }));
+
+    await expect(store.read()).resolves.toEqual({
+      theme: "system",
+      language: "zh-CN",
+      messageSendMode: "queue",
+    });
   });
 
   it("repairs unknown persisted values instead of applying invalid UI state", async () => {

@@ -220,6 +220,27 @@ describe("MobileShell updates", () => {
     expect(screen.getByLabelText("可用")).toBeVisible();
   });
 
+  it("probes a saved connection with a stale pairing error when credentials still exist", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 1, pairingStatus: "error" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    const fetchStatus = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ version: 1, threads: [] }), { status: 200 }),
+    );
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+
+    expect(await screen.findByLabelText("可用")).toBeVisible();
+    expect(fetchStatus).toHaveBeenCalledOnce();
+    expect(store.credentials).toHaveBeenCalledWith(connection.id);
+  });
+
   it("returns from a native remote conversation list when Android dispatches the system back gesture", async () => {
     mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
     const connection = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 1, pairingStatus: "ready" as const };

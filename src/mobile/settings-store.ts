@@ -86,5 +86,7 @@ function isLanguage(value: unknown): value is MobileLanguage {
 }
 
 function isMessageSendMode(value: unknown): value is MobileMessageSendMode {
-  return value === "queue" || value === "steer";
+  // Older builds could persist `steer`, which interrupts the active Desktop
+  // turn. Normalize every persisted/write value to queue during migration.
+  return value === "queue";
 }

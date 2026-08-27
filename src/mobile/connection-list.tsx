@@ -93,7 +93,10 @@ export function ConnectionList({
                   <span>
                     <strong>{connection.name}</strong>
                     <small>{connection.baseUrl}</small>
-                    <ConnectionPairingStatus status={connection.pairingStatus} language={language} />
+                    <ConnectionPairingStatus
+                      status={connection.connectionStatus === "available" ? "ready" : connection.pairingStatus}
+                      language={language}
+                    />
                   </span>
                   <span aria-hidden="true">›</span>
                 </button>
@@ -112,9 +115,7 @@ export function ConnectionList({
 
 function ConnectionStatusDot({ connection, language = "zh-CN" }: { connection: RemoteConnection; language?: MobileLanguage }) {
   const copy = mobileCopy(language);
-  const status = connection.connectionStatus ?? (
-    connection.pairingStatus === "error" ? "unavailable" : "checking"
-  );
+  const status = connection.connectionStatus ?? "checking";
   const label = status === "available"
     ? copy.connectionAvailable
     : status === "unavailable"

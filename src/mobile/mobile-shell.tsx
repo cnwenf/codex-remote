@@ -194,12 +194,13 @@ export function MobileShell({
     abortConnectionStatusChecks();
     setConnections((current) => values.map((connection) => ({
       ...connection,
-      connectionStatus: connection.pairingStatus === "error"
-        ? "unavailable"
-        : current.find((existing) => existing.id === connection.id)?.connectionStatus ?? "checking",
+      connectionStatus: current.find((existing) => existing.id === connection.id)?.connectionStatus ?? "checking",
     })));
     for (const connection of values) {
-      if (connection.pairingStatus === "pending" || connection.pairingStatus === "error") continue;
+      // Pairing history and live reachability are separate signals. Older app
+      // versions could leave `pairingStatus=error` behind even though a valid
+      // token was already stored, so credentials decide whether we can probe.
+      if (connection.pairingStatus === "pending") continue;
       const controller = new AbortController();
       let rejectTimeout!: (reason: Error) => void;
       const timeoutPromise = new Promise<never>((_resolve, reject) => { rejectTimeout = reject; });

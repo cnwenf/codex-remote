@@ -72,14 +72,6 @@ export function SettingsPage({
             detail={copy.queueDescription}
             onChange={() => onChange({ ...settings, messageSendMode: "queue" })}
           />
-          <PreferenceOption
-            name="messageSendMode"
-            value="steer"
-            checked={settings.messageSendMode === "steer"}
-            label={copy.steer}
-            detail={copy.steerDescription}
-            onChange={() => onChange({ ...settings, messageSendMode: "steer" })}
-          />
         </PreferenceGroup>
 
         {currentVersion && updateStatus && onCheckUpdate && onDownloadUpdate ? (
