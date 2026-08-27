@@ -539,6 +539,17 @@ export class DesktopBridgeTransport implements CodexTransport {
     try {
       await this.options.client.broadcastQueuedFollowUps(pending.threadId, pending.messages);
     } catch (cause) {
+      if (isOwnerTimeout(cause)) {
+        if (pending.operation === "add") {
+          this.onMessage?.({
+            id: pending.request.id,
+            result: { message: pending.message, pendingConfirmation: true },
+          });
+          return;
+        }
+        await this.promoteQueuedMessage(pending.request, pending.threadId, pending.message);
+        return;
+      }
       this.onMessage?.({
         id: pending.request.id,
         error: {
@@ -852,7 +863,10 @@ function isOwnerUnavailable(cause: unknown) {
 function isOwnerTimeout(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
   return message === "desktop-cdp-owner-call-timeout" ||
-    (message.includes("desktop-thread-owner-request-failed") && message.endsWith("Error: timeout"));
+    ([
+      "desktop-thread-owner-request-failed:",
+      "desktop-queue-broadcast-failed:",
+    ].some((prefix) => message.startsWith(prefix)) && message.endsWith("Error: timeout"));
 }
 
 function isDesktopEnvelope(value: unknown): value is DesktopEnvelope {

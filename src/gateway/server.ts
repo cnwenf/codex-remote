@@ -250,6 +250,10 @@ export function createGateway(options: GatewayOptions) {
       try {
         const envelope = JSON.parse(rawDataToBuffer(data).toString("utf8")) as unknown;
         if (!isRpcEnvelope(envelope)) throw new Error("invalid-envelope");
+        if (isRpcRequest(envelope.payload) && envelope.payload.method === "gateway/threadActivity/read") {
+          handleThreadActivityRequest(socket, envelope.payload);
+          return;
+        }
         if (isRpcRequest(envelope.payload) && envelope.payload.method.startsWith("gateway/desktopRestart/")) {
           void handleDesktopRestartRequest(clientId, socket, envelope.payload);
           return;
@@ -553,6 +557,7 @@ export function createGateway(options: GatewayOptions) {
         const completedStatus = optionalString(turn.status) === "failed" ? "error" : "idle";
         liveThreadActivity.set(threadId, {
           status: completedStatus,
+          turnId: completedTurnId ?? active?.turnId,
           source: "event",
           updatedAt: Date.now(),
         });
@@ -574,9 +579,19 @@ export function createGateway(options: GatewayOptions) {
         updatedAt: Date.now(),
       });
     } else if (status === "error" || status === "failed" || status === "systemError") {
-      liveThreadActivity.set(threadId, { status: "error", source: "event", updatedAt: Date.now() });
+      liveThreadActivity.set(threadId, {
+        status: "error",
+        turnId: liveThreadActivity.get(threadId)?.turnId,
+        source: "event",
+        updatedAt: Date.now(),
+      });
     } else if (status === "idle" || status === "completed" || status === "notLoaded") {
-      liveThreadActivity.set(threadId, { status: "idle", source: "event", updatedAt: Date.now() });
+      liveThreadActivity.set(threadId, {
+        status: "idle",
+        turnId: liveThreadActivity.get(threadId)?.turnId,
+        source: "event",
+        updatedAt: Date.now(),
+      });
     }
   }
 
@@ -589,6 +604,12 @@ export function createGateway(options: GatewayOptions) {
       for (const thread of projected) {
         if (thread.status === "unknown") continue;
         const current = liveThreadActivity.get(thread.id);
+        const staleRunningListAfterTerminalEvent =
+          current?.source === "event" &&
+          current.status !== "running" &&
+          thread.status === "running" &&
+          (thread.updatedAt === undefined || thread.updatedAt <= current.updatedAt);
+        if (staleRunningListAfterTerminalEvent) continue;
         if (
           current?.source === "event" &&
           current.status !== thread.status &&
@@ -596,6 +617,7 @@ export function createGateway(options: GatewayOptions) {
         ) continue;
         liveThreadActivity.set(thread.id, {
           status: thread.status,
+          turnId: thread.status === "running" ? current?.turnId : undefined,
           source: "sync",
           updatedAt: now,
         });
@@ -918,7 +940,10 @@ export function createGateway(options: GatewayOptions) {
     try {
       if (!options.desktopState) throw new Error("Desktop state is unavailable");
       const result = await options.desktopState.request(request.method, request.params);
-      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result } });
+      const reconciled = request.method === "desktopState/readThread"
+        ? reconcileDesktopThreadActivity(result, liveThreadActivity)
+        : result;
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result: reconciled } });
     } catch (cause) {
       sendEnvelope(socket, {
         type: "rpc",
@@ -929,6 +954,56 @@ export function createGateway(options: GatewayOptions) {
       });
     }
   }
+
+  function handleThreadActivityRequest(
+    socket: WebSocket,
+    request: import("../protocol/types").RpcRequest,
+  ) {
+    const threadId = optionalString(recordValue(request.params).threadId);
+    if (!threadId) {
+      sendEnvelope(socket, {
+        type: "rpc",
+        payload: { id: request.id, error: { code: -32602, message: "threadId is required" } },
+      });
+      return;
+    }
+    const activity = liveThreadActivity.get(threadId);
+    sendEnvelope(socket, {
+      type: "rpc",
+      payload: {
+        id: request.id,
+        result: activity
+          ? { status: activity.status, ...(activity.turnId ? { turnId: activity.turnId } : {}) }
+          : { status: "unknown" },
+      },
+    });
+  }
+}
+
+function reconcileDesktopThreadActivity(
+  value: unknown,
+  activityByThread: ReadonlyMap<string, { status: "running" | "idle" | "error"; turnId?: string }>,
+) {
+  const outer = recordValue(value);
+  const thread = recordValue(outer.thread ?? value);
+  const threadId = optionalString(thread.id);
+  const activity = threadId ? activityByThread.get(threadId) : undefined;
+  if (!activity?.turnId) return value;
+  const turns = Array.isArray(thread.turns) ? thread.turns.map((turn) => ({ ...recordValue(turn) })) : [];
+  const turnIndex = turns.findIndex((turn) => optionalString(turn.id) === activity.turnId);
+  const turnStatus = activity.status === "running"
+    ? "inProgress"
+    : activity.status === "error" ? "failed" : "completed";
+  if (turnIndex >= 0) turns[turnIndex] = { ...turns[turnIndex], status: turnStatus };
+  else turns.push({ id: activity.turnId, status: turnStatus, items: [] });
+  const reconciledThread = {
+    ...thread,
+    status: { type: activity.status === "running" ? "active" : activity.status },
+    turns,
+  };
+  return Object.hasOwn(outer, "thread")
+    ? { ...outer, thread: reconciledThread }
+    : reconciledThread;
 }
 
 function enrichDesktopImageMessage(message: RpcMessage, imageStore: ImageUploadStore): RpcMessage {

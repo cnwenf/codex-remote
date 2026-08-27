@@ -73,4 +73,39 @@ test.describe("native mobile remote header", () => {
     });
     expect(after).toBeGreaterThan(before.scrollLeft);
   });
+
+  test("keeps a long pending steer message and its final state inside the mobile viewport", async ({ page }) => {
+    await page.setContent(`
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <style>${styles}</style>
+      <main class="app-root">
+        <header class="topbar"></header>
+        <section class="app-shell has-selection">
+          <div class="task-pane">
+            <div class="conversation-controls">
+              <section class="queued-followups">
+                <header><strong>排队消息</strong><span>1</span></header>
+                <div class="queued-followups-list">
+                  <article>
+                    <p>${"一段很长的引导消息".repeat(30)}</p>
+                    <button type="button" disabled>正在转为引导…</button>
+                  </article>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+      </main>
+    `);
+
+    const article = page.locator(".queued-followups article");
+    const button = page.getByRole("button", { name: "正在转为引导…" });
+    const articleStyle = await article.evaluate((element) => getComputedStyle(element).display);
+    const buttonBox = await button.boundingBox();
+    expect(articleStyle).toBe("grid");
+    expect(buttonBox).not.toBeNull();
+    expect(buttonBox!.x).toBeGreaterThanOrEqual(0);
+    expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
 });

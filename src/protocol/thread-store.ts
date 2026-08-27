@@ -328,7 +328,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
       const text = isUserMessageType(itemType) ? displayUserInput(rawText) : rawText;
       const clientMessageId = messageIdentity(item);
       const optimisticMatch = isUserMessageType(itemType)
-        ? findMatchingOptimisticUserMessage(thread, text, itemId, clientMessageId)
+        ? findMatchingOptimisticUserMessage(thread, text, turnId, itemId, clientMessageId)
         : undefined;
       const confirmedDuplicate = isUserMessageType(itemType) && !optimisticMatch
         ? findRecentConfirmedUserMessage(
@@ -340,9 +340,10 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
         )
         : undefined;
       const reconciledMatch = optimisticMatch ?? confirmedDuplicate;
-      const baseThread = reconciledMatch
+      const withoutOptimistic = reconciledMatch
         ? removeItemFromTurn(thread, reconciledMatch.turnId, reconciledMatch.item.id)
         : thread;
+      const baseThread = removeItemFromOtherTurns(withoutOptimistic, turnId, itemId);
       return updateTurn(baseThread, turnId, (turn) => {
         const previous = turn.items[itemId];
         const resolvedText = text || previous?.text || "";
@@ -443,27 +444,58 @@ function appendUnique(values: string[], value: string) {
 function findMatchingOptimisticUserMessage(
   thread: CodexThread,
   text: string,
+  authoritativeTurnId: string,
   authoritativeId: string,
   clientMessageId?: string,
 ) {
-  if (thread.turnOrder.some((turnId) => thread.turns[turnId]?.items[authoritativeId])) return undefined;
+  const candidates: Array<{ turnId: string; item: CodexItem }> = [];
+  const confirmed: Array<{ itemId: string; item: CodexItem }> = [];
   for (const turnId of thread.turnOrder) {
     const turn = thread.turns[turnId];
-    const itemId = turn?.itemOrder.find((id) => {
-      const candidate = turn.items[id];
-      return Boolean(candidate) && isOptimisticMessage(candidate, id) &&
-        optimisticIdentitiesMatch(candidate, clientMessageId) &&
+    for (const itemId of turn?.itemOrder ?? []) {
+      const candidate = turn.items[itemId];
+      if (Boolean(candidate) && isOptimisticMessage(candidate, itemId) &&
         isUserMessageType(candidate?.type) &&
         sameUserInput(
           candidate?.text ?? "",
           text,
           Boolean(candidate?.imageIds?.length),
           /<image\b/i.test(text),
-        );
-    });
-    if (itemId) return { turnId, item: turn.items[itemId] };
+        )) {
+        candidates.push({ turnId, item: candidate });
+      }
+      if (candidate && !isOptimisticMessage(candidate, itemId) && isUserMessageType(candidate.type)) {
+        confirmed.push({ itemId, item: candidate });
+      }
+    }
   }
-  return undefined;
+  const exact = clientMessageId
+    ? candidates.find(({ item }) => item.clientMessageId === clientMessageId)
+    : undefined;
+  if (exact) return exact;
+  if (clientMessageId && confirmed.some(({ item }) => item.clientMessageId === clientMessageId)) {
+    return undefined;
+  }
+  const representedById = confirmed.find(({ itemId }) => itemId === authoritativeId);
+  if (representedById && sameUserInput(
+    representedById.item.text,
+    text,
+    Boolean(representedById.item.imageIds?.length),
+    /<image\b/i.test(text),
+  )) return undefined;
+  const fallback = candidates[0];
+  if (!fallback) return undefined;
+  if (!clientMessageId && !representedById && confirmed.some(({ item }) => sameUserInput(
+    item.text,
+    text,
+    Boolean(item.imageIds?.length),
+    /<image\b/i.test(text),
+  ))) {
+    const authoritativeTurnIndex = thread.turnOrder.indexOf(authoritativeTurnId);
+    const pendingTurnIndex = thread.turnOrder.indexOf(fallback.turnId);
+    if (authoritativeTurnIndex >= 0 && pendingTurnIndex > authoritativeTurnIndex) return undefined;
+  }
+  return fallback;
 }
 
 function findRecentConfirmedUserMessage(
@@ -505,11 +537,6 @@ function isOptimisticMessage(item: CodexItem | undefined, itemId: string) {
 
 function identitiesMatch(item: CodexItem | undefined, clientMessageId?: string) {
   if (!clientMessageId) return !item?.clientMessageId;
-  return item?.clientMessageId === clientMessageId;
-}
-
-function optimisticIdentitiesMatch(item: CodexItem | undefined, clientMessageId?: string) {
-  if (!clientMessageId) return true;
   return item?.clientMessageId === clientMessageId;
 }
 
@@ -561,6 +588,14 @@ function removeItemFromTurn(thread: CodexThread, turnId: string, itemId: string)
       },
     },
   };
+}
+
+function removeItemFromOtherTurns(thread: CodexThread, targetTurnId: string, itemId: string) {
+  return thread.turnOrder.reduce((next, turnId) => (
+    turnId !== targetTurnId && next.turns[turnId]?.items[itemId]
+      ? removeItemFromTurn(next, turnId, itemId)
+      : next
+  ), thread);
 }
 
 function isUserMessageType(value: string | undefined) {

@@ -10,6 +10,7 @@ class FakeBridgeClient implements DesktopBridgeClient {
   queuePromotionResult = true;
   ownerRequestResult: unknown = { method: "thread-follower-update-thread-settings", result: { ok: true } };
   ownerRequestError?: Error;
+  queueBroadcastError?: Error;
   startCalls = 0;
   startFailures = 0;
   onMessage?: (message: unknown) => void;
@@ -37,6 +38,7 @@ class FakeBridgeClient implements DesktopBridgeClient {
 
   async broadcastQueuedFollowUps(conversationId: string, messages: unknown[]) {
     this.queueBroadcasts.push({ conversationId, messages });
+    if (this.queueBroadcastError) throw this.queueBroadcastError;
   }
 
   async promoteQueuedFollowUp(conversationId: string, messageId: string, text: string) {
@@ -327,6 +329,42 @@ describe("DesktopBridgeTransport", () => {
       result: { message: expect.objectContaining({ text: "Run this next" }) },
     });
     expect(client.ownerRequests).toEqual([]);
+    await transport.stop();
+  });
+
+  it("does not report a Desktop owner timeout after the queued message was persisted", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    client.queueBroadcastError = new Error("desktop-queue-broadcast-failed:Error: timeout");
+    transport.send({
+      id: 160,
+      method: "desktop/queue/add",
+      params: { threadId: "thread-1", text: "Guide after persistence" },
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const readRequest = client.sent[0] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: readRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ value: {} }),
+    });
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    const writeRequest = client.sent[1] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: writeRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ success: true }),
+    });
+
+    await vi.waitFor(() => expect(client.queueBroadcasts).toHaveLength(1));
+    expect(messages).toContainEqual({
+      id: 160,
+      result: { message: expect.objectContaining({ text: "Guide after persistence" }), pendingConfirmation: true },
+    });
+    expect(messages).not.toContainEqual(expect.objectContaining({ id: 160, error: expect.anything() }));
     await transport.stop();
   });
 

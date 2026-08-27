@@ -151,6 +151,57 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   ).toBe(true);
 });
 
+test("pins the latest long user question in two lines after it leaves the mobile viewport", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chrome-mobile", "mobile conversation behavior");
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+
+  const question = "请持续检查这个很长的移动端任务，并且在回答很多轮以后仍然让我能看到最初的问题内容和完整上下文。";
+  await page.getByRole("textbox", { name: "Instruction" }).fill(question);
+  await page.getByRole("button", { name: "Send" }).click();
+  const viewport = page.getByTestId("timeline-scroll");
+  await expect(page.locator(".message-user", { hasText: question })).toHaveCount(1);
+  await page.locator(".activity-group summary").last().dispatchEvent("click");
+  await page.getByText("查看代码变更").dispatchEvent("click");
+  await viewport.evaluate((element) => {
+    const prompts = element.querySelectorAll<HTMLElement>("[data-user-message='true']");
+    const prompt = prompts.item(prompts.length - 1);
+    if (!prompt) throw new Error("missing user prompt");
+    element.scrollTop += prompt.getBoundingClientRect().bottom - element.getBoundingClientRect().top + 12;
+    element.dispatchEvent(new Event("scroll"));
+  });
+
+  const pinned = page.locator(".pinned-user-question");
+  await expect(page.getByRole("button", { name: `展开原始问题：${question}` })).toBeVisible();
+  await expect(pinned).toHaveText(question);
+  expect(await pinned.locator("span").evaluate((element) => getComputedStyle(element).webkitLineClamp)).toBe("2");
+
+  await pinned.click();
+  await expect(pinned).toHaveAttribute("aria-expanded", "true");
+  await page.locator(".task-header").dispatchEvent("pointerdown");
+  await expect(pinned).toHaveAttribute("aria-expanded", "false");
+
+  await viewport.evaluate((element) => {
+    const prompts = element.querySelectorAll<HTMLElement>("[data-user-message='true']");
+    prompts.item(prompts.length - 1)?.scrollIntoView({ block: "start" });
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(page.getByRole("button", { name: `展开原始问题：${question}` })).toHaveCount(0);
+
+  await expect(page.locator(".typing-dot")).toHaveCount(3);
+  await page.getByRole("textbox", { name: "Instruction" }).focus();
+  await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+  await page.getByRole("button", { name: "Stop" }).dispatchEvent("click");
+  await expect(page.getByRole("button", { name: "Stop" })).toHaveCount(0);
+  await expect(page.locator(".task-status")).toHaveText("空闲");
+  await expect(page.locator(".typing-dot")).toHaveCount(0);
+  await page.getByRole("button", { name: "返回对话列表" }).click();
+  await expect(page.getByRole("button", { name: /^Fixture task，空闲/ })).toBeVisible();
+});
+
 test("keeps an unsent draft for its conversation across reload", async ({ page }) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");

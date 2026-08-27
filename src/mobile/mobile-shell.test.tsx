@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   findMobileUpdate: vi.fn(),
+  capacitorListeners: new Map<string, (...args: unknown[]) => void>(),
   nativePlugin: {
     addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
     getLaunchTarget: vi.fn(async () => ({})),
@@ -13,10 +14,11 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../web/app", () => ({
-  App: ({ remote }: { remote: { connectionId: string; onOpenExternalUrl?(url: string): void } }) => (
+  App: ({ remote }: { remote: { connectionId: string; onOpenConnection?(id: string): void; onOpenExternalUrl?(url: string): void } }) => (
     <main>
       <span data-testid="active-connection">{remote.connectionId}</span>
       <button type="button" onClick={() => remote.onOpenExternalUrl?.("https://docs.example.test/path")}>Open docs</button>
+      <button type="button" onClick={() => remote.onOpenConnection?.("mac-2")}>Switch connection</button>
     </main>
   ),
 }));
@@ -30,7 +32,14 @@ vi.mock("@capacitor/core", () => ({
 
 vi.mock("@capacitor/app", () => ({
   App: {
-    addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
+    addListener: vi.fn(async (event: string, listener: (...args: unknown[]) => void) => {
+      mocks.capacitorListeners.set(event, listener);
+      return {
+        remove: vi.fn(async () => {
+          if (mocks.capacitorListeners.get(event) === listener) mocks.capacitorListeners.delete(event);
+        }),
+      };
+    }),
     getInfo: vi.fn(async () => ({ version: "0.5.10" })),
     getLaunchUrl: vi.fn(async () => undefined),
   },
@@ -54,6 +63,8 @@ describe("MobileShell updates", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.clearAllMocks();
+    mocks.capacitorListeners.clear();
+    window.history.replaceState(null, "");
   });
   it("checks for a new native app version automatically on launch", async () => {
     mocks.findMobileUpdate.mockResolvedValue({
@@ -180,8 +191,107 @@ describe("MobileShell updates", () => {
     expect(fetchStatus).toHaveBeenCalledOnce();
     expect(screen.getByLabelText("检测中")).toBeVisible();
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
     expect(screen.getByLabelText("不可用")).toBeVisible();
+  });
+
+  it("rechecks unavailable connections in the background and marks a recovered connection available", async () => {
+    vi.useFakeTimers();
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    const fetchStatus = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, threads: [] }), { status: 200 }));
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByLabelText("不可用")).toBeVisible();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+
+    expect(fetchStatus).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText("可用")).toBeVisible();
+  });
+
+  it("returns from a native remote conversation list when Android dispatches the system back gesture", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+      select: vi.fn(async () => undefined),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+    expect(await screen.findByTestId("active-connection")).toBeVisible();
+    await waitFor(() => expect(mocks.capacitorListeners.get("backButton")).toBeTypeOf("function"));
+
+    act(() => mocks.capacitorListeners.get("backButton")?.());
+
+    expect(await screen.findByRole("heading", { name: "选择一台 Mac" })).toBeVisible();
+  });
+
+  it("resets stale thread history when switching connections before handling Android back", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    const office = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 2, pairingStatus: "ready" as const };
+    const home = { id: "mac-2", name: "Home Mac", baseUrl: "http://127.0.0.1:4319", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [office, home]),
+      credentials: vi.fn(async (id: string) => ({ connection: id === office.id ? office : home, token: `${id}-token` })),
+      select: vi.fn(async () => undefined),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+    expect(await screen.findByTestId("active-connection")).toHaveTextContent(office.id);
+    window.history.replaceState({ codexRemoteView: "thread", codexRemoteThreadId: "thread-a" }, "");
+
+    await userEvent.click(screen.getByRole("button", { name: "Switch connection" }));
+    expect(await screen.findByTestId("active-connection")).toHaveTextContent(home.id);
+    expect(window.history.state).toMatchObject({ codexRemoteView: "list" });
+    act(() => mocks.capacitorListeners.get("backButton")?.());
+
+    expect(await screen.findByRole("heading", { name: "选择一台 Mac" })).toBeVisible();
+  });
+
+  it("rechecks connection status immediately on foreground recovery and removes the listener on unmount", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    const fetchStatus = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ version: 1, threads: [] }), { status: 200 }));
+
+    const view = render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    expect(await screen.findByLabelText("不可用")).toBeVisible();
+    await waitFor(() => expect(mocks.capacitorListeners.get("appStateChange")).toBeTypeOf("function"));
+
+    act(() => mocks.capacitorListeners.get("appStateChange")?.({ isActive: true }));
+    expect(await screen.findByLabelText("可用")).toBeVisible();
+    expect(fetchStatus).toHaveBeenCalledTimes(2);
+
+    view.unmount();
+    await waitFor(() => expect(mocks.capacitorListeners.has("appStateChange")).toBe(false));
   });
 
   it("aborts an in-flight connection status check when the shell unmounts", async () => {

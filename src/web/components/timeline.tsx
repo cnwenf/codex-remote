@@ -37,6 +37,7 @@ export function Timeline({
   const typingTurnId = thread.activeTurnId && thread.turns[thread.activeTurnId]?.status === "inProgress"
     ? thread.activeTurnId
     : [...thread.turnOrder].reverse().find((turnId) => thread.turns[turnId]?.status === "inProgress");
+  const liveTurnId = thread.status === "running" ? typingTurnId ?? thread.turnOrder.at(-1) : undefined;
 
   return (
     <ol className="timeline" aria-label="对话内容">
@@ -48,10 +49,15 @@ export function Timeline({
             turn={turn}
             imageRequest={imageRequest}
             onOpenExternalUrl={onOpenExternalUrl}
-            showTyping={thread.status === "running" && turnId === typingTurnId}
+            showTyping={turnId === liveTurnId}
           />
         ) : null;
       })}
+      {thread.status === "running" && !liveTurnId ? (
+        <li className="conversation-turn conversation-turn-recovering" data-turn-id="recovering-active-turn">
+          <TypingIndicator />
+        </li>
+      ) : null}
     </ol>
   );
 }
@@ -69,7 +75,7 @@ function TurnView({
 }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const segments = segmentItems(items);
-  const completedLayout = completedTurnLayout(segments, turn.status);
+  const completedLayout = showTyping ? undefined : completedTurnLayout(segments, turn.status);
 
   if (completedLayout) {
     return (
@@ -151,13 +157,19 @@ function TurnView({
       })}
 
       {showTyping ? (
-        <div className="typing-indicator" role="status" aria-label="Codex 仍在输出">
-          <span className="typing-dot" aria-hidden="true" />
-          <span className="typing-dot" aria-hidden="true" />
-          <span className="typing-dot" aria-hidden="true" />
-        </div>
+        <TypingIndicator />
       ) : null}
     </li>
+  );
+}
+
+function TypingIndicator() {
+  return (
+    <div className="typing-indicator" role="status" aria-label="Codex 仍在输出">
+      <span className="typing-dot" aria-hidden="true" />
+      <span className="typing-dot" aria-hidden="true" />
+      <span className="typing-dot" aria-hidden="true" />
+    </div>
   );
 }
 
@@ -173,7 +185,7 @@ function MessageSegment({
   const item = segment.item;
   if (segment.kind === "user") {
     return (
-      <article className="message message-user">
+      <article className="message message-user" data-user-message="true">
         <span className="message-author">你</span>
         <MarkdownContent text={item.text || "等待输入…"} onOpenExternalUrl={onOpenExternalUrl} />
         {item.imageIds?.length ? (

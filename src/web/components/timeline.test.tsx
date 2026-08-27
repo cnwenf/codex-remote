@@ -192,6 +192,65 @@ describe("Timeline", () => {
     expect(container.querySelector('[data-turn-id="turn-2"] .typing-indicator')).toBeInTheDocument();
   });
 
+  it("shows a running ellipsis while the active turn identity is being recovered", () => {
+    const thread: CodexThread = {
+      id: "recovering-running-turn",
+      title: "Recover running identity",
+      status: "running",
+      turnOrder: ["turn-completed"],
+      turns: {
+        "turn-completed": {
+          id: "turn-completed",
+          status: "completed",
+          itemOrder: ["agent-completed"],
+          items: {
+            "agent-completed": {
+              id: "agent-completed",
+              type: "agentMessage",
+              text: "Earlier response",
+            },
+          },
+        },
+      },
+    };
+
+    const { container } = render(<Timeline thread={thread} />);
+
+    expect(screen.getAllByLabelText("Codex 仍在输出")).toHaveLength(1);
+    expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
+  });
+
+  it("keeps intermediate assistant text visible until the whole thread is terminal", () => {
+    const thread: CodexThread = {
+      id: "premature-terminal-turn",
+      title: "Do not collapse live text",
+      status: "running",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          itemOrder: ["user-1", "agent-progress", "tool-1", "agent-latest"],
+          items: {
+            "user-1": { id: "user-1", type: "userMessage", text: "继续处理" },
+            "agent-progress": { id: "agent-progress", type: "agentMessage", text: "我先定位状态同步问题" },
+            "tool-1": { id: "tool-1", type: "commandExecution", text: "pnpm test", status: "running" },
+            "agent-latest": { id: "agent-latest", type: "agentMessage", text: "还在继续检查" },
+          },
+        },
+      },
+    };
+
+    const { rerender } = render(<Timeline thread={thread} />);
+    expect(screen.getByText("我先定位状态同步问题")).toBeVisible();
+    expect(screen.getByText("还在继续检查")).toBeVisible();
+    expect(screen.getByLabelText("Codex 仍在输出")).toBeVisible();
+
+    rerender(<Timeline thread={{ ...thread, status: "idle" }} />);
+    expect(screen.getByText("我先定位状态同步问题")).not.toBeVisible();
+    expect(screen.getByText("还在继续检查")).toBeVisible();
+  });
+
   it("marks an earlier activity group complete once later assistant output arrives", () => {
     const thread: CodexThread = {
       id: "later-output",

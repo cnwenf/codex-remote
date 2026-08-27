@@ -856,10 +856,30 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
 
   const interrupt = useCallback(async () => {
     if (!selectedThreadId) return;
-    const turnId = state.threads[selectedThreadId]?.activeTurnId;
-    if (!turnId) throw new Error("No active turn to stop");
-    await socket.request("turn/interrupt", { threadId: selectedThreadId, turnId });
-  }, [selectedThreadId, socket, state.threads]);
+    let turnId = state.threads[selectedThreadId]?.activeTurnId;
+    if (!turnId) {
+      const activity = asRecord(await socket.request("gateway/threadActivity/read", {
+        threadId: selectedThreadId,
+      }));
+      turnId = stringValue(activity.turnId);
+      if (stringValue(activity.status) !== "running") {
+        setState((current) => settleThreadAfterStop(current, selectedThreadId));
+        return;
+      }
+      if (!turnId) throw new Error("运行状态正在同步，请稍后重试");
+      const recoveredTurnId = turnId;
+      setState((current) => reconciler.reduceEvent(current, {
+        method: "turn/started",
+        params: { threadId: selectedThreadId, turn: { id: recoveredTurnId } },
+      }));
+    }
+    try {
+      await socket.request("turn/interrupt", { threadId: selectedThreadId, turnId });
+    } catch (cause) {
+      if (!isNoActiveTurnToStop(cause)) throw cause;
+      setState((current) => settleThreadAfterStop(current, selectedThreadId, turnId));
+    }
+  }, [reconciler, selectedThreadId, socket, state.threads]);
 
   const prepareDesktopRestart = useCallback(async () => {
     return await socket.request("gateway/desktopRestart/prepare") as {
@@ -1137,6 +1157,7 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
     if (!id) continue;
     order.push(id);
     const current = threads[id];
+    const incomingStatus = normalizeStatus(record.status, current?.status);
     const section = asRecord(record.section);
     const desktop = metadata.get(id);
     const hasPinnedValue = typeof desktop?.isPinned === "boolean";
@@ -1160,7 +1181,11 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
         numberValue(record.updated_at),
       // thread/list can lag behind the live event stream. Keep an acknowledged
       // active turn running until turn/completed clears activeTurnId.
-      status: current?.activeTurnId ? "running" : normalizeStatus(record.status, current?.status),
+      status: current?.activeTurnId
+        ? "running"
+        : current?.status === "idle" && incomingStatus === "running" && latestKnownTurnIsTerminal(current)
+          ? "idle"
+          : incomingStatus,
       turnOrder: current?.turnOrder ?? [],
       turns: current?.turns ?? {},
       diff: current?.diff,
@@ -1180,6 +1205,37 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
     };
   }
   return { threadOrder: order, threads, stale: false };
+}
+
+function latestKnownTurnIsTerminal(thread: CodexThread) {
+  const turnId = thread.turnOrder.at(-1);
+  return Boolean(turnId && isTerminalTurnStatus(thread.turns[turnId]?.status));
+}
+
+function settleThreadAfterStop(state: CodexState, threadId: string, turnId?: string): CodexState {
+  const thread = state.threads[threadId];
+  if (!thread) return state;
+  const activeTurnId = thread.activeTurnId;
+  // The interrupt response belongs to the requested turn. If a newer turn
+  // started while that request was in flight, its running state must win.
+  if (turnId && activeTurnId && activeTurnId !== turnId) return state;
+  if (activeTurnId && (!turnId || turnId === activeTurnId)) {
+    return reduceCodexState(state, {
+      method: "turn/completed",
+      params: { threadId, turn: { id: activeTurnId, status: "interrupted" } },
+    });
+  }
+  return {
+    ...state,
+    threads: {
+      ...state.threads,
+      [threadId]: { ...thread, status: "idle", activeTurnId: undefined },
+    },
+  };
+}
+
+function isNoActiveTurnToStop(cause: unknown) {
+  return cause instanceof Error && /no\s+active\s+turn(?:\s+to\s+stop)?/i.test(cause.message);
 }
 
 function hydrateThread(
@@ -1203,6 +1259,7 @@ function hydrateThread(
     };
   }
   const snapshotTurnOrder: string[] = [];
+  const snapshotFallbackItemKeys = new Set<string>();
   let snapshotHasInProgressTurn = false;
   const turnValues = Array.isArray(record.turns) ? record.turns : [];
   for (const turnValue of turnValues) {
@@ -1232,7 +1289,7 @@ function hydrateThread(
         }
       }
       snapshotItemOrder.push(itemId);
-      snapshotItems[itemId] = {
+      const snapshotItem: CodexTurn["items"][string] = {
         id: itemId,
         type: itemType,
         text: extractItemText(item),
@@ -1243,15 +1300,21 @@ function hydrateThread(
         status: stringValue(item.status),
         imageIds: stringArray(item.imageIds),
       };
+      snapshotItems[itemId] = snapshotItem;
+      const previousItem = existing?.items[itemId];
+      if (
+        placement !== "prepend" &&
+        isUserMessage(snapshotItem) &&
+        (!previousItem ||
+          !sameUserMessage(previousItem, snapshotItem) ||
+          previousItem.clientMessageId !== snapshotItem.clientMessageId)
+      ) {
+        snapshotFallbackItemKeys.add(`${turnId}\0${itemId}`);
+      }
     }
     const items = { ...snapshotItems };
     const retainedExistingOrder: string[] = [];
     for (const [itemId, existingItem] of Object.entries(existing?.items ?? {})) {
-      const duplicateUserMessage = itemId.startsWith("web-steer-") && !snapshotItems[itemId] &&
-        Object.values(snapshotItems).some(
-        (snapshotItem) => sameUserMessage(snapshotItem, existingItem),
-      );
-      if (duplicateUserMessage) continue;
       items[itemId] = mergeHydratedItem(snapshotItems[itemId], existingItem, snapshotTerminal);
       retainedExistingOrder.push(itemId);
     }
@@ -1300,7 +1363,11 @@ function hydrateThread(
     if (!turn || turnId === activeTurnId || turn.status !== "inProgress") continue;
     hydratedTurns[turnId] = completeRetainedTurn(turn);
   }
-  const deduplicatedTurns = dedupeOptimisticUserMessages(hydratedTurns, turnOrder);
+  const deduplicatedTurns = dedupeOptimisticUserMessages(
+    hydratedTurns,
+    turnOrder,
+    snapshotFallbackItemKeys,
+  );
   const reconciledStatus = activeTurnId
     ? "running"
     : current.status === "idle" && snapshotStatus === "running" &&
@@ -1364,7 +1431,9 @@ function sameUserMessage(
   if (
     left.clientMessageId &&
     right.clientMessageId &&
-    left.clientMessageId !== right.clientMessageId
+    left.clientMessageId !== right.clientMessageId &&
+    left.lifecycle !== "pending" &&
+    right.lifecycle !== "pending"
   ) return false;
   if (!isUserMessage(left) || !isUserMessage(right) || !sameUserInput(
     left.text,
@@ -1385,6 +1454,7 @@ function sameUserMessage(
 function dedupeOptimisticUserMessages(
   turns: Record<string, CodexTurn>,
   turnOrder: string[],
+  snapshotFallbackItemKeys: Set<string>,
 ) {
   let next = turns;
   const authoritative = turnOrder.flatMap((turnId) => {
@@ -1396,38 +1466,64 @@ function dedupeOptimisticUserMessages(
         : [];
     });
   });
-  for (const turnId of turnOrder) {
-    const turn = next[turnId];
-    if (!turn) continue;
-    for (const itemId of [...turn.itemOrder]) {
-      const optimistic = turn.items[itemId];
-      if (!itemId.startsWith("web-steer-") || !optimistic) continue;
-      const match = authoritative.find(({ item }) => sameUserMessage(item, optimistic));
-      if (!match) continue;
-      const sourceTurn = next[turnId];
-      const sourceItems = { ...sourceTurn.items };
-      delete sourceItems[itemId];
+  const optimistic = turnOrder.flatMap((turnId) => {
+    const turn = turns[turnId];
+    return (turn?.itemOrder ?? []).flatMap((itemId) => {
+      const item = turn.items[itemId];
+      return itemId.startsWith("web-steer-") && item ? [{ turnId, itemId, item }] : [];
+    });
+  });
+  const usedAuthoritative = new Set<string>();
+  const matches = new Map<string, (typeof authoritative)[number]>();
+  const keyOf = ({ turnId, itemId }: { turnId: string; itemId: string }) => `${turnId}\0${itemId}`;
+  for (const candidate of optimistic) {
+    if (!candidate.item.clientMessageId) continue;
+    const match = authoritative.find((value) =>
+      !usedAuthoritative.has(keyOf(value)) &&
+      value.item.clientMessageId === candidate.item.clientMessageId &&
+      sameUserMessage(value.item, candidate.item)
+    );
+    if (!match) continue;
+    matches.set(keyOf(candidate), match);
+    usedAuthoritative.add(keyOf(match));
+  }
+  for (const candidate of optimistic) {
+    if (matches.has(keyOf(candidate))) continue;
+    const match = authoritative.find((value) =>
+      snapshotFallbackItemKeys.has(keyOf(value)) &&
+      !usedAuthoritative.has(keyOf(value)) &&
+      sameUserMessage(value.item, candidate.item)
+    );
+    if (!match) continue;
+    matches.set(keyOf(candidate), match);
+    usedAuthoritative.add(keyOf(match));
+  }
+  for (const candidate of optimistic) {
+    const match = matches.get(keyOf(candidate));
+    if (!match) continue;
+    const sourceTurn = next[candidate.turnId];
+    const sourceItems = { ...sourceTurn.items };
+    delete sourceItems[candidate.itemId];
+    next = {
+      ...next,
+      [candidate.turnId]: {
+        ...sourceTurn,
+        itemOrder: sourceTurn.itemOrder.filter((id) => id !== candidate.itemId),
+        items: sourceItems,
+      },
+    };
+    if (candidate.item.imageIds?.length && !match.item.imageIds?.length) {
+      const targetTurn = next[match.turnId];
       next = {
         ...next,
-        [turnId]: {
-          ...sourceTurn,
-          itemOrder: sourceTurn.itemOrder.filter((id) => id !== itemId),
-          items: sourceItems,
+        [match.turnId]: {
+          ...targetTurn,
+          items: {
+            ...targetTurn.items,
+            [match.itemId]: { ...targetTurn.items[match.itemId], imageIds: candidate.item.imageIds },
+          },
         },
       };
-      if (optimistic.imageIds?.length && !match.item.imageIds?.length) {
-        const targetTurn = next[match.turnId];
-        next = {
-          ...next,
-          [match.turnId]: {
-            ...targetTurn,
-            items: {
-              ...targetTurn.items,
-              [match.itemId]: { ...targetTurn.items[match.itemId], imageIds: optimistic.imageIds },
-            },
-          },
-        };
-      }
     }
   }
   return next;

@@ -30,6 +30,7 @@ import { mobileCopy } from "./mobile-copy";
 
 type MobileView = "connections" | "form" | "remote" | "settings";
 const CONNECTION_STATUS_TIMEOUT_MS = 8_000;
+const CONNECTION_STATUS_REFRESH_MS = 15_000;
 
 type ConnectionStatusCheck = {
   controller: AbortController;
@@ -83,9 +84,8 @@ export function MobileShell({
       setPendingTarget(target);
       void openConnectionId(target.connectionId, target.threadId);
     };
-    void store.list().then(async (values) => {
+    void store.list().then(async () => {
       if (disposed) return;
-      refreshConnectionStatuses(values);
       const launch = await CodexRemoteNative.getLaunchTarget().catch(() => ({}));
       if ("connectionId" in launch && "threadId" in launch) {
         openTarget(launch as MobileThreadTarget);
@@ -143,8 +143,40 @@ export function MobileShell({
   }, [settings.language]);
 
   useEffect(() => {
-    if (view !== "form" && view !== "settings") return;
+    if (view === "connections") {
+      let disposed = false;
+      const refresh = () => {
+        void store.list().then((values) => {
+          if (!disposed) refreshConnectionStatuses(values);
+        }).catch(() => undefined);
+      };
+      refresh();
+      const timer = window.setInterval(refresh, CONNECTION_STATUS_REFRESH_MS);
+      const appStateListener = CapacitorApp.addListener("appStateChange", ({ isActive }) => {
+        if (isActive) refresh();
+      }).catch(() => undefined);
+      const visibilityListener = () => {
+        if (document.visibilityState === "visible") refresh();
+      };
+      document.addEventListener("visibilitychange", visibilityListener);
+      return () => {
+        disposed = true;
+        window.clearInterval(timer);
+        document.removeEventListener("visibilitychange", visibilityListener);
+        connectionStatusGeneration.current += 1;
+        abortConnectionStatusChecks();
+        void appStateListener.then((handle) => handle?.remove());
+      };
+    }
+    if (view !== "form" && view !== "settings" && view !== "remote") return;
     const listener = CapacitorApp.addListener("backButton", () => {
+      if (view === "remote") {
+        const remoteView = (window.history.state as Record<string, unknown> | null)?.codexRemoteView;
+        if (remoteView === "thread" || remoteView === "new") {
+          window.history.back();
+          return;
+        }
+      }
       setError(undefined);
       setEditing(undefined);
       setView("connections");
@@ -160,9 +192,11 @@ export function MobileShell({
     const generation = connectionStatusGeneration.current + 1;
     connectionStatusGeneration.current = generation;
     abortConnectionStatusChecks();
-    setConnections(values.map((connection) => ({
+    setConnections((current) => values.map((connection) => ({
       ...connection,
-      connectionStatus: connection.pairingStatus === "error" ? "unavailable" : "checking",
+      connectionStatus: connection.pairingStatus === "error"
+        ? "unavailable"
+        : current.find((existing) => existing.id === connection.id)?.connectionStatus ?? "checking",
     })));
     for (const connection of values) {
       if (connection.pairingStatus === "pending" || connection.pairingStatus === "error") continue;
@@ -230,6 +264,16 @@ export function MobileShell({
       if (generation !== connectionOpenGeneration.current) return;
       await ensureNotificationPermission();
       if (generation !== connectionOpenGeneration.current) return;
+      if (!requestedThreadId) {
+        const historyState = window.history.state && typeof window.history.state === "object"
+          ? window.history.state as Record<string, unknown>
+          : {};
+        window.history.replaceState({
+          ...historyState,
+          codexRemoteView: "list",
+          codexRemoteThreadId: undefined,
+        }, "");
+      }
       setConnections(availableConnections);
       setActive({
         connectionId: id,
@@ -246,7 +290,6 @@ export function MobileShell({
         })),
         onManageConnections: () => {
           setView("connections");
-          void reloadConnections();
         },
         onOpenConnection: (connectionId) => { void openConnectionId(connectionId); },
         onOpenExternalUrl: (url) => {

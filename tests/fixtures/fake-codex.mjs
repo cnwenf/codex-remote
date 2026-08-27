@@ -3,6 +3,7 @@ import readline from "node:readline";
 const lines = readline.createInterface({ input: process.stdin });
 let createdThread;
 let approvalDeclines = 0;
+let activeTurnId;
 const loadedThreads = new Set();
 const pinnedThreads = new Set();
 const archivedThreads = new Set();
@@ -141,7 +142,8 @@ lines.on("line", (line) => {
       send({ id: message.id, error: { code: -32000, message: "thread not loaded" } });
       return;
     }
-    send({ id: message.id, result: { turn: { id: "fixture-live-turn" } } });
+    activeTurnId = "fixture-live-turn";
+    send({ id: message.id, result: { turn: { id: activeTurnId } } });
     send({
       method: "turn/started",
       params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn" } },
@@ -222,6 +224,20 @@ lines.on("line", (line) => {
     });
     return;
   }
+  if (message.method === "turn/interrupt") {
+    if (!activeTurnId || message.params?.turnId !== activeTurnId) {
+      send({ id: message.id, error: { code: -32000, message: "no active turn to stop" } });
+      return;
+    }
+    const interruptedTurnId = activeTurnId;
+    activeTurnId = undefined;
+    send({ id: message.id, result: {} });
+    send({
+      method: "turn/completed",
+      params: { threadId: message.params?.threadId, turn: { id: interruptedTurnId, status: "interrupted" } },
+    });
+    return;
+  }
   if (message.id === "fixture-approval" && message.result?.decision === "decline") {
     approvalDeclines += 1;
     send({
@@ -251,6 +267,7 @@ lines.on("line", (line) => {
         method: "turn/completed",
         params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn", status: "completed" } },
       });
+      activeTurnId = undefined;
       approvalDeclines = 0;
     }
   }

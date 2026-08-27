@@ -459,6 +459,78 @@ describe("reduceCodexState", () => {
     expect(confirmed.threads.t1.turns["turn-2"].itemOrder).toEqual(["desktop-user-1"]);
   });
 
+  it("replaces an exact optimistic message when Desktop reuses an authoritative id and text", () => {
+    const state = {
+      ...initialCodexState,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live task",
+          status: "running" as const,
+          activeTurnId: "turn-2",
+          turnOrder: ["turn-1", "turn-2"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "completed" as const,
+              itemOrder: ["desktop-reused-user"],
+              items: {
+                "desktop-reused-user": {
+                  id: "desktop-reused-user",
+                  clientMessageId: "client-old",
+                  lifecycle: "confirmed" as const,
+                  type: "userMessage",
+                  text: "继续",
+                },
+              },
+            },
+            "turn-2": {
+              id: "turn-2",
+              status: "inProgress" as const,
+              itemOrder: ["web-steer-client-new"],
+              items: {
+                "web-steer-client-new": {
+                  id: "web-steer-client-new",
+                  clientMessageId: "client-new",
+                  lifecycle: "pending" as const,
+                  type: "userMessage",
+                  text: "继续",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const confirmed = reduceCodexState(state, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-2",
+        item: {
+          id: "desktop-reused-user",
+          clientMessageId: "client-new",
+          type: "userMessage",
+          content: [{ type: "text", text: "继续" }],
+        },
+      },
+    });
+
+    expect(confirmed.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
+    expect(confirmed.threads.t1.turns["turn-1"].items["desktop-reused-user"]).toBeUndefined();
+    expect(confirmed.threads.t1.turns["turn-2"].itemOrder).toEqual(["desktop-reused-user"]);
+    expect(confirmed.threads.t1.turns["turn-2"].items["desktop-reused-user"]).toMatchObject({
+      clientMessageId: "client-new",
+      lifecycle: "confirmed",
+      text: "继续",
+    });
+    expect(confirmed.threads.t1.turnOrder.flatMap((turnId) =>
+      confirmed.threads.t1.turns[turnId].itemOrder.filter((itemId) => itemId === "desktop-reused-user")
+    )).toHaveLength(1);
+  });
+
   it("does not let an old turn completion stop a newer active turn", () => {
     const first = reduceCodexState(initialCodexState, {
       method: "turn/started",

@@ -302,6 +302,155 @@ describe("ConversationReconciler", () => {
 
     expect(next.threads.t1.turns["turn-1"].items["desktop-user-1"].clientMessageId).toBe("client-1");
   });
+
+  it("reconciles one authoritative snapshot item with only one of two identical pending sends", () => {
+    const reconciler = new ConversationReconciler();
+    const base: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: { "turn-1": { id: "turn-1", status: "inProgress", itemOrder: [], items: {} } },
+        },
+      },
+    };
+    const first = reconciler.stageUserMessage(base, "t1", "turn-1", "web-steer-1", "继续", []);
+    const second = reconciler.stageUserMessage(first, "t1", "turn-1", "web-steer-2", "继续", []);
+
+    const hydrated = reconciler.hydrate(second, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "active" },
+        turns: [{
+          id: "turn-1",
+          status: "inProgress",
+          items: [{ id: "desktop-user", type: "user_message", text: "继续", clientMessageId: "desktop-id" }],
+        }],
+      },
+    });
+    const matching = Object.values(hydrated.threads.t1.turns["turn-1"].items)
+      .filter((item) => item.type.toLocaleLowerCase().includes("user") && item.text === "继续");
+
+    expect(matching).toHaveLength(2);
+    expect(matching.map((item) => item.id)).toContain("desktop-user");
+  });
+
+  it("does not consume a new pending message with an old same-text item omitted from the snapshot", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-current",
+          turnOrder: ["turn-old", "turn-current"],
+          turns: {
+            "turn-old": {
+              id: "turn-old",
+              status: "completed",
+              itemOrder: ["old-user"],
+              items: { "old-user": { id: "old-user", type: "user_message", text: "继续", lifecycle: "confirmed" } },
+            },
+            "turn-current": {
+              id: "turn-current",
+              status: "inProgress",
+              itemOrder: ["web-steer-new"],
+              items: {
+                "web-steer-new": {
+                  id: "web-steer-new",
+                  type: "userMessage",
+                  text: "继续",
+                  clientMessageId: "web-steer-new",
+                  lifecycle: "pending",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const hydrated = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "active" },
+        turns: [{ id: "turn-current", status: "inProgress", items: [] }],
+      },
+    });
+
+    expect(hydrated.threads.t1.turns["turn-current"].items["web-steer-new"]).toMatchObject({
+      text: "继续",
+      lifecycle: "pending",
+    });
+  });
+
+  it.each(["snapshot", "prepend"] as const)(
+    "does not consume a current pending message with an unchanged old item included in a %s page",
+    (placement) => {
+      const reconciler = new ConversationReconciler();
+      const state: CodexState = {
+        stale: false,
+        threadOrder: ["t1"],
+        threads: {
+          t1: {
+            id: "t1",
+            title: "Live",
+            status: "running",
+            activeTurnId: "turn-current",
+            turnOrder: ["turn-old", "turn-current"],
+            turns: {
+              "turn-old": {
+                id: "turn-old",
+                status: "completed",
+                itemOrder: ["old-user"],
+                items: { "old-user": { id: "old-user", type: "user_message", text: "继续", lifecycle: "confirmed" } },
+              },
+              "turn-current": {
+                id: "turn-current",
+                status: "inProgress",
+                itemOrder: ["web-steer-new"],
+                items: {
+                  "web-steer-new": {
+                    id: "web-steer-new",
+                    type: "userMessage",
+                    text: "继续",
+                    clientMessageId: "web-steer-new",
+                    lifecycle: "pending",
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+      const hydrated = reconciler.hydrate(state, {
+        desktopMirror: true,
+        thread: {
+          id: "t1",
+          status: { type: "active" },
+          turns: [
+            { id: "turn-old", status: "completed", items: [{ id: "old-user", type: "user_message", text: "继续" }] },
+            { id: "turn-current", status: "inProgress", items: [] },
+          ],
+        },
+      }, placement);
+
+      expect(hydrated.threads.t1.turns["turn-current"].items["web-steer-new"]).toMatchObject({
+        text: "继续",
+        lifecycle: "pending",
+      });
+    },
+  );
 });
 
 describe("useCodex", () => {
@@ -403,6 +552,183 @@ describe("useCodex", () => {
     });
     await refreshWithIdleSnapshot();
     expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined });
+  });
+
+  it("does not let a stale active list restart a completed turn", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    act(() => {
+      fake.serverSend({
+        type: "rpc",
+        payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "turn-1" } } },
+      });
+      fake.serverSend({
+        type: "rpc",
+        payload: {
+          method: "turn/completed",
+          params: { threadId: "t1", turn: { id: "turn-1", status: "completed" } },
+        },
+      });
+    });
+    expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined });
+
+    let refresh: Promise<void>;
+    act(() => { refresh = result.current.refreshThreads(); });
+    const liveList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: liveList.id,
+        result: { data: [{ id: "t1", name: "Task", status: { type: "active" } }] },
+      },
+    });
+    await waitFor(() => expect(JSON.parse(fake.sent.at(-1) as string).payload.method)
+      .toBe("desktopState/listThreads"));
+    const desktopList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: desktopList.id, result: { data: [{ id: "t1", title: "Task" }] } },
+    });
+    await act(() => refresh);
+
+    expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined });
+  });
+
+  it("recovers the active turn identity before stopping a running task", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const resume = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(resume.method).toBe("thread/resume");
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: resume.id,
+        result: {
+          thread: {
+            id: "t1",
+            status: { type: "active" },
+            turns: [{ id: "old-turn", status: "completed", items: [] }],
+          },
+        },
+      },
+    });
+    await act(() => selection);
+    expect(result.current.selectedThread).toMatchObject({ status: "running", activeTurnId: undefined });
+
+    let stopping: Promise<void>;
+    act(() => { stopping = result.current.interrupt(); });
+    const activity = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(activity).toMatchObject({
+      method: "gateway/threadActivity/read",
+      params: { threadId: "t1" },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: activity.id, result: { status: "running", turnId: "live-turn" } },
+    });
+    await waitFor(() => expect(JSON.parse(fake.sent.at(-1) as string).payload.method).toBe("turn/interrupt"));
+    const interrupt = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(interrupt.params).toEqual({ threadId: "t1", turnId: "live-turn" });
+    fake.serverSend({ type: "rpc", payload: { id: interrupt.id, result: {} } });
+    await act(() => stopping);
+
+    expect(result.current.selectedThread).toMatchObject({ status: "running", activeTurnId: "live-turn" });
+  });
+
+  it("treats a stop request that raced with turn completion as already stopped", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    act(() => {
+      fake.serverSend({
+        type: "rpc",
+        payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "turn-1" } } },
+      });
+    });
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const resume = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: resume.id,
+        result: {
+          thread: { id: "t1", status: { type: "active" }, turns: [{ id: "turn-1", status: "inProgress", items: [] }] },
+        },
+      },
+    });
+    await act(() => selection);
+
+    let stopping: Promise<void>;
+    act(() => { stopping = result.current.interrupt(); });
+    const interrupt = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(interrupt).toMatchObject({
+      method: "turn/interrupt",
+      params: { threadId: "t1", turnId: "turn-1" },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: interrupt.id, error: { code: -32000, message: "no active turn to stop" } },
+    });
+    await act(() => stopping);
+
+    expect(result.current.selectedThread).toMatchObject({ status: "idle", activeTurnId: undefined });
+    expect(result.current.selectedThread?.turns["turn-1"].status).toBe("interrupted");
+  });
+
+  it("keeps a newer turn running when an older stop request reports no active turn", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    act(() => {
+      fake.serverSend({
+        type: "rpc",
+        payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "turn-1" } } },
+      });
+    });
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const resume = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: resume.id,
+        result: {
+          thread: { id: "t1", status: { type: "active" }, turns: [{ id: "turn-1", status: "inProgress", items: [] }] },
+        },
+      },
+    });
+    await act(() => selection);
+
+    let stopping: Promise<void>;
+    act(() => { stopping = result.current.interrupt(); });
+    const interrupt = JSON.parse(fake.sent.at(-1) as string).payload;
+    act(() => {
+      fake.serverSend({
+        type: "rpc",
+        payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "turn-2" } } },
+      });
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: interrupt.id, error: { code: -32000, message: "no active turn to stop" } },
+    });
+    await act(() => stopping);
+
+    expect(result.current.selectedThread).toMatchObject({ status: "running", activeTurnId: "turn-2" });
+    expect(result.current.selectedThread?.turns["turn-2"].status).toBe("inProgress");
   });
 
   it("keeps the Desktop snapshot visible while the live bridge is read-only", async () => {
@@ -1629,6 +1955,208 @@ describe("useCodex", () => {
 });
 
 describe("optimistic steer reconciliation", () => {
+  it("reconciles a same-text pending message with a new no-id confirmation in the current turn", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-current",
+          turnOrder: ["turn-old", "turn-current"],
+          turns: {
+            "turn-old": {
+              id: "turn-old",
+              status: "completed",
+              itemOrder: ["old-user"],
+              items: { "old-user": { id: "old-user", type: "user_message", text: "继续", lifecycle: "confirmed" } },
+            },
+            "turn-current": {
+              id: "turn-current",
+              status: "inProgress",
+              itemOrder: ["web-steer-new"],
+              items: {
+                "web-steer-new": {
+                  id: "web-steer-new",
+                  type: "userMessage",
+                  text: "继续",
+                  clientMessageId: "client-new",
+                  lifecycle: "pending",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const confirmed = reconciler.reduceEvent(state, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-current",
+        item: { id: "current-user", type: "user_message", text: "继续" },
+      },
+    });
+
+    expect(confirmed.threads.t1.turns["turn-current"].items["web-steer-new"]).toBeUndefined();
+    expect(confirmed.threads.t1.turns["turn-current"].items["current-user"]).toMatchObject({ text: "继续" });
+  });
+
+  it("keeps a new same-text pending message when an older confirmed identity is replayed under another item id", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-current",
+          turnOrder: ["turn-old", "turn-current"],
+          turns: {
+            "turn-old": {
+              id: "turn-old",
+              status: "inProgress",
+              itemOrder: ["old-user"],
+              items: {
+                "old-user": {
+                  id: "old-user",
+                  type: "user_message",
+                  text: "继续",
+                  clientMessageId: "client-old",
+                  lifecycle: "confirmed",
+                },
+              },
+            },
+            "turn-current": {
+              id: "turn-current",
+              status: "inProgress",
+              itemOrder: ["web-steer-new"],
+              items: {
+                "web-steer-new": {
+                  id: "web-steer-new",
+                  type: "userMessage",
+                  text: "继续",
+                  clientMessageId: "client-new",
+                  lifecycle: "pending",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const replayed = reconciler.reduceEvent(state, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-old",
+        item: {
+          id: "old-user-replayed",
+          type: "user_message",
+          text: "继续",
+          clientMessageId: "client-old",
+        },
+      },
+    });
+
+    expect(replayed.threads.t1.turns["turn-current"].items["web-steer-new"]).toMatchObject({
+      text: "继续",
+      lifecycle: "pending",
+    });
+  });
+
+  it("replaces a local optimistic message when Desktop confirms it with a different client id", () => {
+    const reconciler = new ConversationReconciler();
+    const staged = reconciler.stageUserMessage({
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: { "turn-1": { id: "turn-1", status: "inProgress", itemOrder: [], items: {} } },
+        },
+      },
+    }, "t1", "turn-1", "web-steer-local", "继续处理这个问题", []);
+
+    const confirmed = reconciler.reduceEvent(staged, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          id: "desktop-user-message",
+          type: "user_message",
+          text: "继续处理这个问题",
+          clientMessageId: "desktop-generated-id",
+        },
+      },
+    });
+    const userItems = Object.values(confirmed.threads.t1.turns["turn-1"].items)
+      .filter((item) => item.type.toLocaleLowerCase().includes("user"));
+
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0].id).toBe("desktop-user-message");
+  });
+
+  it("removes a new optimistic message when Desktop reuses its authoritative item id", () => {
+    const reconciler = new ConversationReconciler();
+    const staged = reconciler.stageUserMessage({
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-current",
+          turnOrder: ["turn-confirmed", "turn-current"],
+          turns: {
+            "turn-confirmed": {
+              id: "turn-confirmed",
+              status: "inProgress",
+              itemOrder: ["desktop-user-message"],
+              items: {
+                "desktop-user-message": {
+                  id: "desktop-user-message",
+                  type: "user_message",
+                  text: "上一条引导",
+                  lifecycle: "confirmed",
+                },
+              },
+            },
+            "turn-current": { id: "turn-current", status: "inProgress", itemOrder: [], items: {} },
+          },
+        },
+      },
+    }, "t1", "turn-current", "web-steer-next", "新的引导内容", []);
+
+    const confirmed = reconciler.reduceEvent(staged, {
+      method: "item/started",
+      params: {
+        threadId: "t1",
+        turnId: "turn-confirmed",
+        item: { id: "desktop-user-message", type: "user_message", text: "新的引导内容" },
+      },
+    });
+    const matchingItems = Object.values(confirmed.threads.t1.turns)
+      .flatMap((turn) => Object.values(turn.items))
+      .filter((item) => item.type.toLocaleLowerCase().includes("user") && item.text === "新的引导内容");
+
+    expect(matchingItems).toHaveLength(1);
+    expect(matchingItems[0].id).toBe("desktop-user-message");
+  });
+
   it("does not append an optimistic duplicate when Desktop confirms first", () => {
     const state: CodexState = {
       stale: false,

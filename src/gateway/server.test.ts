@@ -512,6 +512,126 @@ describe("gateway server", () => {
     }
   });
 
+  it("retains the live turn identity and terminal state across stale list polling", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const transport = new PeriodicStatusTransport();
+    transport.threads = [{ id: "t1", status: { type: "active" }, updatedAt: 1 }];
+    const gateway = createGateway({
+      port: 0,
+      token,
+      allowedOrigins: [origin],
+      transport,
+      desktopState: { request: () => ({ data: [] }), close() {} },
+      mobileStatusSyncIntervalMs: 10,
+    });
+    const address = await gateway.start();
+    const socket = await connect(address, token, origin);
+    await nextJson(socket);
+    try {
+      transport.emit({
+        method: "turn/started",
+        params: { threadId: "t1", turn: { id: "turn-live" } },
+      });
+      await expect(nextJson(socket)).resolves.toMatchObject({
+        type: "rpc",
+        payload: { method: "turn/started" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      socket.send(JSON.stringify({
+        type: "rpc",
+        payload: { id: 50, method: "gateway/threadActivity/read", params: { threadId: "t1" } },
+      }));
+      await expect(nextJson(socket)).resolves.toEqual({
+        type: "rpc",
+        payload: { id: 50, result: { status: "running", turnId: "turn-live" } },
+      });
+
+      transport.emit({
+        method: "turn/completed",
+        params: { threadId: "t1", turn: { id: "turn-live", status: "completed" } },
+      });
+      await expect(nextJson(socket)).resolves.toMatchObject({
+        type: "rpc",
+        payload: { method: "turn/completed" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+
+      socket.send(JSON.stringify({
+        type: "rpc",
+        payload: { id: 51, method: "gateway/threadActivity/read", params: { threadId: "t1" } },
+      }));
+      await expect(nextJson(socket)).resolves.toEqual({
+        type: "rpc",
+        payload: { id: 51, result: { status: "idle", turnId: "turn-live" } },
+      });
+    } finally {
+      socket.close();
+      await once(socket, "close");
+      await gateway.stop();
+    }
+  });
+
+  it("adds cached live activity to a Desktop snapshot that has not recorded the turn yet", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({
+      port: 0,
+      token,
+      allowedOrigins: [origin],
+      transport,
+      desktopState: {
+        request() {
+          return {
+            desktopMirror: true,
+            thread: {
+              id: "t1",
+              status: { type: "active" },
+              turns: [{ id: "old-turn", status: "completed", items: [] }],
+            },
+          };
+        },
+        close() {},
+      },
+    });
+    const address = await gateway.start();
+    const socket = await connect(address, token, origin);
+    await nextJson(socket);
+    try {
+      transport.emit({
+        method: "turn/started",
+        params: { threadId: "t1", turn: { id: "live-turn" } },
+      });
+      await nextJson(socket);
+      socket.send(JSON.stringify({
+        type: "rpc",
+        payload: { id: 52, method: "desktopState/readThread", params: { threadId: "t1" } },
+      }));
+
+      await expect(nextJson(socket)).resolves.toMatchObject({
+        type: "rpc",
+        payload: {
+          id: 52,
+          result: {
+            thread: {
+              status: { type: "active" },
+              turns: [
+                { id: "old-turn", status: "completed" },
+                { id: "live-turn", status: "inProgress", items: [] },
+              ],
+            },
+          },
+        },
+      });
+    } finally {
+      socket.close();
+      await once(socket, "close");
+      await gateway.stop();
+    }
+  });
+
   it("answers native WebView CORS preflight for authenticated mobile APIs", async () => {
     const gateway = createGateway({
       port: 0,
