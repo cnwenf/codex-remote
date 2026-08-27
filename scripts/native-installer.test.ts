@@ -52,6 +52,7 @@ describe("native installer contract", () => {
     expect(releaseWorkflow).toContain("--clobber");
     expect(releaseWorkflow).toContain("purge.jsdelivr.net");
     expect(releaseWorkflow).toContain("latest.json");
+    expect(releaseWorkflow).toContain("releases/latest/download/latest.json");
     expect(releaseWorkflow).toContain("androidDownloadCommit");
     expect(releaseWorkflow.indexOf("Stage Android download assets"))
       .toBeLessThan(releaseWorkflow.indexOf("Publish GitHub Release"));

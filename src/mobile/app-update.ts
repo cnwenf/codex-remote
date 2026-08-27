@@ -18,7 +18,11 @@ type MobileReleaseManifest = {
   androidDownloadCommit?: unknown;
 };
 
-const latestManifestUrl = "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote@android-download/latest.json";
+const latestManifestUrls = [
+  "https://github.com/cnwenf/codex-remote/releases/latest/download/latest.json",
+  "https://raw.githubusercontent.com/cnwenf/codex-remote/android-download/latest.json",
+  "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote@android-download/latest.json",
+];
 const androidDownloadRoot = "https://cdn.jsdelivr.net/gh/cnwenf/codex-remote";
 const githubReleaseRoot = "https://github.com/cnwenf/codex-remote/releases/tag";
 
@@ -27,11 +31,7 @@ export async function findMobileUpdate(
   platform: MobilePlatform,
   fetcher: typeof fetch = fetch,
 ): Promise<MobileUpdateStatus> {
-  const response = await fetcher(latestManifestUrl, {
-    cache: "no-store",
-  });
-  if (!response.ok) throw new Error(`update-check-failed:${response.status}`);
-  const manifest = await response.json() as MobileReleaseManifest;
+  const manifest = await fetchReleaseManifest(fetcher, platform);
   const latestVersion = typeof manifest.version === "string" ? manifest.version.replace(/^v/, "") : "";
   if (!latestVersion) throw new Error("update-release-invalid");
   if (compareVersions(latestVersion, currentVersion) <= 0) return { state: "current" };
@@ -56,6 +56,34 @@ export async function findMobileUpdate(
     latestVersion,
     downloadUrl: `${githubReleaseRoot}/v${encodeURIComponent(latestVersion)}`,
   };
+}
+
+async function fetchReleaseManifest(fetcher: typeof fetch, platform: MobilePlatform) {
+  let lastError = new Error("update-check-failed");
+  for (const url of latestManifestUrls) {
+    try {
+      const response = await fetcher(url, { cache: "no-store" });
+      if (!response.ok) {
+        lastError = new Error(`update-check-failed:${response.status}`);
+        continue;
+      }
+      const manifest = await response.json() as MobileReleaseManifest;
+      if (typeof manifest.version !== "string" || !/^v?\d+\.\d+\.\d+$/.test(manifest.version)) {
+        lastError = new Error("update-release-invalid");
+        continue;
+      }
+      if (platform === "android"
+        && (typeof manifest.androidDownloadCommit !== "string"
+          || !/^[0-9a-f]{40}$/i.test(manifest.androidDownloadCommit))) {
+        lastError = new Error("update-download-ref-invalid");
+        continue;
+      }
+      return manifest;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("update-check-failed");
+    }
+  }
+  throw lastError;
 }
 
 function compareVersions(left: string, right: string) {

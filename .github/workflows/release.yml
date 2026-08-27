@@ -200,8 +200,15 @@ jobs:
             git commit -m "release: publish Android $GITHUB_REF_NAME"
             asset_commit="$(git rev-parse HEAD)"
             git push origin HEAD:android-download
-          fi
-          echo "commit=$asset_commit" >> "$GITHUB_OUTPUT"
+           fi
+           echo "commit=$asset_commit" >> "$GITHUB_OUTPUT"
+      - name: Create update manifest
+        run: |
+          jq -n \
+            --arg version "${GITHUB_REF_NAME#v}" \
+            --arg androidDownloadCommit "${{ steps.stage_android.outputs.commit }}" \
+            '{version: $version, androidDownloadCommit: $androidDownloadCommit}' \
+            > release-assets/latest.json
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -222,11 +229,7 @@ jobs:
         run: |
           publish_dir="$RUNNER_TEMP/android-download"
           cd "$publish_dir"
-          jq -n \
-            --arg version "${GITHUB_REF_NAME#v}" \
-            --arg androidDownloadCommit "${{ steps.stage_android.outputs.commit }}" \
-            '{version: $version, androidDownloadCommit: $androidDownloadCommit}' \
-            > latest.json
+          cp "$GITHUB_WORKSPACE/release-assets/latest.json" latest.json
           git add latest.json
           if ! git diff --cached --quiet; then
             git commit -m "release: update mobile manifest for $GITHUB_REF_NAME"
@@ -241,10 +244,10 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           asset_commit="${{ steps.stage_android.outputs.commit }}"
-          manifest_url="https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@android-download/latest.json"
+          manifest_url="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/latest.json"
           verify_dir="$(mktemp -d)"
           for attempt in $(seq 1 12); do
-            if curl --fail --silent --show-error "$manifest_url" -o "$verify_dir/latest.json" && \
+            if curl --fail --location --silent --show-error "$manifest_url" -o "$verify_dir/latest.json" && \
               jq -e --arg version "$version" --arg commit "$asset_commit" \
                 '.version == $version and .androidDownloadCommit == $commit' "$verify_dir/latest.json" >/dev/null; then
               break
