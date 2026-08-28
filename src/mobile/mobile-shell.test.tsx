@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   findMobileUpdate: vi.fn(),
+  isNativePlatform: vi.fn(() => false),
+  capacitorHttpGet: vi.fn(),
   capacitorListeners: new Map<string, (...args: unknown[]) => void>(),
   nativePlugin: {
     addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
@@ -26,7 +28,9 @@ vi.mock("../web/app", () => ({
 vi.mock("@capacitor/core", () => ({
   Capacitor: {
     getPlatform: () => "android",
+    isNativePlatform: mocks.isNativePlatform,
   },
+  CapacitorHttp: { get: mocks.capacitorHttpGet },
   registerPlugin: () => mocks.nativePlugin,
 }));
 
@@ -63,6 +67,7 @@ describe("MobileShell updates", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.clearAllMocks();
+    mocks.isNativePlatform.mockReturnValue(false);
     mocks.capacitorListeners.clear();
     window.history.replaceState(null, "");
   });
@@ -171,6 +176,39 @@ describe("MobileShell updates", () => {
     expect(screen.queryByTestId("active-connection")).not.toBeInTheDocument();
     expect(store.getSelected).not.toHaveBeenCalled();
     expect(store.select).not.toHaveBeenCalled();
+  });
+
+  it("uses native HTTP for connection reachability inside the installed app", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    mocks.isNativePlatform.mockReturnValue(true);
+    mocks.capacitorHttpGet.mockResolvedValue({
+      status: 200,
+      data: { version: 1, generatedAt: 1, threads: [] },
+      headers: {},
+      url: "https://remote.example.test/api/mobile/status",
+    });
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "https://remote.example.test", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    const webFetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("webview-fetch-blocked"));
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+
+    await waitFor(() => expect(mocks.capacitorHttpGet).toHaveBeenCalled());
+    expect(await screen.findByLabelText("可用")).toBeVisible();
+    expect(mocks.capacitorHttpGet).toHaveBeenCalledWith(expect.objectContaining({
+      url: "https://remote.example.test/api/mobile/status",
+      headers: { authorization: "Bearer test-token" },
+    }));
+    expect(webFetch).not.toHaveBeenCalledWith(
+      "https://remote.example.test/api/mobile/status",
+      expect.anything(),
+    );
   });
 
   it("marks a stalled connection unavailable after a bounded status check", async () => {

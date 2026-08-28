@@ -963,6 +963,7 @@ describe("useCodex", () => {
     expect(result.current.selectedThread?.turnOrder).toEqual(["stored-turn"]);
     let sending: Promise<void>;
     act(() => { sending = result.current.sendInstruction("Continue"); });
+    expect(result.current.selectedThread?.status).toBe("running");
     const turnRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     expect(turnRequest).toMatchObject({
       method: "turn/start",

@@ -1,5 +1,5 @@
 import { App as CapacitorApp } from "@capacitor/app";
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { useEffect, useMemo, useRef, useState } from "react";
 import packageInfo from "../../package.json";
@@ -464,7 +464,19 @@ function externalUrlHost(url: string) {
 
 async function verifyRemote(baseUrl: string, token: string, signal?: AbortSignal) {
   const normalized = normalizeRemoteUrl(baseUrl);
-  const response = await fetch(`${normalized}/api/mobile/status`, {
+  const url = `${normalized}/api/mobile/status`;
+  if (Capacitor.isNativePlatform()) {
+    const response = await CapacitorHttp.get({
+      url,
+      headers: { authorization: `Bearer ${token}` },
+      connectTimeout: CONNECTION_STATUS_TIMEOUT_MS,
+      readTimeout: CONNECTION_STATUS_TIMEOUT_MS,
+    });
+    if (response.status === 401) throw new Error("remote-auth-failed");
+    if (response.status < 200 || response.status >= 300) throw new Error("remote-unreachable");
+    return;
+  }
+  const response = await fetch(url, {
     headers: { authorization: `Bearer ${token}` },
     signal,
   });

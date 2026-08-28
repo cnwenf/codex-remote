@@ -761,32 +761,38 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
           ...(thread?.reasoningEffort ? { effort: thread.reasoningEffort } : {}),
           ...permissionRpcParamsFromState(thread ?? {}),
         };
-        if (!thread?.desktopMirror) {
-          await socket.request("turn/start", params);
-        } else {
-          let resolveStarted: () => void = () => {};
-          const started = new Promise<"started">((resolve) => {
-            resolveStarted = () => resolve("started");
-          });
-          const waiters = turnStartedWaiters.current.get(selectedThreadId) ?? new Set();
-          waiters.add(resolveStarted);
-          turnStartedWaiters.current.set(selectedThreadId, waiters);
-          const request = socket.request("turn/start", params);
-          try {
-            const outcome = await Promise.race([
-              request.then(() => "response" as const),
-              started,
-            ]);
-            if (outcome === "started") {
-              void request.catch((cause) => {
-                setError(cause instanceof Error ? cause.message : "Could not start task");
-              });
+        setState((current) => markThreadStarting(current, selectedThreadId));
+        try {
+          if (!thread?.desktopMirror) {
+            await socket.request("turn/start", params);
+          } else {
+            let resolveStarted: () => void = () => {};
+            const started = new Promise<"started">((resolve) => {
+              resolveStarted = () => resolve("started");
+            });
+            const waiters = turnStartedWaiters.current.get(selectedThreadId) ?? new Set();
+            waiters.add(resolveStarted);
+            turnStartedWaiters.current.set(selectedThreadId, waiters);
+            const request = socket.request("turn/start", params);
+            try {
+              const outcome = await Promise.race([
+                request.then(() => "response" as const),
+                started,
+              ]);
+              if (outcome === "started") {
+                void request.catch((cause) => {
+                  setError(cause instanceof Error ? cause.message : "Could not start task");
+                });
+              }
+            } finally {
+              const currentWaiters = turnStartedWaiters.current.get(selectedThreadId);
+              currentWaiters?.delete(resolveStarted);
+              if (currentWaiters?.size === 0) turnStartedWaiters.current.delete(selectedThreadId);
             }
-          } finally {
-            const currentWaiters = turnStartedWaiters.current.get(selectedThreadId);
-            currentWaiters?.delete(resolveStarted);
-            if (currentWaiters?.size === 0) turnStartedWaiters.current.delete(selectedThreadId);
           }
+        } catch (cause) {
+          setState((current) => clearUnconfirmedThreadStart(current, selectedThreadId));
+          throw cause;
         }
       }
     },
@@ -1210,6 +1216,24 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
 function latestKnownTurnIsTerminal(thread: CodexThread) {
   const turnId = thread.turnOrder.at(-1);
   return Boolean(turnId && isTerminalTurnStatus(thread.turns[turnId]?.status));
+}
+
+function markThreadStarting(state: CodexState, threadId: string): CodexState {
+  const thread = state.threads[threadId];
+  if (!thread || thread.status === "running") return state;
+  return {
+    ...state,
+    threads: { ...state.threads, [threadId]: { ...thread, status: "running" } },
+  };
+}
+
+function clearUnconfirmedThreadStart(state: CodexState, threadId: string): CodexState {
+  const thread = state.threads[threadId];
+  if (!thread || thread.activeTurnId || thread.status !== "running") return state;
+  return {
+    ...state,
+    threads: { ...state.threads, [threadId]: { ...thread, status: "idle" } },
+  };
 }
 
 function settleThreadAfterStop(state: CodexState, threadId: string, turnId?: string): CodexState {
