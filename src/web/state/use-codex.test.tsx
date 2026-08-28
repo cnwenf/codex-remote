@@ -341,6 +341,152 @@ describe("ConversationReconciler", () => {
     expect(matching.map((item) => item.id)).toContain("desktop-user");
   });
 
+  it("reconciles a live confirmed user item with the same Desktop snapshot item id rewrite", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "idle",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "completed",
+              itemOrder: ["live-user", "live-agent"],
+              items: {
+                "live-user": {
+                  id: "live-user",
+                  type: "userMessage",
+                  text: "同一条实时消息",
+                  lifecycle: "confirmed",
+                },
+                "live-agent": { id: "live-agent", type: "agentMessage", text: "收到" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const hydrated = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          completeFromTurnStart: true,
+          items: [
+            { id: "item-40", type: "userMessage", text: "同一条实时消息" },
+            { id: "item-41", type: "agentMessage", text: "收到" },
+          ],
+        }],
+      },
+    });
+    const userItems = Object.values(hydrated.threads.t1.turns["turn-1"].items)
+      .filter((item) => item.type.toLocaleLowerCase().includes("user"));
+
+    expect(userItems).toHaveLength(1);
+    expect(userItems[0].id).toBe("item-40");
+  });
+
+  it("preserves two identical confirmed sends when a complete snapshot rewrites both ids", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "idle",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "completed",
+              itemOrder: ["live-user-1", "live-user-2"],
+              items: {
+                "live-user-1": { id: "live-user-1", type: "userMessage", text: "继续", lifecycle: "confirmed" },
+                "live-user-2": { id: "live-user-2", type: "userMessage", text: "继续", lifecycle: "confirmed" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const hydrated = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          completeFromTurnStart: true,
+          items: [
+            { id: "snapshot-user-1", type: "userMessage", text: "继续" },
+            { id: "snapshot-user-2", type: "userMessage", text: "继续" },
+          ],
+        }],
+      },
+    });
+    const userItems = Object.values(hydrated.threads.t1.turns["turn-1"].items)
+      .filter((item) => item.type.toLocaleLowerCase().includes("user"));
+
+    expect(userItems.map((item) => item.id)).toEqual(["snapshot-user-1", "snapshot-user-2"]);
+  });
+
+  it("does not merge identical confirmed sends when the snapshot starts inside a turn", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "inProgress",
+              itemOrder: ["live-first"],
+              items: {
+                "live-first": { id: "live-first", type: "userMessage", text: "继续", lifecycle: "confirmed" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const hydrated = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "active" },
+        turns: [{
+          id: "turn-1",
+          status: "inProgress",
+          items: [{ id: "snapshot-later", type: "userMessage", text: "继续" }],
+        }],
+      },
+    });
+    const userItems = Object.values(hydrated.threads.t1.turns["turn-1"].items)
+      .filter((item) => item.type.toLocaleLowerCase().includes("user"));
+
+    expect(userItems.map((item) => item.id)).toEqual(["snapshot-later", "live-first"]);
+  });
+
   it("does not consume a new pending message with an old same-text item omitted from the snapshot", () => {
     const reconciler = new ConversationReconciler();
     const state: CodexState = {
@@ -766,6 +912,67 @@ describe("useCodex", () => {
     expect(result.current.state.threads["snapshot-1"]?.title).toBe("Still available");
   });
 
+  it("keeps using Desktop history after a transient metadata refresh failure", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let firstRefresh: Promise<void>;
+    act(() => { firstRefresh = result.current.refreshThreads(); });
+    const firstList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({ type: "rpc", payload: { id: firstList.id, result: { data: [{ id: "t1" }] } } });
+    await waitFor(() => expect(fake.sent).toHaveLength(2));
+    const firstDesktopList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: firstDesktopList.id, result: { data: [{ id: "t1", title: "Desktop task" }] } },
+    });
+    await act(() => firstRefresh);
+    expect(result.current.desktopStateAvailable).toBe(true);
+
+    let secondRefresh: Promise<void>;
+    act(() => { secondRefresh = result.current.refreshThreads(); });
+    const secondList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({ type: "rpc", payload: { id: secondList.id, result: { data: [{ id: "t1" }] } } });
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    const secondDesktopList = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: secondDesktopList.id, error: { code: -32001, message: "bridge temporarily unavailable" } },
+    });
+    await act(() => secondRefresh);
+
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const historyRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(historyRequest).toMatchObject({
+      method: "desktopState/readThread",
+      params: { threadId: "t1", history: { limitTurns: 8, maxBytes: 2 * 1024 * 1024 } },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: historyRequest.id,
+        result: {
+          desktopMirror: true,
+          thread: {
+            id: "t1",
+            turns: [{
+              id: "turn-1",
+              status: "completed",
+              items: [{ id: "user-1", type: "userMessage", text: "", imageIds: ["image-1"] }],
+            }],
+          },
+        },
+      },
+    });
+    await act(() => selection);
+
+    expect(result.current.selectedThread?.turns["turn-1"].items["user-1"].imageIds)
+      .toEqual(["image-1"]);
+  });
+
   it("opens a Desktop thread from its latest page and prepends older history on demand", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);
@@ -964,6 +1171,12 @@ describe("useCodex", () => {
     let sending: Promise<void>;
     act(() => { sending = result.current.sendInstruction("Continue"); });
     expect(result.current.selectedThread?.status).toBe("running");
+    const optimisticTurnId = result.current.selectedThread?.turnOrder.at(-1) as string;
+    expect(optimisticTurnId).toMatch(/^web-start-turn-/);
+    expect(Object.values(result.current.selectedThread?.turns[optimisticTurnId].items ?? {}))
+      .toEqual([
+        expect.objectContaining({ type: "userMessage", text: "Continue", lifecycle: "pending" }),
+      ]);
     const turnRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     expect(turnRequest).toMatchObject({
       method: "turn/start",
@@ -1165,6 +1378,7 @@ describe("useCodex", () => {
 
     expect(result.current.selectedThreadId).toBe("new-thread");
     expect(result.current.state.threads["new-thread"]).toMatchObject({
+      status: "idle",
       model: "gpt-test",
       reasoningEffort: "high",
       permission: "full-access",
@@ -1519,6 +1733,32 @@ describe("useCodex", () => {
       expect.objectContaining({ id: "queued-1", text: "Continue from the phone" }),
     ]);
 
+    let imageOnlyQueueing: Promise<void>;
+    act(() => { imageOnlyQueueing = result.current.sendInstruction("", [image]); });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const imageOnlyQueueRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    expect(imageOnlyQueueRequest).toMatchObject({
+      method: "desktop/queue/add",
+      params: {
+        threadId: "t1",
+        text: "",
+        cwd: "/tmp/project",
+        input: [{ type: "remoteImage", id: "upload-1" }],
+      },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: imageOnlyQueueRequest.id,
+        result: { message: { id: "queued-image-1", text: "", createdAt: 2 } },
+      },
+    });
+    await act(() => imageOnlyQueueing);
+    expect(result.current.selectedQueuedMessages).toEqual([
+      expect.objectContaining({ id: "queued-1", text: "Continue from the phone" }),
+      expect.objectContaining({ id: "queued-image-1", text: "" }),
+    ]);
+
     let promoting: Promise<void>;
     act(() => { promoting = result.current.steerQueuedMessage("queued-1"); });
     const promoteRequest = JSON.parse(fake.sent.at(-1) as string).payload;
@@ -1529,6 +1769,7 @@ describe("useCodex", () => {
     fake.serverSend({ type: "rpc", payload: { id: promoteRequest.id, result: { messageId: "queued-1" } } });
     await act(() => promoting);
     expect(result.current.selectedQueuedMessages).toEqual([
+      expect.objectContaining({ id: "queued-image-1", text: "" }),
       expect.objectContaining({ id: "queued-1", text: "Continue from the phone", lifecycle: "promoting" }),
     ]);
 
@@ -1555,6 +1796,7 @@ describe("useCodex", () => {
     fake.serverSend({ type: "rpc", payload: { id: immediateSteerRequest.id, result: { messageId: "queued-steer-1" } } });
     await act(() => steering);
     expect(result.current.selectedQueuedMessages).toEqual([
+      expect.objectContaining({ id: "queued-image-1", text: "" }),
       expect.objectContaining({ id: "queued-1", text: "Continue from the phone", lifecycle: "promoting" }),
       expect.objectContaining({ id: "queued-steer-1", text: "Guide immediately", lifecycle: "promoting" }),
     ]);
@@ -1956,6 +2198,132 @@ describe("useCodex", () => {
 });
 
 describe("optimistic steer reconciliation", () => {
+  it.each([
+    {
+      name: "text",
+      optimisticText: "Continue after reload",
+      snapshotText: "Continue after reload",
+      optimisticImages: [] as string[],
+      snapshotImages: undefined,
+    },
+    {
+      name: "image-only",
+      optimisticText: "",
+      snapshotText: "",
+      optimisticImages: ["upload-1"],
+      snapshotImages: undefined,
+    },
+  ])("reconciles a snapshot-only $name confirmation for a staged thread start", ({
+    optimisticText,
+    snapshotText,
+    optimisticImages,
+    snapshotImages,
+  }) => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "web-start-turn-web-start-1",
+          turnOrder: ["web-start-turn-web-start-1"],
+          turns: {
+            "web-start-turn-web-start-1": {
+              id: "web-start-turn-web-start-1",
+              status: "inProgress",
+              itemOrder: ["web-start-1"],
+              items: {
+                "web-start-1": {
+                  id: "web-start-1",
+                  type: "userMessage",
+                  text: optimisticText,
+                  imageIds: optimisticImages,
+                  clientMessageId: "web-start-1",
+                  lifecycle: "pending",
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          completeFromTurnStart: true,
+          items: [{
+            id: "user-1",
+            type: "user_message",
+            text: snapshotText,
+            ...(snapshotImages ? { imageIds: snapshotImages } : {}),
+          }],
+        }],
+      },
+    });
+
+    expect(next.threads.t1.turnOrder).toEqual(["turn-1"]);
+    expect(next.threads.t1.turns["web-start-turn-web-start-1"]).toBeUndefined();
+    expect(next.threads.t1.turns["turn-1"].itemOrder).toEqual(["user-1"]);
+    expect(next.threads.t1.turns["turn-1"].items["user-1"]).toMatchObject({
+      text: snapshotText,
+      lifecycle: "confirmed",
+      ...(optimisticImages.length ? { imageIds: optimisticImages } : {}),
+    });
+    expect(next.threads.t1.activeTurnId).toBeUndefined();
+    expect(next.threads.t1.status).toBe("idle");
+  });
+
+  it("keeps snapshot image metadata when an earlier live item omitted it", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Live",
+          status: "running",
+          activeTurnId: "turn-1",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "inProgress",
+              itemOrder: ["user-1"],
+              items: {
+                "user-1": { id: "user-1", type: "userMessage", text: "" },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          items: [{ id: "user-1", type: "userMessage", text: "", imageIds: ["upload-1"] }],
+        }],
+      },
+    });
+
+    expect(next.threads.t1.turns["turn-1"].items["user-1"].imageIds).toEqual(["upload-1"]);
+  });
+
   it("reconciles a same-text pending message with a new no-id confirmation in the current turn", () => {
     const reconciler = new ConversationReconciler();
     const state: CodexState = {

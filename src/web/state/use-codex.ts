@@ -214,6 +214,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const [queuedByThread, setQueuedByThread] = useState<Record<string, QueuedFollowUp[]>>({});
   const [creationOptions, setCreationOptions] = useState(emptyCreationOptions);
   const [desktopStateAvailable, setDesktopStateAvailable] = useState(false);
+  const desktopStateAvailableRef = useRef(false);
   const [transportMode, setTransportMode] = useState<TransportMode>();
   const [transportReadOnly, setTransportReadOnly] = useState(false);
   const [error, setError] = useState<string>();
@@ -313,10 +314,11 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     let desktopList: unknown;
     try {
       desktopList = await socket.request("desktopState/listThreads", {});
+      desktopStateAvailableRef.current = true;
       setDesktopStateAvailable(true);
     } catch {
       // Older/test gateways can still provide a useful App Server list.
-      setDesktopStateAvailable(false);
+      if (!desktopStateAvailableRef.current) setDesktopStateAvailable(false);
     }
     if (result === undefined && desktopList === undefined) {
       throw new Error("读取对话列表失败");
@@ -344,6 +346,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       let desktopList: unknown;
       try {
         desktopList = await socket.request("desktopState/listThreads", { archived: true });
+        desktopStateAvailableRef.current = true;
         setDesktopStateAvailable(true);
       } catch {
         // Older gateways do not expose archived Desktop metadata.
@@ -505,7 +508,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       setLoadingThreadId(threadId);
       setThreadLoadError(undefined);
       try {
-        if (desktopStateAvailable) {
+        if (desktopStateAvailableRef.current || desktopStateAvailable) {
           let mirror: unknown;
           try {
             mirror = await socket.request("desktopState/readThread", {
@@ -754,6 +757,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
           throw cause;
         }
       } else {
+        const itemId = `web-start-${Date.now()}-${optimisticItemSequence.current++}`;
+        const optimisticTurnId = `web-start-turn-${itemId}`;
         const params = {
           threadId: selectedThreadId,
           input,
@@ -761,7 +766,14 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
           ...(thread?.reasoningEffort ? { effort: thread.reasoningEffort } : {}),
           ...permissionRpcParamsFromState(thread ?? {}),
         };
-        setState((current) => markThreadStarting(current, selectedThreadId));
+        setState((current) => stageStartingUserMessage(
+          current,
+          selectedThreadId,
+          optimisticTurnId,
+          itemId,
+          text,
+          uploaded.map((image) => image.id),
+        ));
         try {
           if (!thread?.desktopMirror) {
             await socket.request("turn/start", params);
@@ -791,7 +803,15 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
             }
           }
         } catch (cause) {
-          setState((current) => clearUnconfirmedThreadStart(current, selectedThreadId));
+          setState((current) => clearUnconfirmedThreadStart(
+            reconciler.failUserMessage(
+              current,
+              selectedThreadId,
+              optimisticTurnId,
+              itemId,
+            ),
+            selectedThreadId,
+          ));
           throw cause;
         }
       }
@@ -1096,6 +1116,23 @@ function removeOptimisticItem(
   if (!thread || !turn?.items[itemId]) return state;
   const items = { ...turn.items };
   delete items[itemId];
+  const itemOrder = turn.itemOrder.filter((id) => id !== itemId);
+  if (turnId.startsWith("web-start-turn-") && itemOrder.length === 0) {
+    const turns = { ...thread.turns };
+    delete turns[turnId];
+    return {
+      ...state,
+      threads: {
+        ...state.threads,
+        [threadId]: {
+          ...thread,
+          turnOrder: thread.turnOrder.filter((id) => id !== turnId),
+          turns,
+          activeTurnId: thread.activeTurnId === turnId ? undefined : thread.activeTurnId,
+        },
+      },
+    };
+  }
   return {
     ...state,
     threads: {
@@ -1106,7 +1143,7 @@ function removeOptimisticItem(
           ...thread.turns,
           [turnId]: {
             ...turn,
-            itemOrder: turn.itemOrder.filter((id) => id !== itemId),
+            itemOrder,
             items,
           },
         },
@@ -1218,13 +1255,32 @@ function latestKnownTurnIsTerminal(thread: CodexThread) {
   return Boolean(turnId && isTerminalTurnStatus(thread.turns[turnId]?.status));
 }
 
-function markThreadStarting(state: CodexState, threadId: string): CodexState {
+function stageStartingUserMessage(
+  state: CodexState,
+  threadId: string,
+  turnId: string,
+  itemId: string,
+  text: string,
+  imageIds: string[],
+) {
   const thread = state.threads[threadId];
   if (!thread || thread.status === "running") return state;
-  return {
+  const withTurn: CodexState = {
     ...state,
-    threads: { ...state.threads, [threadId]: { ...thread, status: "running" } },
+    threads: {
+      ...state.threads,
+      [threadId]: {
+        ...thread,
+        status: "running",
+        turnOrder: [...thread.turnOrder, turnId],
+        turns: {
+          ...thread.turns,
+          [turnId]: { id: turnId, status: "inProgress", itemOrder: [], items: {} },
+        },
+      },
+    },
   };
+  return addOptimisticUserMessage(withTurn, threadId, turnId, itemId, text, imageIds);
 }
 
 function clearUnconfirmedThreadStart(state: CodexState, threadId: string): CodexState {
@@ -1337,8 +1393,34 @@ function hydrateThread(
       }
     }
     const items = { ...snapshotItems };
+    const snapshotTurnIsComplete = turnRecord.completeFromTurnStart === true;
+    const reconciledExistingIds = new Set<string>();
+    for (const snapshotItemId of snapshotItemOrder) {
+      const snapshotItem = snapshotItems[snapshotItemId];
+      if (!snapshotItem || existing?.items[snapshotItemId] || !isUserMessage(snapshotItem)) continue;
+      const liveItemId = existing?.itemOrder.find((existingItemId) => {
+        if (reconciledExistingIds.has(existingItemId) || snapshotItems[existingItemId]) return false;
+        const liveItem = existing.items[existingItemId];
+        const stableIdentity = Boolean(
+          snapshotItem.clientMessageId &&
+          liveItem?.clientMessageId === snapshotItem.clientMessageId,
+        );
+        return Boolean(liveItem) &&
+          !isOptimisticUserMessage(existingItemId, liveItem) &&
+          (stableIdentity || snapshotTurnIsComplete) &&
+          sameUserMessage(snapshotItem, liveItem);
+      });
+      if (!liveItemId || !existing) continue;
+      reconciledExistingIds.add(liveItemId);
+      items[snapshotItemId] = {
+        ...mergeHydratedItem(snapshotItem, existing.items[liveItemId], snapshotTerminal),
+        id: snapshotItemId,
+        lifecycle: "confirmed",
+      };
+    }
     const retainedExistingOrder: string[] = [];
     for (const [itemId, existingItem] of Object.entries(existing?.items ?? {})) {
+      if (reconciledExistingIds.has(itemId)) continue;
       items[itemId] = mergeHydratedItem(snapshotItems[itemId], existingItem, snapshotTerminal);
       retainedExistingOrder.push(itemId);
     }
@@ -1363,7 +1445,7 @@ function hydrateThread(
         : existing?.durationMs ?? numberValue(turnRecord.durationMs),
     };
   }
-  const turnOrder = placement === "append"
+  const initialTurnOrder = placement === "append"
     ? appendMissing(current.turnOrder, snapshotTurnOrder)
     : appendMissing(snapshotTurnOrder, current.turnOrder);
   const snapshotStatus = normalizeStatus(record.status, current.status);
@@ -1373,25 +1455,27 @@ function hydrateThread(
     snapshotStatus === "idle" &&
     !snapshotHasInProgressTurn
   ) {
-    for (const turnId of turnOrder) {
+    for (const turnId of initialTurnOrder) {
       const turn = hydratedTurns[turnId];
       if (!turn || turn.status !== "inProgress") continue;
       hydratedTurns[turnId] = completeRetainedTurn(turn);
     }
   }
-  const activeTurnId = [...turnOrder].reverse().find(
-    (turnId) => hydratedTurns[turnId]?.status === "inProgress",
-  );
-  for (const turnId of turnOrder) {
-    const turn = hydratedTurns[turnId];
-    if (!turn || turnId === activeTurnId || turn.status !== "inProgress") continue;
-    hydratedTurns[turnId] = completeRetainedTurn(turn);
-  }
-  const deduplicatedTurns = dedupeOptimisticUserMessages(
+  const deduplicated = dedupeOptimisticUserMessages(
     hydratedTurns,
-    turnOrder,
+    initialTurnOrder,
     snapshotFallbackItemKeys,
   );
+  const deduplicatedTurns = deduplicated.turns;
+  const turnOrder = deduplicated.turnOrder;
+  const activeTurnId = [...turnOrder].reverse().find(
+    (turnId) => deduplicatedTurns[turnId]?.status === "inProgress",
+  );
+  for (const turnId of turnOrder) {
+    const turn = deduplicatedTurns[turnId];
+    if (!turn || turnId === activeTurnId || turn.status !== "inProgress") continue;
+    deduplicatedTurns[turnId] = completeRetainedTurn(turn);
+  }
   const reconciledStatus = activeTurnId
     ? "running"
     : current.status === "idle" && snapshotStatus === "running" &&
@@ -1481,11 +1565,12 @@ function dedupeOptimisticUserMessages(
   snapshotFallbackItemKeys: Set<string>,
 ) {
   let next = turns;
+  let nextTurnOrder = turnOrder;
   const authoritative = turnOrder.flatMap((turnId) => {
     const turn = turns[turnId];
     return (turn?.itemOrder ?? []).flatMap((itemId) => {
       const item = turn.items[itemId];
-      return item && !itemId.startsWith("web-steer-") && isUserMessage(item)
+      return item && !isOptimisticUserMessage(itemId, item) && isUserMessage(item)
         ? [{ turnId, itemId, item }]
         : [];
     });
@@ -1494,7 +1579,9 @@ function dedupeOptimisticUserMessages(
     const turn = turns[turnId];
     return (turn?.itemOrder ?? []).flatMap((itemId) => {
       const item = turn.items[itemId];
-      return itemId.startsWith("web-steer-") && item ? [{ turnId, itemId, item }] : [];
+      return item && isOptimisticUserMessage(itemId, item) && isUserMessage(item)
+        ? [{ turnId, itemId, item }]
+        : [];
     });
   });
   const usedAuthoritative = new Set<string>();
@@ -1528,14 +1615,22 @@ function dedupeOptimisticUserMessages(
     const sourceTurn = next[candidate.turnId];
     const sourceItems = { ...sourceTurn.items };
     delete sourceItems[candidate.itemId];
-    next = {
-      ...next,
-      [candidate.turnId]: {
-        ...sourceTurn,
-        itemOrder: sourceTurn.itemOrder.filter((id) => id !== candidate.itemId),
-        items: sourceItems,
-      },
-    };
+    const sourceItemOrder = sourceTurn.itemOrder.filter((id) => id !== candidate.itemId);
+    if (candidate.turnId.startsWith("web-start-turn-") && sourceItemOrder.length === 0) {
+      const withoutSource = { ...next };
+      delete withoutSource[candidate.turnId];
+      next = withoutSource;
+      nextTurnOrder = nextTurnOrder.filter((turnId) => turnId !== candidate.turnId);
+    } else {
+      next = {
+        ...next,
+        [candidate.turnId]: {
+          ...sourceTurn,
+          itemOrder: sourceItemOrder,
+          items: sourceItems,
+        },
+      };
+    }
     if (candidate.item.imageIds?.length && !match.item.imageIds?.length) {
       const targetTurn = next[match.turnId];
       next = {
@@ -1550,7 +1645,7 @@ function dedupeOptimisticUserMessages(
       };
     }
   }
-  return next;
+  return { turns: next, turnOrder: nextTurnOrder };
 }
 
 function isUserMessage(item: CodexTurn["items"][string]) {
@@ -1598,16 +1693,25 @@ function mergeHydratedItem(
   if (snapshot.text.startsWith(live.text)) text = snapshot.text;
   else if (live.text.startsWith(snapshot.text)) text = live.text;
   else if (snapshotTerminal && snapshot.text) text = snapshot.text;
+  const imageIds = [...new Set([...(snapshot.imageIds ?? []), ...(live.imageIds ?? [])])];
   return {
     ...snapshot,
     ...live,
     text,
+    ...(imageIds.length > 0 ? { imageIds } : {}),
     status: snapshotTerminal ? snapshot.status ?? "completed" : live.status ?? snapshot.status,
   };
 }
 
 function isTerminalTurnStatus(status: TurnStatus) {
   return status === "completed" || status === "interrupted" || status === "failed";
+}
+
+function isOptimisticUserMessage(itemId: string, item: CodexTurn["items"][string]) {
+  return itemId.startsWith("web-steer-") ||
+    item.lifecycle === "pending" ||
+    item.lifecycle === "promoting" ||
+    item.lifecycle === "accepted";
 }
 
 function appendMissing(primary: string[], secondary: string[]) {
@@ -1638,6 +1742,7 @@ function rememberThreadSettings(
       ...state.threads,
       [id]: {
         ...current,
+        status: normalizeStatus(record.status, "idle"),
         title: stringValue(record.name) ?? stringValue(record.preview) ?? current.title,
         cwd: stringValue(record.cwd) ?? options.cwd ?? current.cwd,
         model: options.model,

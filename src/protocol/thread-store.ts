@@ -577,13 +577,24 @@ function removeItemFromTurn(thread: CodexThread, turnId: string, itemId: string)
   if (!turn?.items[itemId]) return thread;
   const items = { ...turn.items };
   delete items[itemId];
+  const itemOrder = turn.itemOrder.filter((id) => id !== itemId);
+  if (turnId.startsWith("web-start-turn-") && itemOrder.length === 0) {
+    const turns = { ...thread.turns };
+    delete turns[turnId];
+    return {
+      ...thread,
+      activeTurnId: thread.activeTurnId === turnId ? undefined : thread.activeTurnId,
+      turnOrder: thread.turnOrder.filter((id) => id !== turnId),
+      turns,
+    };
+  }
   return {
     ...thread,
     turns: {
       ...thread.turns,
       [turnId]: {
         ...turn,
-        itemOrder: turn.itemOrder.filter((id) => id !== itemId),
+        itemOrder,
         items,
       },
     },

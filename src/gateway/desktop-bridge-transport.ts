@@ -34,6 +34,9 @@ type DesktopBridgeTransportOptions = {
   reconnectDelayMs?: number;
   appServerProbeIntervalMs?: number;
   appServerDisconnectGraceMs?: number;
+  queueRecoveryRetryDelayMs?: number;
+  queueRequestTimeoutMs?: number;
+  queueRecoveryDeadlineMs?: number;
 };
 
 type DesktopEnvelope = {
@@ -57,19 +60,47 @@ type DesktopEnvelope = {
 };
 
 type QueueRequest = Extract<RpcMessage, { id: string | number; method: string }>;
+type QueueRecoveryOutcome = "steer-error" | "add-pending";
 
 type PendingQueueRead = {
   request: QueueRequest;
-  operation: "list" | "add" | "steer";
+  operation: "list" | "add" | "steer" | "restore";
+  threadId?: string;
+  message?: Record<string, unknown>;
+  originalMessages?: Record<string, unknown>[];
+  recoveryOutcome?: QueueRecoveryOutcome;
 };
 
 type PendingQueueWrite = {
   request: QueueRequest;
-  operation: "add" | "steer";
+  operation: "add" | "steer" | "restore";
   threadId: string;
   messages: Record<string, unknown>[];
   message: Record<string, unknown>;
+  restoreMessages?: Record<string, unknown>[];
+  recoveryOutcome?: QueueRecoveryOutcome;
 };
+
+type PendingQueueConfirmation = {
+  request: QueueRequest;
+  threadId: string;
+  message: Record<string, unknown>;
+  originalMessages: Record<string, unknown>[];
+  absenceChecks: number;
+  query: "thread/read" | "thread/turns/list";
+  cursor?: string;
+  seenCursors: Set<string>;
+};
+
+type DeferredQueueRecovery = Omit<PendingQueueConfirmation, "request" | "query"> & {
+  key: string;
+  phase: "confirmation" | "restore";
+  query: PendingQueueConfirmation["query"];
+  recoveryOutcome?: QueueRecoveryOutcome;
+};
+
+const QUEUE_CONFIRMATION_PREFIX = "codex-remote-queue-confirm-";
+const QUEUE_CONFIRMATION_ABSENCE_CHECKS = 3;
 
 const HOST_ROUTES: Readonly<Record<string, string>> = Object.freeze({
   "desktop/listPinnedThreads": "list-pinned-threads",
@@ -85,12 +116,42 @@ export class DesktopBridgeTransport implements CodexTransport {
   private pendingHostRequests = new Map<string, string | number>();
   private pendingQueueReads = new Map<string, PendingQueueRead>();
   private pendingQueueWrites = new Map<string, PendingQueueWrite>();
+  private activeQueueMutation?: {
+    request: QueueRequest;
+    operation: "add" | "steer";
+  };
+  private persistedQueueMutation?: PendingQueueWrite;
+  private pendingQueueRecovery?: {
+    request: QueueRequest;
+    threadId: string;
+    message: Record<string, unknown>;
+    originalMessages: Record<string, unknown>[];
+    recoveryOutcome: QueueRecoveryOutcome;
+  };
+  private pendingQueueConfirmation?: PendingQueueConfirmation;
+  private pendingQueueConfirmationRequests = new Map<string, PendingQueueConfirmation>();
+  private queueConfirmationRequestIds = new Set<string>();
+  private queueRequestTimeouts = new Map<string, {
+    requestKey: string;
+    timeout: ReturnType<typeof setTimeout>;
+  }>();
+  private deferredQueueRecoveries = new Map<string, DeferredQueueRecovery>();
+  private silentQueueRequestIds = new Set<string>();
+  private activeBackgroundRecoveryKey?: string;
+  private queuedQueueMutations: Array<{
+    request: QueueRequest;
+    operation: "add" | "steer";
+  }> = [];
   private capabilities: ProtocolCapabilities;
   private bridgeState: "stopped" | "live" | "read-only" = "stopped";
   private readonly hostId: string;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private appServerProbeTimer?: ReturnType<typeof setTimeout>;
   private appServerDisconnectTimer?: ReturnType<typeof setTimeout>;
+  private queueRecoveryRetryTimer?: ReturnType<typeof setTimeout>;
+  private queueRecoveryDeadlineTimer?: ReturnType<typeof setTimeout>;
+  private backgroundQueueRecoveryTimer?: ReturnType<typeof setTimeout>;
+  private queueRecoveryRetryCount = 0;
   private appServerProbeRequestIds = new Set<string>();
   private reconnecting = false;
 
@@ -159,7 +220,7 @@ export class DesktopBridgeTransport implements CodexTransport {
         message.method === "desktop/queue/steer"
       ) {
         const operation = message.method.slice("desktop/queue/".length) as PendingQueueRead["operation"];
-        this.sendQueueRead(message, operation);
+        this.enqueueQueueRead(message, operation);
         return;
       }
       const ownerRequest = createOwnerRequest(message);
@@ -182,14 +243,32 @@ export class DesktopBridgeTransport implements CodexTransport {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.appServerProbeTimer) clearTimeout(this.appServerProbeTimer);
     if (this.appServerDisconnectTimer) clearTimeout(this.appServerDisconnectTimer);
+    if (this.queueRecoveryRetryTimer) clearTimeout(this.queueRecoveryRetryTimer);
+    if (this.queueRecoveryDeadlineTimer) clearTimeout(this.queueRecoveryDeadlineTimer);
+    if (this.backgroundQueueRecoveryTimer) clearTimeout(this.backgroundQueueRecoveryTimer);
+    for (const pending of this.queueRequestTimeouts.values()) clearTimeout(pending.timeout);
     this.reconnectTimer = undefined;
     this.appServerProbeTimer = undefined;
     this.appServerDisconnectTimer = undefined;
+    this.queueRecoveryRetryTimer = undefined;
+    this.queueRecoveryDeadlineTimer = undefined;
+    this.backgroundQueueRecoveryTimer = undefined;
     this.appServerProbeRequestIds.clear();
     this.pendingServerRequests.clear();
     this.pendingHostRequests.clear();
     this.pendingQueueReads.clear();
     this.pendingQueueWrites.clear();
+    this.pendingQueueConfirmationRequests.clear();
+    this.queueConfirmationRequestIds.clear();
+    this.queueRequestTimeouts.clear();
+    this.activeQueueMutation = undefined;
+    this.persistedQueueMutation = undefined;
+    this.pendingQueueRecovery = undefined;
+    this.pendingQueueConfirmation = undefined;
+    this.deferredQueueRecoveries.clear();
+    this.silentQueueRequestIds.clear();
+    this.activeBackgroundRecoveryKey = undefined;
+    this.queuedQueueMutations = [];
     await this.options.client.stop();
   }
 
@@ -237,6 +316,20 @@ export class DesktopBridgeTransport implements CodexTransport {
       ) {
         this.markConnected();
         return;
+      }
+      if (isRpcResponse(value.message)) {
+        const key = rpcKey(value.message.id);
+        const confirmation = this.pendingQueueConfirmationRequests.get(key);
+        if (confirmation) {
+          this.clearQueueRequestTimeout(`rpc:${key}`);
+          this.pendingQueueConfirmationRequests.delete(key);
+          this.queueConfirmationRequestIds.delete(key);
+          this.receiveQueueConfirmation(value.message, confirmation);
+          return;
+        }
+        if (this.queueConfirmationRequestIds.delete(key)) {
+          return;
+        }
       }
       this.onMessage?.(value.message);
       return;
@@ -337,12 +430,14 @@ export class DesktopBridgeTransport implements CodexTransport {
     if (typeof response.requestId !== "string") return;
     const queueRead = this.pendingQueueReads.get(response.requestId);
     if (queueRead) {
+      this.clearQueueRequestTimeout(`fetch:${response.requestId}`);
       this.pendingQueueReads.delete(response.requestId);
       this.receiveQueueState(response, queueRead);
       return;
     }
     const queueWrite = this.pendingQueueWrites.get(response.requestId);
     if (queueWrite) {
+      this.clearQueueRequestTimeout(`fetch:${response.requestId}`);
       this.pendingQueueWrites.delete(response.requestId);
       void this.receiveQueueWrite(response, queueWrite);
       return;
@@ -375,22 +470,55 @@ export class DesktopBridgeTransport implements CodexTransport {
     }
   }
 
+  private enqueueQueueRead(request: QueueRequest, operation: PendingQueueRead["operation"]) {
+    if (operation === "list") {
+      this.sendQueueRead(request, operation);
+      return;
+    }
+    if (operation !== "add" && operation !== "steer") return;
+    if (this.activeBackgroundRecoveryKey) this.deferActiveQueueRecovery(false);
+    if (this.activeQueueMutation) {
+      this.queuedQueueMutations.push({ request, operation });
+      return;
+    }
+    this.activeQueueMutation = { request, operation };
+    this.sendQueueRead(request, operation);
+  }
+
   private sendQueueRead(request: QueueRequest, operation: PendingQueueRead["operation"]) {
     const params = asRecord(request.params);
     if (typeof params.threadId !== "string") {
-      this.onMessage?.({ id: request.id, error: { code: -32602, message: "threadId is required" } });
+      this.finishQueueRequest(request, { id: request.id, error: { code: -32602, message: "threadId is required" } });
       return;
     }
-    if (operation === "add" && (typeof params.text !== "string" || !params.text.trim())) {
-      this.onMessage?.({ id: request.id, error: { code: -32602, message: "text is required" } });
+    const hasLocalImage = Array.isArray(params.input) && params.input.some((item) => {
+      const record = asRecord(item);
+      return record.type === "localImage" && typeof record.path === "string" && Boolean(record.path.trim());
+    });
+    if (operation === "add" &&
+      (typeof params.text !== "string" || !params.text.trim()) &&
+      !hasLocalImage) {
+      this.finishQueueRequest(request, {
+        id: request.id,
+        error: { code: -32602, message: "text or localImage input is required" },
+      });
       return;
     }
     if (operation === "steer" && typeof params.messageId !== "string") {
-      this.onMessage?.({ id: request.id, error: { code: -32602, message: "messageId is required" } });
+      this.finishQueueRequest(request, { id: request.id, error: { code: -32602, message: "messageId is required" } });
       return;
     }
     const requestId = randomUUID();
     this.pendingQueueReads.set(requestId, { request, operation });
+    this.trackQueueRequestTimeout(`fetch:${requestId}`, request, () => {
+      const pending = this.pendingQueueReads.get(requestId);
+      if (!pending) return;
+      this.pendingQueueReads.delete(requestId);
+      this.finishQueueRequest(request, {
+        id: request.id,
+        error: { code: -32007, message: "Desktop queue read timed out" },
+      });
+    });
     this.dispatch({
       type: "fetch",
       requestId,
@@ -401,38 +529,482 @@ export class DesktopBridgeTransport implements CodexTransport {
     });
   }
 
+  private finishQueueRequest(request: QueueRequest, response: RpcMessage) {
+    if (request.method !== "desktop/queue/list" && !this.isActiveQueueMutation(request)) return;
+    const key = rpcKey(request.id);
+    const silent = this.silentQueueRequestIds.delete(key);
+    if (!silent) this.onMessage?.(response);
+    if (request.method === "desktop/queue/list") return;
+    if (silent && this.activeBackgroundRecoveryKey) {
+      this.deferredQueueRecoveries.delete(this.activeBackgroundRecoveryKey);
+      this.activeBackgroundRecoveryKey = undefined;
+    }
+    this.releaseActiveQueueMutation(request);
+  }
+
+  private releaseActiveQueueMutation(request: QueueRequest) {
+    this.clearQueueRequestState(request);
+    const next = this.queuedQueueMutations.shift();
+    if (!next) {
+      this.activeQueueMutation = undefined;
+      this.scheduleBackgroundQueueRecovery();
+      return;
+    }
+    this.activeQueueMutation = next;
+    this.sendQueueRead(next.request, next.operation);
+  }
+
+  private isActiveQueueMutation(request: QueueRequest) {
+    return Boolean(
+      this.activeQueueMutation &&
+      rpcKey(this.activeQueueMutation.request.id) === rpcKey(request.id),
+    );
+  }
+
+  private clearQueueRequestState(request: QueueRequest) {
+    const key = rpcKey(request.id);
+    for (const [requestId, pending] of this.pendingQueueReads) {
+      if (rpcKey(pending.request.id) === key) this.pendingQueueReads.delete(requestId);
+    }
+    for (const [requestId, pending] of this.pendingQueueWrites) {
+      if (rpcKey(pending.request.id) === key) this.pendingQueueWrites.delete(requestId);
+    }
+    if (this.persistedQueueMutation && rpcKey(this.persistedQueueMutation.request.id) === key) {
+      this.persistedQueueMutation = undefined;
+    }
+    if (this.pendingQueueRecovery && rpcKey(this.pendingQueueRecovery.request.id) === key) {
+      this.pendingQueueRecovery = undefined;
+    }
+    if (this.pendingQueueConfirmation && rpcKey(this.pendingQueueConfirmation.request.id) === key) {
+      this.pendingQueueConfirmation = undefined;
+    }
+    for (const [requestId, pending] of this.pendingQueueConfirmationRequests) {
+      if (rpcKey(pending.request.id) === key) this.pendingQueueConfirmationRequests.delete(requestId);
+    }
+    this.clearQueueRecoveryRetry();
+    this.clearQueueRecoveryDeadline();
+    for (const [requestId, pending] of this.queueRequestTimeouts) {
+      if (pending.requestKey === key) {
+        clearTimeout(pending.timeout);
+        this.queueRequestTimeouts.delete(requestId);
+      }
+    }
+  }
+
+  private sendQueueConfirmationRead(
+    request: QueueRequest,
+    threadId: string,
+    message: Record<string, unknown>,
+    originalMessages: Record<string, unknown>[],
+  ) {
+    this.pendingQueueConfirmation = {
+      request,
+      threadId,
+      message,
+      originalMessages,
+      absenceChecks: 0,
+      query: "thread/read",
+      seenCursors: new Set<string>(),
+    };
+    this.ensureQueueRecoveryDeadline();
+    this.resumePendingQueueConfirmation();
+  }
+
+  private resumePendingQueueConfirmation() {
+    const confirmation = this.pendingQueueConfirmation;
+    if (!confirmation || this.bridgeState !== "live" || !this.isActiveQueueMutation(confirmation.request)) return;
+    if ([...this.pendingQueueConfirmationRequests.values()].some((pending) => (
+      rpcKey(pending.request.id) === rpcKey(confirmation.request.id)
+    ))) return;
+    const requestId = `${QUEUE_CONFIRMATION_PREFIX}${randomUUID()}`;
+    const key = rpcKey(requestId);
+    this.pendingQueueConfirmationRequests.set(key, confirmation);
+    this.queueConfirmationRequestIds.add(key);
+    while (this.queueConfirmationRequestIds.size > 100) {
+      const oldest = this.queueConfirmationRequestIds.values().next().value;
+      if (typeof oldest === "string") this.queueConfirmationRequestIds.delete(oldest);
+    }
+    this.trackQueueRequestTimeout(`rpc:${key}`, confirmation.request, () => {
+      if (!this.pendingQueueConfirmationRequests.delete(key)) return;
+      this.scheduleQueueRecoveryRetry();
+    });
+    this.dispatch({
+      type: "mcp-request",
+      request: {
+        id: requestId,
+        method: confirmation.query,
+        params: confirmation.query === "thread/read"
+          ? { threadId: confirmation.threadId, includeTurns: true }
+          : {
+              threadId: confirmation.threadId,
+              limit: 8,
+              sortDirection: "desc",
+              itemsView: "full",
+              ...(confirmation.cursor ? { cursor: confirmation.cursor } : {}),
+            },
+      },
+      hostId: this.hostId,
+      priority: "background",
+      source: "remote_control",
+    });
+  }
+
+  private receiveQueueConfirmation(response: RpcResponse, pending: PendingQueueConfirmation) {
+    if (!this.isActiveQueueMutation(pending.request) || this.pendingQueueConfirmation !== pending) return;
+    if (!response.result || typeof response.result !== "object" || response.error) {
+      this.scheduleQueueRecoveryRetry();
+      return;
+    }
+    const messageId = typeof pending.message.id === "string" ? pending.message.id : undefined;
+    if (!messageId) {
+      this.scheduleQueueRecoveryRetry();
+      return;
+    }
+    const inspection = inspectQueueConfirmation(
+      response.result,
+      pending.query,
+      pending.threadId,
+      messageId,
+    );
+    if (inspection.status === "fallback") {
+      pending.query = "thread/turns/list";
+      pending.cursor = undefined;
+      pending.seenCursors.clear();
+      this.scheduleQueueRecoveryRetry();
+      return;
+    }
+    if (inspection.status === "invalid") {
+      this.scheduleQueueRecoveryRetry();
+      return;
+    }
+    if (inspection.status === "accepted") {
+      this.finishQueueRequest(pending.request, {
+        id: pending.request.id,
+        result: { messageId, pendingConfirmation: true },
+      });
+      return;
+    }
+    if (inspection.nextCursor) {
+      if (
+        inspection.nextCursor === pending.cursor ||
+        pending.seenCursors.has(inspection.nextCursor)
+      ) {
+        // A buggy/stale cursor must not pin recovery to one old page forever.
+        // Restart from the newest page; a finite history otherwise continues
+        // across foreground deadlines and silent background attempts.
+        pending.cursor = undefined;
+        pending.seenCursors.clear();
+        this.scheduleQueueRecoveryRetry();
+        return;
+      }
+      pending.seenCursors.add(inspection.nextCursor);
+      pending.cursor = inspection.nextCursor;
+      this.scheduleQueueRecoveryRetry();
+      return;
+    }
+    pending.absenceChecks += 1;
+    pending.cursor = undefined;
+    pending.seenCursors.clear();
+    if (pending.absenceChecks < QUEUE_CONFIRMATION_ABSENCE_CHECKS) {
+      this.scheduleQueueRecoveryRetry();
+      return;
+    }
+    this.pendingQueueConfirmation = undefined;
+    this.sendQueueRestoreRead(
+      pending.request,
+      pending.threadId,
+      pending.message,
+      pending.originalMessages,
+    );
+  }
+
+  private sendQueueRestoreRead(
+    request: QueueRequest,
+    threadId: string,
+    message: Record<string, unknown>,
+    originalMessages: Record<string, unknown>[],
+    recoveryOutcome: QueueRecoveryOutcome = "steer-error",
+  ) {
+    this.pendingQueueRecovery = {
+      request,
+      threadId,
+      message,
+      originalMessages,
+      recoveryOutcome,
+    };
+    this.ensureQueueRecoveryDeadline();
+    this.resumePendingQueueRecovery();
+  }
+
+  private resumePendingQueueRecovery() {
+    const recovery = this.pendingQueueRecovery;
+    if (!recovery || this.bridgeState !== "live" || !this.isActiveQueueMutation(recovery.request)) return;
+    if ([...this.pendingQueueReads.values()].some((pending) => (
+      pending.operation === "restore" && rpcKey(pending.request.id) === rpcKey(recovery.request.id)
+    ))) return;
+    const requestId = randomUUID();
+    this.pendingQueueReads.set(requestId, {
+      request: recovery.request,
+      operation: "restore",
+      threadId: recovery.threadId,
+      message: recovery.message,
+      originalMessages: recovery.originalMessages,
+      recoveryOutcome: recovery.recoveryOutcome,
+    });
+    this.trackQueueRequestTimeout(`fetch:${requestId}`, recovery.request, () => {
+      const pending = this.pendingQueueReads.get(requestId);
+      if (!pending) return;
+      this.pendingQueueReads.delete(requestId);
+      this.scheduleQueueRecoveryRetry();
+    });
+    this.dispatch({
+      type: "fetch",
+      requestId,
+      method: "POST",
+      url: "vscode://codex/get-global-state",
+      body: JSON.stringify({ key: "queued-follow-ups" }),
+      reportUploadProgress: false,
+    });
+  }
+
+  private scheduleQueueRecoveryRetry() {
+    if (this.queueRecoveryRetryTimer || this.isStopped()) return;
+    const attempt = this.queueRecoveryRetryCount++;
+    const configuredDelay = this.options.queueRecoveryRetryDelayMs;
+    const delay = configuredDelay ?? Math.min(2_000, 250 * (2 ** Math.min(attempt, 3)));
+    this.queueRecoveryRetryTimer = setTimeout(() => {
+      this.queueRecoveryRetryTimer = undefined;
+      if (this.bridgeState !== "live") return;
+      if (this.pendingQueueConfirmation) this.resumePendingQueueConfirmation();
+      else this.resumePendingQueueRecovery();
+    }, delay);
+  }
+
+  private clearQueueRecoveryRetry() {
+    if (this.queueRecoveryRetryTimer) clearTimeout(this.queueRecoveryRetryTimer);
+    this.queueRecoveryRetryTimer = undefined;
+    this.queueRecoveryRetryCount = 0;
+  }
+
+  private ensureQueueRecoveryDeadline() {
+    if (this.queueRecoveryDeadlineTimer || this.isStopped()) return;
+    this.queueRecoveryDeadlineTimer = setTimeout(() => {
+      this.queueRecoveryDeadlineTimer = undefined;
+      this.deferActiveQueueRecovery(true);
+    }, this.options.queueRecoveryDeadlineMs ?? 30_000);
+  }
+
+  private clearQueueRecoveryDeadline() {
+    if (this.queueRecoveryDeadlineTimer) clearTimeout(this.queueRecoveryDeadlineTimer);
+    this.queueRecoveryDeadlineTimer = undefined;
+  }
+
+  private trackQueueRequestTimeout(
+    key: string,
+    request: QueueRequest,
+    onTimeout: () => void,
+  ) {
+    this.clearQueueRequestTimeout(key);
+    const timeout = setTimeout(() => {
+      this.queueRequestTimeouts.delete(key);
+      if (this.isActiveQueueMutation(request)) onTimeout();
+    }, this.options.queueRequestTimeoutMs ?? 10_000);
+    this.queueRequestTimeouts.set(key, { requestKey: rpcKey(request.id), timeout });
+  }
+
+  private clearQueueRequestTimeout(key: string) {
+    const pending = this.queueRequestTimeouts.get(key);
+    if (!pending) return;
+    clearTimeout(pending.timeout);
+    this.queueRequestTimeouts.delete(key);
+  }
+
+  private deferActiveQueueRecovery(scheduleBackground: boolean) {
+    const active = this.activeQueueMutation?.request;
+    if (!active) return;
+    const confirmation = this.pendingQueueConfirmation;
+    const recovery = this.pendingQueueRecovery;
+    const source = confirmation ?? recovery;
+    if (!source || rpcKey(source.request.id) !== rpcKey(active.id)) return;
+    const messageId = typeof source.message.id === "string" ? source.message.id : randomUUID();
+    const deferredKey = `${source.threadId}\u0000${messageId}`;
+    // Requeue an exhausted/background-preempted recovery at the tail so one
+    // permanently failing item cannot starve every later deferred item.
+    this.deferredQueueRecoveries.delete(deferredKey);
+    this.deferredQueueRecoveries.set(deferredKey, {
+      key: deferredKey,
+      phase: confirmation ? "confirmation" : "restore",
+      query: confirmation?.query ?? "thread/read",
+      threadId: source.threadId,
+      message: source.message,
+      originalMessages: source.originalMessages,
+      absenceChecks: confirmation?.absenceChecks ?? 0,
+      cursor: confirmation?.cursor,
+      seenCursors: new Set(confirmation?.seenCursors ?? []),
+      recoveryOutcome: recovery?.recoveryOutcome,
+    });
+    const silent = this.silentQueueRequestIds.delete(rpcKey(active.id));
+    if (!silent) {
+      this.onMessage?.(confirmation || recovery?.recoveryOutcome === "add-pending" ? {
+        id: active.id,
+        result: confirmation
+          ? { messageId, pendingConfirmation: true }
+          : { message: source.message, pendingConfirmation: true },
+      } : {
+        id: active.id,
+        error: {
+          code: -32006,
+          message: "Desktop queue recovery continues in background",
+        },
+      });
+    }
+    this.activeBackgroundRecoveryKey = undefined;
+    this.clearQueueRequestState(active);
+    const next = this.queuedQueueMutations.shift();
+    if (next) {
+      this.activeQueueMutation = next;
+      this.sendQueueRead(next.request, next.operation);
+    } else {
+      this.activeQueueMutation = undefined;
+      if (scheduleBackground) this.scheduleBackgroundQueueRecovery();
+    }
+  }
+
+  private scheduleBackgroundQueueRecovery() {
+    if (
+      this.backgroundQueueRecoveryTimer ||
+      this.deferredQueueRecoveries.size === 0 ||
+      this.isStopped()
+    ) return;
+    const delay = Math.max(100, this.options.queueRecoveryRetryDelayMs ?? 1_000);
+    this.backgroundQueueRecoveryTimer = setTimeout(() => {
+      this.backgroundQueueRecoveryTimer = undefined;
+      this.startBackgroundQueueRecovery();
+    }, delay);
+  }
+
+  private startBackgroundQueueRecovery() {
+    if (this.bridgeState !== "live" || this.activeQueueMutation) {
+      this.scheduleBackgroundQueueRecovery();
+      return;
+    }
+    const deferred = this.deferredQueueRecoveries.values().next().value as DeferredQueueRecovery | undefined;
+    if (!deferred) return;
+    const request: QueueRequest = {
+      id: `codex-remote-queue-background-${randomUUID()}`,
+      method: "desktop/queue/steer",
+      params: { threadId: deferred.threadId, messageId: deferred.message.id },
+    };
+    this.silentQueueRequestIds.add(rpcKey(request.id));
+    this.activeBackgroundRecoveryKey = deferred.key;
+    this.activeQueueMutation = { request, operation: "steer" };
+    if (deferred.phase === "confirmation") {
+      this.pendingQueueConfirmation = {
+        request,
+        threadId: deferred.threadId,
+        message: deferred.message,
+        originalMessages: deferred.originalMessages,
+        absenceChecks: deferred.absenceChecks,
+        query: deferred.query,
+        cursor: deferred.cursor,
+        seenCursors: new Set(deferred.seenCursors),
+      };
+      this.ensureQueueRecoveryDeadline();
+      this.resumePendingQueueConfirmation();
+    } else {
+      this.pendingQueueRecovery = {
+        request,
+        threadId: deferred.threadId,
+        message: deferred.message,
+        originalMessages: deferred.originalMessages,
+        recoveryOutcome: deferred.recoveryOutcome ?? "steer-error",
+      };
+      this.ensureQueueRecoveryDeadline();
+      this.resumePendingQueueRecovery();
+    }
+  }
+
   private receiveQueueState(response: DesktopEnvelope, pending: PendingQueueRead) {
+    if (pending.operation !== "list" && !this.isActiveQueueMutation(pending.request)) return;
     if (
       response.responseType !== "success" ||
       typeof response.status !== "number" ||
       response.status < 200 ||
       response.status >= 300
     ) {
-      this.onMessage?.({ id: pending.request.id, error: { code: -32002, message: "Desktop queue read failed" } });
+      if (pending.operation === "restore") {
+        this.scheduleQueueRecoveryRetry();
+        return;
+      }
+      this.finishQueueRequest(pending.request, {
+        id: pending.request.id,
+        error: {
+          code: -32002,
+          message: "Desktop queue read failed",
+        },
+      });
       return;
     }
     let state: Record<string, unknown>;
     try {
       const body = typeof response.bodyJsonString === "string"
-        ? asRecord(JSON.parse(response.bodyJsonString))
-        : {};
-      state = asRecord(body.value);
+        ? JSON.parse(response.bodyJsonString)
+        : undefined;
+      if (!isRecordValue(body) || !isRecordValue(body.value)) {
+        throw new Error("desktop-queue-state-shape-invalid");
+      }
+      state = body.value;
     } catch {
-      this.onMessage?.({ id: pending.request.id, error: { code: -32700, message: "Desktop queue state was malformed" } });
+      if (pending.operation === "restore") {
+        this.scheduleQueueRecoveryRetry();
+        return;
+      }
+      this.finishQueueRequest(pending.request, {
+        id: pending.request.id,
+        error: { code: -32700, message: "Desktop queue state was malformed" },
+      });
       return;
     }
     const params = asRecord(pending.request.params);
-    const threadId = String(params.threadId);
+    const threadId = pending.threadId ?? String(params.threadId);
     const messages = sanitizeQueueMessages(state[threadId]);
+    if (pending.operation === "restore") {
+      if (!pending.message || !pending.originalMessages) {
+        this.finishQueueRequest(pending.request, {
+          id: pending.request.id,
+          error: { code: -32002, message: "Desktop queue restore failed" },
+        });
+        return;
+      }
+      const restoredMessages = mergeRestoredQueueMessage(
+        messages,
+        pending.originalMessages,
+        pending.message,
+      );
+      this.sendQueueWrite(
+        pending.request,
+        "restore",
+        threadId,
+        { ...state, [threadId]: restoredMessages },
+        restoredMessages,
+        pending.message,
+        undefined,
+        pending.recoveryOutcome ?? "steer-error",
+      );
+      return;
+    }
     if (pending.operation === "list") {
-      this.onMessage?.({ id: pending.request.id, result: { messages } });
+      this.finishQueueRequest(pending.request, { id: pending.request.id, result: { messages } });
       return;
     }
     if (pending.operation === "steer") {
       const messageId = String(params.messageId);
       const message = messages.find((item) => item.id === messageId);
       if (!message) {
-        this.onMessage?.({ id: pending.request.id, error: { code: -32004, message: "Queued message not found" } });
+        this.finishQueueRequest(pending.request, {
+          id: pending.request.id,
+          error: { code: -32004, message: "Queued message not found" },
+        });
         return;
       }
       void this.promoteVisibleQueuedMessage(
@@ -445,7 +1017,7 @@ export class DesktopBridgeTransport implements CodexTransport {
       );
       return;
     }
-    const text = String(params.text).trim();
+    const text = typeof params.text === "string" ? params.text.trim() : "";
     const cwd = typeof params.cwd === "string" && params.cwd ? params.cwd : null;
     const input = Array.isArray(params.input) ? params.input : [];
     const imageAttachments = input.flatMap((item) => {
@@ -490,17 +1062,19 @@ export class DesktopBridgeTransport implements CodexTransport {
     const text = typeof message.text === "string" ? message.text : "";
     try {
       if (await this.options.client.promoteQueuedFollowUp(threadId, messageId, text)) {
-        this.onMessage?.({ id: request.id, result: { messageId } });
+        if (!this.isActiveQueueMutation(request)) return;
+        this.finishQueueRequest(request, { id: request.id, result: { messageId } });
         return;
       }
     } catch {
       // A hidden or remounting Desktop thread cannot expose its queue action.
     }
+    if (!this.isActiveQueueMutation(request)) return;
     const remaining = messages.filter((item) => item.id !== messageId);
     const nextState = { ...state };
     if (remaining.length > 0) nextState[threadId] = remaining;
     else delete nextState[threadId];
-    this.sendQueueWrite(request, "steer", threadId, nextState, remaining, message);
+    this.sendQueueWrite(request, "steer", threadId, nextState, remaining, message, messages);
   }
 
   private sendQueueWrite(
@@ -510,9 +1084,35 @@ export class DesktopBridgeTransport implements CodexTransport {
     state: Record<string, unknown>,
     messages: Record<string, unknown>[],
     message: Record<string, unknown>,
+    restoreMessages?: Record<string, unknown>[],
+    recoveryOutcome?: QueueRecoveryOutcome,
   ) {
     const requestId = randomUUID();
-    this.pendingQueueWrites.set(requestId, { request, operation, threadId, messages, message });
+    this.pendingQueueWrites.set(requestId, {
+      request,
+      operation,
+      threadId,
+      messages,
+      message,
+      restoreMessages,
+      recoveryOutcome,
+    });
+    this.trackQueueRequestTimeout(`fetch:${requestId}`, request, () => {
+      const pending = this.pendingQueueWrites.get(requestId);
+      if (!pending) return;
+      this.pendingQueueWrites.delete(requestId);
+      if (operation === "restore") {
+        this.scheduleQueueRecoveryRetry();
+        return;
+      }
+      this.sendQueueRestoreRead(
+        request,
+        threadId,
+        message,
+        operation === "add" ? messages : (restoreMessages ?? messages),
+        operation === "add" ? "add-pending" : "steer-error",
+      );
+    });
     this.dispatch({
       type: "fetch",
       requestId,
@@ -524,52 +1124,85 @@ export class DesktopBridgeTransport implements CodexTransport {
   }
 
   private async receiveQueueWrite(response: DesktopEnvelope, pending: PendingQueueWrite) {
+    if (!this.isActiveQueueMutation(pending.request)) return;
     if (
       response.responseType !== "success" ||
       typeof response.status !== "number" ||
       response.status < 200 ||
       response.status >= 300
     ) {
-      this.onMessage?.({
+      if (pending.operation === "restore") {
+        this.scheduleQueueRecoveryRetry();
+        return;
+      }
+      this.finishQueueRequest(pending.request, {
         id: pending.request.id,
-        error: { code: -32002, message: "Desktop queue update failed" },
+        error: {
+          code: -32002,
+          message: "Desktop queue update failed",
+        },
+      });
+      return;
+    }
+    if (pending.operation !== "restore") this.persistedQueueMutation = pending;
+    if (pending.operation === "restore") {
+      try {
+        await this.options.client.broadcastQueuedFollowUps(pending.threadId, pending.messages);
+      } catch {
+        // The authoritative global state was restored even if the visible Desktop owner disappeared.
+      }
+      this.finishQueueRequest(pending.request, pending.recoveryOutcome === "add-pending" ? {
+        id: pending.request.id,
+        result: { message: pending.message, pendingConfirmation: true },
+      } : {
+        id: pending.request.id,
+        error: {
+          code: -32003,
+          message: "Desktop could not confirm the promotion; the message was kept queued",
+        },
       });
       return;
     }
     try {
       await this.options.client.broadcastQueuedFollowUps(pending.threadId, pending.messages);
-    } catch (cause) {
-      if (isOwnerTimeout(cause)) {
-        if (pending.operation === "add") {
-          this.onMessage?.({
-            id: pending.request.id,
-            result: { message: pending.message, pendingConfirmation: true },
-          });
-          return;
-        }
-        await this.promoteQueuedMessage(pending.request, pending.threadId, pending.message);
+    } catch {
+      if (!this.isActiveQueueMutation(pending.request)) return;
+      if (pending.operation === "add") {
+        this.finishQueueRequest(pending.request, {
+          id: pending.request.id,
+          result: { message: pending.message, pendingConfirmation: true },
+        });
         return;
       }
-      this.onMessage?.({
+      await this.promoteQueuedMessage(
+        pending.request,
+        pending.threadId,
+        pending.message,
+        pending.restoreMessages,
+      );
+      return;
+    }
+    if (!this.isActiveQueueMutation(pending.request)) return;
+    if (pending.operation === "add") {
+      this.finishQueueRequest(pending.request, {
         id: pending.request.id,
-        error: {
-          code: -32003,
-          message: cause instanceof Error ? cause.message : "Desktop queue broadcast failed",
-        },
+        result: { message: pending.message },
       });
       return;
     }
-    if (pending.operation === "add") {
-      this.onMessage?.({ id: pending.request.id, result: { message: pending.message } });
-      return;
-    }
-    await this.promoteQueuedMessage(pending.request, pending.threadId, pending.message);
+    await this.promoteQueuedMessage(
+      pending.request,
+      pending.threadId,
+      pending.message,
+      pending.restoreMessages,
+    );
   }
 
   private async promoteQueuedMessage(
     request: QueueRequest,
     threadId: string,
     message: Record<string, unknown>,
+    restoreMessages?: Record<string, unknown>[],
   ) {
     const text = typeof message.text === "string" ? message.text : "";
     const context = asRecord(message.context);
@@ -593,22 +1226,31 @@ export class DesktopBridgeTransport implements CodexTransport {
           clientUserMessageId: typeof message.id === "string" ? message.id : randomUUID(),
         },
       );
-      this.onMessage?.({ id: request.id, result: { messageId: message.id } });
+      this.finishQueueRequest(request, { id: request.id, result: { messageId: message.id } });
     } catch (cause) {
-      if (isOwnerTimeout(cause)) {
-        this.onMessage?.({
+      if (!this.isActiveQueueMutation(request)) return;
+      if (!restoreMessages) {
+        this.finishQueueRequest(request, {
           id: request.id,
-          result: { messageId: message.id, pendingConfirmation: true },
+          error: { code: -32003, message: "Desktop queue promotion failed" },
         });
         return;
       }
-      this.onMessage?.({
-        id: request.id,
-        error: {
-          code: -32003,
-          message: cause instanceof Error ? cause.message : "Desktop queue promotion failed",
-        },
-      });
+      if (isAmbiguousQueuePromotionError(cause)) {
+        this.sendQueueConfirmationRead(
+          request,
+          threadId,
+          message,
+          restoreMessages,
+        );
+        return;
+      }
+      this.sendQueueRestoreRead(
+        request,
+        threadId,
+        message,
+        restoreMessages,
+      );
     }
   }
 
@@ -649,8 +1291,7 @@ export class DesktopBridgeTransport implements CodexTransport {
       this.bridgeState = "read-only";
       this.pendingServerRequests.clear();
       this.pendingHostRequests.clear();
-      this.pendingQueueReads.clear();
-      this.pendingQueueWrites.clear();
+      this.failPendingQueueOperations();
       this.onDiagnostic?.({
         category: "protocol",
         message: cause
@@ -666,12 +1307,88 @@ export class DesktopBridgeTransport implements CodexTransport {
     }
   }
 
+  private failPendingQueueOperations() {
+    this.clearQueueRecoveryRetry();
+    for (const pending of this.queueRequestTimeouts.values()) clearTimeout(pending.timeout);
+    this.queueRequestTimeouts.clear();
+    const activeRequest = this.activeQueueMutation?.request;
+    const activeKey = activeRequest ? rpcKey(activeRequest.id) : undefined;
+    const uncertainWrite = activeKey
+      ? [...this.pendingQueueWrites.values()].find((pending) => (
+          rpcKey(pending.request.id) === activeKey && pending.operation !== "restore"
+        ))
+      : undefined;
+    if (!this.pendingQueueRecovery && uncertainWrite) {
+      this.pendingQueueRecovery = {
+        request: uncertainWrite.request,
+        threadId: uncertainWrite.threadId,
+        message: uncertainWrite.message,
+        originalMessages: uncertainWrite.operation === "add"
+          ? uncertainWrite.messages
+          : (uncertainWrite.restoreMessages ?? uncertainWrite.messages),
+        recoveryOutcome: uncertainWrite.operation === "add" ? "add-pending" : "steer-error",
+      };
+      this.ensureQueueRecoveryDeadline();
+    }
+    const persisted = this.persistedQueueMutation &&
+      rpcKey(this.persistedQueueMutation.request.id) === activeKey
+      ? this.persistedQueueMutation
+      : undefined;
+    const recovery = this.pendingQueueRecovery &&
+      rpcKey(this.pendingQueueRecovery.request.id) === activeKey
+      ? this.pendingQueueRecovery
+      : undefined;
+    const confirmation = this.pendingQueueConfirmation &&
+      rpcKey(this.pendingQueueConfirmation.request.id) === activeKey
+      ? this.pendingQueueConfirmation
+      : undefined;
+    const preserveMutation = (
+      this.activeQueueMutation?.operation === "steer" &&
+      Boolean(persisted || recovery || confirmation)
+    ) || recovery?.recoveryOutcome === "add-pending";
+    const requests = [
+      ...[...this.pendingQueueReads.values()].map((pending) => pending.request),
+      ...[...this.pendingQueueWrites.values()].map((pending) => pending.request),
+      ...(!preserveMutation && activeRequest ? [activeRequest] : []),
+      ...this.queuedQueueMutations.map((pending) => pending.request),
+    ];
+    this.pendingQueueReads.clear();
+    this.pendingQueueWrites.clear();
+    this.pendingQueueConfirmationRequests.clear();
+    this.queuedQueueMutations = [];
+    if (persisted?.operation === "add" && activeRequest) {
+      this.onMessage?.({
+        id: activeRequest.id,
+        result: { message: persisted.message, pendingConfirmation: true },
+      });
+      this.clearQueueRequestState(activeRequest);
+      this.activeQueueMutation = undefined;
+    } else if (!preserveMutation) {
+      if (activeRequest) this.clearQueueRequestState(activeRequest);
+      this.activeQueueMutation = undefined;
+    }
+    const failed = new Set<string>();
+    for (const request of requests) {
+      const key = rpcKey(request.id);
+      if (preserveMutation && key === activeKey) continue;
+      if (persisted?.operation === "add" && key === activeKey) continue;
+      if (failed.has(key)) continue;
+      failed.add(key);
+      this.onMessage?.({
+        id: request.id,
+        error: { code: -32005, message: "Desktop queue operation interrupted by disconnect" },
+      });
+    }
+  }
+
   private markConnected() {
     this.clearAppServerDisconnectVerification();
     if (this.bridgeState !== "read-only" || !this.capabilities.compatible) return;
     this.clearAppServerProbe();
     this.bridgeState = "live";
     this.onDiagnostic?.({ category: "protocol", message: "Desktop bridge reconnected" });
+    if (this.pendingQueueConfirmation) this.resumePendingQueueConfirmation();
+    else this.resumePendingQueueRecovery();
   }
 
   private scheduleAppServerDisconnectVerification() {
@@ -723,6 +1440,8 @@ export class DesktopBridgeTransport implements CodexTransport {
     this.bridgeState = "live";
     this.clearAppServerProbe();
     this.onDiagnostic?.({ category: "protocol", message: "Desktop bridge reconnected" });
+    if (this.pendingQueueConfirmation) this.resumePendingQueueConfirmation();
+    else this.resumePendingQueueRecovery();
   }
 
   private scheduleAppServerProbe() {
@@ -860,13 +1579,13 @@ function isOwnerUnavailable(cause: unknown) {
     message.includes("webcontents-destroyed");
 }
 
-function isOwnerTimeout(cause: unknown) {
+function isAmbiguousQueuePromotionError(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
-  return message === "desktop-cdp-owner-call-timeout" ||
-    ([
-      "desktop-thread-owner-request-failed:",
-      "desktop-queue-broadcast-failed:",
-    ].some((prefix) => message.startsWith(prefix)) && message.endsWith("Error: timeout"));
+  return !(
+    message.includes("no active turn to steer") ||
+    message.includes("turn is not active") ||
+    message.includes("turn already completed")
+  );
 }
 
 function isDesktopEnvelope(value: unknown): value is DesktopEnvelope {
@@ -881,10 +1600,12 @@ function isRpcMessage(value: unknown): value is RpcMessage {
   return typeof record.method === "string";
 }
 
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
+  return isRecordValue(value) ? value : {};
 }
 
 function sanitizeQueueMessages(value: unknown): Record<string, unknown>[] {
@@ -896,6 +1617,91 @@ function sanitizeQueueMessages(value: unknown): Record<string, unknown>[] {
     typeof (item as Record<string, unknown>).id === "string" &&
     typeof (item as Record<string, unknown>).text === "string"
   ));
+}
+
+function inspectQueueConfirmation(
+  value: unknown,
+  query: PendingQueueConfirmation["query"],
+  threadId: string,
+  messageId: string,
+): {
+  status: "accepted" | "absent" | "fallback" | "invalid";
+  nextCursor?: string;
+} {
+  const result = asRecord(value);
+  let turns: unknown[];
+  let nextCursor: string | undefined;
+  if (query === "thread/read") {
+    const thread = asRecord(result.thread);
+    if (thread.id !== threadId) return { status: "invalid" };
+    if (thread.historyMode === "paginated") return { status: "fallback" };
+    if (!Array.isArray(thread.turns)) return { status: "invalid" };
+    turns = thread.turns;
+  } else {
+    if (!Array.isArray(result.data)) return { status: "invalid" };
+    if (
+      result.nextCursor !== undefined &&
+      result.nextCursor !== null &&
+      typeof result.nextCursor !== "string"
+    ) return { status: "invalid" };
+    nextCursor = typeof result.nextCursor === "string" && result.nextCursor
+      ? result.nextCursor
+      : undefined;
+    turns = result.data;
+  }
+
+  for (const turnValue of turns) {
+    const turn = asRecord(turnValue);
+    if (!Array.isArray(turn.items)) return { status: "invalid" };
+    for (const itemValue of turn.items) {
+      const item = asRecord(itemValue);
+      if (Object.keys(item).length === 0) return { status: "invalid" };
+      if (item.type !== "userMessage") continue;
+      if (
+        item.clientId === messageId ||
+        item.clientMessageId === messageId ||
+        item.clientUserMessageId === messageId ||
+        item.client_message_id === messageId ||
+        item.client_user_message_id === messageId
+      ) return { status: "accepted" };
+    }
+  }
+  return { status: "absent", nextCursor };
+}
+
+function mergeRestoredQueueMessage(
+  currentMessages: Record<string, unknown>[],
+  originalMessages: Record<string, unknown>[],
+  message: Record<string, unknown>,
+) {
+  const messageId = typeof message.id === "string" ? message.id : undefined;
+  if (messageId && currentMessages.some((item) => item.id === messageId)) return currentMessages;
+  const originalIndex = messageId
+    ? originalMessages.findIndex((item) => item.id === messageId)
+    : -1;
+  if (originalIndex < 0) return [...currentMessages, message];
+
+  for (const successor of originalMessages.slice(originalIndex + 1)) {
+    const successorIndex = currentMessages.findIndex((item) => item.id === successor.id);
+    if (successorIndex >= 0) {
+      return [
+        ...currentMessages.slice(0, successorIndex),
+        message,
+        ...currentMessages.slice(successorIndex),
+      ];
+    }
+  }
+  for (const predecessor of originalMessages.slice(0, originalIndex).reverse()) {
+    const predecessorIndex = currentMessages.findIndex((item) => item.id === predecessor.id);
+    if (predecessorIndex >= 0) {
+      return [
+        ...currentMessages.slice(0, predecessorIndex + 1),
+        message,
+        ...currentMessages.slice(predecessorIndex + 1),
+      ];
+    }
+  }
+  return [...currentMessages, message];
 }
 
 function rpcKey(id: string | number) {

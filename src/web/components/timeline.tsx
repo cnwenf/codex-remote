@@ -187,7 +187,7 @@ function MessageSegment({
     return (
       <article className="message message-user" data-user-message="true">
         <span className="message-author">你</span>
-        <MarkdownContent text={item.text || "等待输入…"} onOpenExternalUrl={onOpenExternalUrl} />
+        {item.text ? <MarkdownContent text={item.text} onOpenExternalUrl={onOpenExternalUrl} /> : null}
         {item.imageIds?.length ? (
           <div className="message-images">
             {item.imageIds.map((imageId, index) => (
@@ -216,6 +216,7 @@ function AuthenticatedImage({ imageId, request, alt }: { imageId: string; reques
   const [source, setSource] = useState(request ? undefined : fallback);
   useEffect(() => {
     if (!request) { setSource(fallback); return; }
+    setSource(undefined);
     let disposed = false;
     let objectUrl: string | undefined;
     void fetch(`${request.baseUrl}/api/images/${encodeURIComponent(imageId)}`, {
@@ -233,7 +234,17 @@ function AuthenticatedImage({ imageId, request, alt }: { imageId: string; reques
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [fallback, imageId, request?.baseUrl, request?.token]);
-  return source ? <img src={source} alt={alt} loading="lazy" /> : <span className="image-loading">正在加载图片…</span>;
+  return source ? (
+    <a
+      className="message-image-link"
+      href={source}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`打开${alt}`}
+    >
+      <img src={source} alt={alt} loading="lazy" />
+    </a>
+  ) : <span className="image-loading">正在加载图片…</span>;
 }
 
 type TurnSegment =

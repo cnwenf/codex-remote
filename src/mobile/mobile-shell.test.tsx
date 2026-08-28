@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -7,12 +7,21 @@ const mocks = vi.hoisted(() => ({
   isNativePlatform: vi.fn(() => false),
   capacitorHttpGet: vi.fn(),
   capacitorHttpRequest: vi.fn(),
+  imageUploadFailed: vi.fn(),
+  imageBody: "image",
   capacitorListeners: new Map<string, (...args: unknown[]) => void>(),
   nativePlugin: {
     addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
     getLaunchTarget: vi.fn(async () => ({})),
     openExternalUrl: vi.fn(async () => undefined),
     startMonitoring: vi.fn(async () => undefined),
+    startImageUpload: vi.fn(async () => ({ uploadId: "native-upload-1" })),
+    appendImageUpload: vi.fn(async (_options: { data: string }) => undefined),
+    finishImageUpload: vi.fn(async () => ({
+      status: 201,
+      data: { id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 },
+    })),
+    cancelImageUpload: vi.fn(async () => undefined),
   },
 }));
 
@@ -24,8 +33,8 @@ vi.mock("../web/app", () => ({
       <button type="button" onClick={() => remote.onOpenExternalUrl?.("https://docs.example.test/path")}>Open docs</button>
       <button type="button" onClick={() => remote.onOpenConnection?.("mac-2")}>Switch connection</button>
       <button type="button" onClick={() => void remote.imageUploader?.(
-        new File(["image"], "screen.png", { type: "image/png" }),
-      )}>Upload image</button>
+        new File([mocks.imageBody], "screen.png", { type: "image/png" }),
+      ).catch(mocks.imageUploadFailed)}>Upload image</button>
     </main>
   ),
 }));
@@ -73,6 +82,7 @@ describe("MobileShell updates", () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
     mocks.isNativePlatform.mockReturnValue(false);
+    mocks.imageBody = "image";
     mocks.capacitorListeners.clear();
     window.history.replaceState(null, "");
   });
@@ -216,20 +226,19 @@ describe("MobileShell updates", () => {
     );
   });
 
-  it("uploads conversation images through native HTTP inside the installed app", async () => {
+  it("stages conversation images in bounded native chunks before streaming the upload", async () => {
     mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
     mocks.isNativePlatform.mockReturnValue(true);
+    mocks.imageBody = "x".repeat(300_000);
     mocks.capacitorHttpGet.mockResolvedValue({
       status: 200,
       data: { version: 1, generatedAt: 1, threads: [] },
       headers: {},
       url: "https://remote.example.test/api/mobile/status",
     });
-    mocks.capacitorHttpRequest.mockResolvedValue({
-      status: 201,
-      data: { id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 },
-      headers: { "content-type": "application/json" },
-      url: "https://remote.example.test/api/images",
+    const chunks: Uint8Array[] = [];
+    mocks.nativePlugin.appendImageUpload.mockImplementation(async ({ data }: { data: string }) => {
+      chunks.push(Uint8Array.from(Buffer.from(data, "base64")));
     });
     const connection = { id: "mac-1", name: "Office Mac", baseUrl: "https://remote.example.test", lastUsedAt: 1, pairingStatus: "ready" as const };
     const store = {
@@ -246,20 +255,48 @@ describe("MobileShell updates", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
     await userEvent.click(await screen.findByRole("button", { name: "Upload image" }));
 
-    await waitFor(() => expect(mocks.capacitorHttpRequest).toHaveBeenCalledWith({
+    await waitFor(() => expect(mocks.nativePlugin.finishImageUpload).toHaveBeenCalledWith({
+      uploadId: "native-upload-1",
       url: "https://remote.example.test/api/images",
-      method: "POST",
-      headers: {
-        authorization: "Bearer test-token",
-        "content-type": "image/png",
-        "x-file-name": "screen.png",
-      },
-      data: "aW1hZ2U=",
-      dataType: "file",
-      responseType: "json",
-      disableRedirects: true,
+      token: "test-token",
+      fileName: "screen.png",
+      mimeType: "image/png",
     }));
+    expect(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString()).toBe(mocks.imageBody);
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => chunk.byteLength <= 256 * 1024)).toBe(true);
+    expect(mocks.capacitorHttpRequest).not.toHaveBeenCalled();
     expect(webFetch).not.toHaveBeenCalled();
+  });
+
+  it("stops a native image upload that never settles instead of leaving send busy forever", async () => {
+    vi.useFakeTimers();
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    mocks.isNativePlatform.mockReturnValue(true);
+    mocks.capacitorHttpGet.mockResolvedValue({ status: 200, data: {}, headers: {}, url: "" });
+    mocks.nativePlugin.appendImageUpload.mockImplementation(() => new Promise(() => undefined));
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "https://remote.example.test", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+      select: vi.fn(async () => undefined),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: /Office Mac/ }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    fireEvent.click(screen.getByRole("button", { name: "Upload image" }));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(mocks.imageUploadFailed).toHaveBeenCalledWith(expect.objectContaining({
+      message: "图片上传超时，请检查连接后重试",
+    }));
+    expect(mocks.nativePlugin.cancelImageUpload).toHaveBeenCalledWith({ uploadId: "native-upload-1" });
   });
 
   it("keeps WebView fetch for the non-native MobileShell preview", async () => {

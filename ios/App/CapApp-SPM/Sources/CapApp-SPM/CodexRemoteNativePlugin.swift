@@ -11,6 +11,9 @@ private let monitorDefaultsKey = "codex-remote.monitor.v1"
 private let monitorStatesKey = "codex-remote.monitor.states.v1"
 private let launchTargetKey = "codex-remote.launch-target.v1"
 private let openThreadNotification = Notification.Name("CodexRemoteOpenThread")
+private let maximumImageBytes = 10 * 1024 * 1024
+private let maximumImageChunkBytes = 256 * 1024
+private let maximumImageResponseBytes = 64 * 1024
 
 @objc(CodexRemoteNativePlugin)
 public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
@@ -25,7 +28,14 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getLaunchTarget", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "scanConnection", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openExternalUrl", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "startImageUpload", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "appendImageUpload", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "finishImageUpload", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cancelImageUpload", returnType: CAPPluginReturnPromise),
     ]
+    private let imageUploadLock = NSLock()
+    private var pendingImageUploads: [String: URL] = [:]
+    private var activeImageUploads: [String: URLSessionUploadTask] = [:]
 
     public override func load() {
         NotificationCenter.default.addObserver(
@@ -121,9 +131,160 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    @objc public func startImageUpload(_ call: CAPPluginCall) {
+        do {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("codex-remote-image-uploads", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let uploadId = UUID().uuidString.lowercased()
+            let file = directory.appendingPathComponent("image-upload-\(uploadId).part")
+            guard FileManager.default.createFile(atPath: file.path, contents: nil) else {
+                call.reject("图片上传准备失败，请重试"); return
+            }
+            imageUploadLock.lock()
+            pendingImageUploads[uploadId] = file
+            imageUploadLock.unlock()
+            call.resolve(["uploadId": uploadId])
+        } catch {
+            call.reject("图片上传准备失败，请重试")
+        }
+    }
+
+    @objc public func appendImageUpload(_ call: CAPPluginCall) {
+        guard
+            let uploadId = call.getString("uploadId"),
+            let encoded = call.getString("data"),
+            encoded.count <= 350_000,
+            let bytes = Data(base64Encoded: encoded),
+            bytes.count <= maximumImageChunkBytes
+        else { call.reject("图片上传数据无效"); return }
+        do {
+            imageUploadLock.lock()
+            defer { imageUploadLock.unlock() }
+            guard let file = pendingImageUploads[uploadId] else {
+                call.reject("图片上传已失效，请重试"); return
+            }
+            let handle = try FileHandle(forWritingTo: file)
+            defer { try? handle.close() }
+            let currentSize = try handle.seekToEnd()
+            guard currentSize + UInt64(bytes.count) <= UInt64(maximumImageBytes) else {
+                pendingImageUploads.removeValue(forKey: uploadId)
+                try? FileManager.default.removeItem(at: file)
+                call.reject("图片不能超过 10 MB"); return
+            }
+            try handle.write(contentsOf: bytes)
+            call.resolve()
+        } catch {
+            cancelPendingImageUpload(uploadId)
+            call.reject("图片上传准备失败，请重试")
+        }
+    }
+
+    @objc public func finishImageUpload(_ call: CAPPluginCall) {
+        guard
+            let uploadId = call.getString("uploadId"),
+            let value = call.getString("url"),
+            let url = URL(string: value),
+            Self.isAllowedImageUploadURL(url),
+            let token = call.getString("token"), !token.isEmpty, !Self.containsNewline(token),
+            let fileName = call.getString("fileName"), fileName.count <= 1024, !Self.containsNewline(fileName),
+            let mimeType = call.getString("mimeType"), Self.allowedImageMimeTypes.contains(mimeType.lowercased())
+        else { call.reject("图片上传参数无效"); return }
+        imageUploadLock.lock()
+        let file = pendingImageUploads.removeValue(forKey: uploadId)
+        imageUploadLock.unlock()
+        guard let file else { call.reject("图片上传已失效，请重试"); return }
+
+        var request = URLRequest(url: url, timeoutInterval: 45)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(mimeType.lowercased(), forHTTPHeaderField: "Content-Type")
+        request.setValue(fileName, forHTTPHeaderField: "X-File-Name")
+        request.setValue("Codex-Remote-iOS", forHTTPHeaderField: "User-Agent")
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 45
+        configuration.waitsForConnectivity = false
+        let session = URLSession(configuration: configuration, delegate: NoRedirectSessionDelegate(), delegateQueue: nil)
+        let task = session.uploadTask(with: request, fromFile: file) { [weak self] data, response, error in
+            defer {
+                try? FileManager.default.removeItem(at: file)
+                self?.imageUploadLock.lock()
+                self?.activeImageUploads.removeValue(forKey: uploadId)
+                self?.imageUploadLock.unlock()
+                session.finishTasksAndInvalidate()
+            }
+            guard
+                error == nil,
+                let response = response as? HTTPURLResponse,
+                let data,
+                data.count <= maximumImageResponseBytes
+            else { call.reject("图片上传失败，请检查连接后重试"); return }
+            let responseValue: Any
+            if let json = try? JSONSerialization.jsonObject(with: data) { responseValue = json }
+            else { responseValue = String(data: data, encoding: .utf8) ?? "" }
+            call.resolve(["status": response.statusCode, "data": responseValue])
+        }
+        imageUploadLock.lock()
+        activeImageUploads[uploadId] = task
+        imageUploadLock.unlock()
+        task.resume()
+    }
+
+    @objc public func cancelImageUpload(_ call: CAPPluginCall) {
+        guard let uploadId = call.getString("uploadId") else { call.resolve(); return }
+        cancelPendingImageUpload(uploadId)
+        imageUploadLock.lock()
+        let task = activeImageUploads.removeValue(forKey: uploadId)
+        imageUploadLock.unlock()
+        task?.cancel()
+        call.resolve()
+    }
+
+    private func cancelPendingImageUpload(_ uploadId: String) {
+        imageUploadLock.lock()
+        let file = pendingImageUploads.removeValue(forKey: uploadId)
+        imageUploadLock.unlock()
+        if let file { try? FileManager.default.removeItem(at: file) }
+    }
+
+    private static let allowedImageMimeTypes: Set<String> = [
+        "image/png", "image/jpeg", "image/gif", "image/webp",
+    ]
+
+    private static func isAllowedImageUploadURL(_ url: URL) -> Bool {
+        guard
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+            !(components.host ?? "").isEmpty,
+            components.user == nil,
+            components.password == nil,
+            components.query == nil,
+            components.fragment == nil
+        else { return false }
+        return components.percentEncodedPath == "/api/images"
+    }
+
+    private static func containsNewline(_ value: String) -> Bool {
+        value.contains("\r") || value.contains("\n")
+    }
+
     @objc private func openThread(_ notification: Notification) {
         guard let target = notification.userInfo as? [String: String] else { return }
         notifyListeners("openThread", data: target)
+    }
+}
+
+private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
 

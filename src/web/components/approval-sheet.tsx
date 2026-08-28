@@ -22,7 +22,13 @@ export function ApprovalSheet({
   const questions = parseQuestions(params.questions);
   const isUserInput = request.method.includes("requestUserInput");
 
-  useEffect(() => denyRef.current?.focus(), []);
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : undefined;
+    denyRef.current?.focus();
+    return () => previous?.focus();
+  }, []);
 
   function resolve(decision: ApprovalDecision) {
     if (resolved) return;

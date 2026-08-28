@@ -190,6 +190,50 @@ describe("DesktopCdpClient", () => {
     await client.stop();
   });
 
+  it("does not use blank text as a fallback when promoting a pure-image queue item", async () => {
+    server = new FakeCdpServer();
+    const endpoint = await server.start();
+    const client = new DesktopCdpClient({ endpoint });
+    await client.start(() => undefined, () => undefined);
+
+    await client.promoteQueuedFollowUp("thread-1", "missing-image-id", "");
+    const source = String(server.requests.at(-1)?.params?.functionDeclaration);
+    const clicked = vi.fn();
+    const root = {
+      __reactFiber$test: { memoizedProps: { conversationId: "thread-1" }, return: null },
+    };
+    const blankCandidate = {
+      querySelectorAll: () => [{ innerText: "Steer", getAttribute: () => null, click: clicked }],
+      parentElement: null,
+    };
+    const blankTextNode = { nodeValue: "", parentElement: blankCandidate };
+    const document = {
+      body: {},
+      querySelector: (selector: string) => selector.includes("permissions") ? root : null,
+      createTreeWalker: () => {
+        let returned = false;
+        return {
+          nextNode: () => {
+            if (returned) return null;
+            returned = true;
+            return blankTextNode;
+          },
+        };
+      },
+    };
+    const CSS = { escape: (value: string) => value };
+    const NodeFilter = { SHOW_TEXT: 4 };
+    const promote = eval(`(${source})`) as (
+      conversationId: string,
+      messageId: string,
+      text: string,
+    ) => boolean;
+
+    expect(promote("thread-1", "missing-image-id", "")).toBe(false);
+    expect(clicked).not.toHaveBeenCalled();
+    await client.stop();
+  });
+
   it("serializes visible Desktop setting updates", async () => {
     server = new FakeCdpServer();
     server.visibleSettingsSyncDelayMs = 40;

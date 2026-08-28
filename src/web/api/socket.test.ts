@@ -249,6 +249,41 @@ describe("CodexSocket", () => {
     expect(sockets).toHaveLength(3);
   });
 
+  it("retries only once when a hidden page becomes visible during reconnect backoff", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeBrowserSocket[] = [];
+    const visibilityListeners = new Set<() => void>();
+    let visible = false;
+    const socket = new CodexSocket(() => {
+      const next = new FakeBrowserSocket();
+      sockets.push(next);
+      return next;
+    }, {
+      reconnectDelaysMs: [1_000],
+      random: () => 0.5,
+      addWindowListener: (name, listener) => {
+        if (name === "visibilitychange") visibilityListeners.add(listener);
+      },
+      removeWindowListener: (_name, listener) => visibilityListeners.delete(listener),
+      isDocumentVisible: () => visible,
+    });
+
+    await socket.connect("", "ws://127.0.0.1/rpc");
+    sockets[0].close();
+    for (const listener of visibilityListeners) listener();
+    await Promise.resolve();
+    expect(sockets).toHaveLength(1);
+
+    visible = true;
+    for (const listener of visibilityListeners) listener();
+    for (const listener of visibilityListeners) listener();
+    await Promise.resolve();
+
+    expect(sockets).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(sockets).toHaveLength(2);
+  });
+
   it("does not reconnect after a deliberate disconnect", async () => {
     vi.useFakeTimers();
     const sockets: FakeBrowserSocket[] = [];

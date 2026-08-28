@@ -186,11 +186,14 @@ export class DesktopCdpClient {
           const byId = document.querySelector('[data-message-id="' + CSS.escape(messageId) + '"]');
           const candidates = [];
           if (byId) candidates.push(byId);
-          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-          let node;
-          while ((node = walker.nextNode())) {
-            if ((node.nodeValue || '').trim() === text.trim() && node.parentElement) {
-              candidates.push(node.parentElement);
+          const normalizedText = text.trim();
+          if (normalizedText) {
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+              if ((node.nodeValue || '').trim() === normalizedText && node.parentElement) {
+                candidates.push(node.parentElement);
+              }
             }
           }
           for (const candidate of candidates) {

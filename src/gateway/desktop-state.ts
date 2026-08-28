@@ -59,6 +59,7 @@ type ParsedTurn = {
   id: string;
   status: "inProgress" | "completed" | "interrupted" | "failed";
   items: ParsedItem[];
+  completeFromTurnStart?: boolean;
   startedAt?: number;
   completedAt?: number;
   durationMs?: number;
@@ -755,12 +756,22 @@ function displayTitle(
   row: Pick<ThreadRow, "name" | "title" | "preview">,
   preferredTitle?: string,
 ) {
-  const raw = preferredTitle?.trim() || row.name?.trim() || row.title.trim() || row.preview.trim();
+  const raw = [preferredTitle, row.name, row.title, row.preview]
+    .map((value) => value?.trim() ?? "")
+    .find((value) => value && !isInjectedContextTitle(value));
   if (!raw) return "新对话";
   const normalized = raw.replace(/\s+/g, " ");
   return normalized.length <= MAX_TITLE_TEXT
     ? normalized
     : `${normalized.slice(0, MAX_TITLE_TEXT)}…`;
+}
+
+function isInjectedContextTitle(value: string) {
+  const normalized = value.trimStart().toLowerCase();
+  return /^#{1,3}\s*agents\.md instructions\b/i.test(value) ||
+    normalized.startsWith("## 你的运行上下文(本次执行自动注入)") ||
+    normalized.startsWith("the following is externally-sourced assignment context.") ||
+    normalized.startsWith("<environment_context>");
 }
 
 function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
@@ -789,7 +800,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     const payload = asRecord(entry.payload);
     if (entry.type === "turn_context") {
       currentTurnId = stringValue(payload.turn_id) ?? currentTurnId;
-      if (currentTurnId) ensureTurn(currentTurnId);
+      if (currentTurnId) ensureTurn(currentTurnId).completeFromTurnStart = true;
       continue;
     }
     if (entry.type === "event_msg") {
@@ -818,6 +829,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
         currentTurnId = turnId;
         const turn = ensureTurn(turnId);
         turn.status = "inProgress";
+        turn.completeFromTurnStart = true;
         turn.startedAt = timestampValue(payload.started_at);
       } else if ((eventType === "task_complete" || eventType === "turn_aborted") && turnId) {
         const turn = ensureTurn(turnId);
@@ -876,6 +888,13 @@ function rolloutItem(
   if (type === "message") {
     const role = stringValue(payload.role);
     if (role !== "user" && role !== "assistant") return undefined;
+    const metadata = asRecord(payload.internal_chat_message_metadata_passthrough);
+    const contentKinds = Array.isArray(metadata.content_item_kinds)
+      ? metadata.content_item_kinds.filter((value): value is string => typeof value === "string")
+      : [];
+    if (role === "user" && contentKinds.length > 0 && !contentKinds.some((kind) => kind.startsWith("user."))) {
+      return undefined;
+    }
     const text = textContent(payload.content);
     if (!text && (role !== "user" || pendingUserImageIds.length === 0)) return undefined;
     return {

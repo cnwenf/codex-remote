@@ -7,6 +7,7 @@ import android.content.pm.ResolveInfo;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
+import android.util.Base64;
 import androidx.activity.result.ActivityResult;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
@@ -25,6 +26,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -36,14 +38,30 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 @CapacitorPlugin(name = "CodexRemoteNative")
 public class CodexRemoteNativePlugin extends Plugin {
+    private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_IMAGE_CHUNK_BYTES = 256 * 1024;
+    private static final int MAX_IMAGE_RESPONSE_BYTES = 64 * 1024;
     private EncryptedSecretStore secrets;
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService imageUploadExecutor = Executors.newCachedThreadPool();
     private final AtomicBoolean updateInProgress = new AtomicBoolean(false);
     private File pendingUpdateFile;
+    private NativeImageUploadStaging imageUploadStaging;
 
     @Override
     public void load() {
         secrets = new EncryptedSecretStore(getContext());
+        imageUploadStaging = new NativeImageUploadStaging(
+            new File(getContext().getCacheDir(), "image-uploads"),
+            MAX_IMAGE_BYTES
+        );
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        if (imageUploadStaging != null) imageUploadStaging.cancelAll();
+        imageUploadExecutor.shutdownNow();
+        super.handleOnDestroy();
     }
 
     @PluginMethod
@@ -149,6 +167,90 @@ public class CodexRemoteNativePlugin extends Plugin {
         } catch (Exception error) {
             call.reject("external-url-open-failed", error);
         }
+    }
+
+    @PluginMethod
+    public void startImageUpload(PluginCall call) {
+        try {
+            JSObject result = new JSObject();
+            result.put("uploadId", imageUploadStaging.start());
+            call.resolve(result);
+        } catch (Exception error) {
+            call.reject("图片上传准备失败，请重试");
+        }
+    }
+
+    @PluginMethod
+    public void appendImageUpload(PluginCall call) {
+        String uploadId = call.getString("uploadId");
+        String data = call.getString("data");
+        if (uploadId == null || data == null || data.length() > 350_000) {
+            call.reject("图片上传数据无效");
+            return;
+        }
+        try {
+            byte[] bytes = Base64.decode(data, Base64.DEFAULT);
+            if (bytes.length > MAX_IMAGE_CHUNK_BYTES) {
+                imageUploadStaging.cancel(uploadId);
+                call.reject("图片上传数据无效");
+                return;
+            }
+            imageUploadStaging.append(uploadId, bytes);
+            call.resolve();
+        } catch (IllegalArgumentException error) {
+            imageUploadStaging.cancel(uploadId);
+            call.reject("图片不能超过 10 MB");
+        } catch (Exception error) {
+            imageUploadStaging.cancel(uploadId);
+            call.reject("图片上传准备失败，请重试");
+        }
+    }
+
+    @PluginMethod
+    public void finishImageUpload(PluginCall call) {
+        String uploadId = call.getString("uploadId");
+        String url = call.getString("url");
+        String token = call.getString("token");
+        String fileName = call.getString("fileName");
+        String mimeType = call.getString("mimeType");
+        if (
+            uploadId == null || token == null || token.isEmpty() || containsNewline(token) ||
+            fileName == null || fileName.length() > 1024 || containsNewline(fileName) ||
+            !NativeImageUploadSupport.isAllowedUploadUrl(url) ||
+            !NativeImageUploadSupport.isAllowedMimeType(mimeType)
+        ) {
+            if (uploadId != null) imageUploadStaging.cancel(uploadId);
+            call.reject("图片上传参数无效");
+            return;
+        }
+        final File staged;
+        try {
+            staged = imageUploadStaging.claim(uploadId);
+        } catch (Exception error) {
+            call.reject("图片上传已失效，请重试");
+            return;
+        }
+        try {
+            imageUploadExecutor.execute(() -> {
+                try {
+                    call.resolve(uploadImage(staged, url, token, fileName, mimeType));
+                } catch (Exception error) {
+                    call.reject("图片上传失败，请检查连接后重试");
+                } finally {
+                    staged.delete();
+                }
+            });
+        } catch (Exception error) {
+            staged.delete();
+            call.reject("图片上传失败，请重试");
+        }
+    }
+
+    @PluginMethod
+    public void cancelImageUpload(PluginCall call) {
+        String uploadId = call.getString("uploadId");
+        if (uploadId != null) imageUploadStaging.cancel(uploadId);
+        call.resolve();
     }
 
     @PluginMethod
@@ -300,6 +402,63 @@ public class CodexRemoteNativePlugin extends Plugin {
         } finally {
             connection.disconnect();
         }
+    }
+
+    private JSObject uploadImage(File source, String value, String token, String fileName, String mimeType) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(value).openConnection();
+        try {
+            connection.setConnectTimeout(15_000);
+            connection.setReadTimeout(30_000);
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setFixedLengthStreamingMode(source.length());
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            connection.setRequestProperty("Content-Type", mimeType.toLowerCase(Locale.ROOT));
+            connection.setRequestProperty("X-File-Name", fileName);
+            connection.setRequestProperty("User-Agent", "Codex-Remote-Android");
+            try (InputStream input = new BufferedInputStream(new FileInputStream(source));
+                 OutputStream output = connection.getOutputStream()) {
+                byte[] buffer = new byte[32 * 1024];
+                int read;
+                while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+                output.flush();
+            }
+            int status = connection.getResponseCode();
+            InputStream responseStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            String body = readBoundedText(responseStream, MAX_IMAGE_RESPONSE_BYTES);
+            Object data = body;
+            try {
+                if (!body.isEmpty()) data = new JSObject(body);
+            } catch (Exception ignored) {
+                // The shared response validator will reject a malformed success response.
+            }
+            JSObject result = new JSObject();
+            result.put("status", status);
+            result.put("data", data);
+            return result;
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static String readBoundedText(InputStream input, int maximumBytes) throws Exception {
+        if (input == null) return "";
+        try (InputStream stream = new BufferedInputStream(input);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = stream.read(buffer)) != -1) {
+                if (output.size() + read > maximumBytes) throw new IllegalStateException("image-upload-response-too-large");
+                output.write(buffer, 0, read);
+            }
+            return output.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+    private static boolean containsNewline(String value) {
+        return value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0;
     }
 
     private HttpURLConnection openConnection(String value) throws Exception {

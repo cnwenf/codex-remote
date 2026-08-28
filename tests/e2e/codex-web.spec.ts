@@ -164,15 +164,23 @@ test("pins the latest long user question in two lines after it leaves the mobile
   await page.getByRole("button", { name: "Send" }).click();
   const viewport = page.getByTestId("timeline-scroll");
   await expect(page.locator(".message-user", { hasText: question })).toHaveCount(1);
-  await page.locator(".activity-group summary").last().dispatchEvent("click");
-  await page.getByText("查看代码变更").dispatchEvent("click");
+  await expect(page.getByRole("heading", { name: "Checks complete", level: 2 })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Run a command?" })).toBeVisible();
+  await page.locator(".activity-group").last().evaluate((element: HTMLDetailsElement) => {
+    element.open = true;
+  });
+  await page.locator(".diff-panel").evaluate((element: HTMLDetailsElement) => {
+    element.open = true;
+  });
   await viewport.evaluate((element) => {
-    const prompts = element.querySelectorAll<HTMLElement>("[data-user-message='true']");
-    const prompt = prompts.item(prompts.length - 1);
-    if (!prompt) throw new Error("missing user prompt");
-    element.scrollTop += prompt.getBoundingClientRect().bottom - element.getBoundingClientRect().top + 12;
+    element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
   });
+  await expect.poll(() => viewport.evaluate((element) => {
+    const prompts = element.querySelectorAll<HTMLElement>("[data-user-message='true']");
+    const prompt = prompts.item(prompts.length - 1);
+    return Boolean(prompt && prompt.getBoundingClientRect().bottom <= element.getBoundingClientRect().top);
+  })).toBe(true);
 
   const pinned = page.locator(".pinned-user-question");
   await expect(page.getByRole("button", { name: `展开原始问题：${question}` })).toBeVisible();
@@ -212,8 +220,7 @@ test("keeps an unsent draft for its conversation across reload", async ({ page }
   await page.getByRole("textbox", { name: "Instruction" }).fill("Unsent fixture draft");
 
   await page.reload();
-  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
-  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await expect(page.getByRole("heading", { name: "Fixture task" })).toBeVisible();
   await page.getByRole("textbox", { name: "Instruction" }).focus();
 
   await expect(page.getByRole("textbox", { name: "Instruction" })).toHaveValue("Unsent fixture draft");
@@ -236,7 +243,20 @@ test("uploads an image and sends it with the conversation", async ({ page }) => 
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByText("screen.png")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "打开用户上传的图片 1" })).toBeVisible();
+  await expect(page.getByText("等待输入…")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Checks complete", level: 2 })).toBeVisible();
+
+  await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
+  await page.getByLabel("添加图片").setInputFiles({
+    name: "running-only.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
+  });
+  await page.getByRole("button", { name: "Steer" }).dispatchEvent("click");
+  await expect(page.getByText("running-only.png")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /打开用户上传的图片/ })).toHaveCount(2);
+  await expect(page.getByText("等待输入…")).toHaveCount(0);
 });
 
 test("new conversation selects project permission model and reasoning effort", async ({ page }) => {
@@ -335,6 +355,20 @@ test("mobile browser back swipe history returns to the conversation list", async
   await page.evaluate(() => window.history.back());
   await expect(page.getByTestId("task-list-scroll")).toBeVisible();
   await expect(page).toHaveURL(/127\.0\.0\.1:4318\/?$/);
+});
+
+test("keeps a usable conversation viewport in a short landscape window", async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("textbox", { name: "Instruction" }).focus();
+
+  const viewport = await page.getByTestId("timeline-scroll").boundingBox();
+  expect(viewport).not.toBeNull();
+  expect(viewport!.height).toBeGreaterThanOrEqual(120);
 });
 
 test("shows conversation actions in one floating menu without shifting the desktop row", async ({ page }) => {

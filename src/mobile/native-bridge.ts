@@ -14,6 +14,11 @@ export type MonitorConnection = {
   token: string;
 };
 
+export type NativeImageUploadResult = {
+  status: number;
+  data: unknown;
+};
+
 export interface CodexRemoteNativePlugin {
   readSecret(options: { id: string }): Promise<{ value?: string }>;
   writeSecret(options: { id: string; value: string }): Promise<void>;
@@ -23,6 +28,16 @@ export interface CodexRemoteNativePlugin {
   getLaunchTarget(): Promise<MobileThreadTarget | Record<string, never>>;
   scanConnection(): Promise<{ value: string }>;
   openExternalUrl(options: { url: string }): Promise<void>;
+  startImageUpload(): Promise<{ uploadId: string }>;
+  appendImageUpload(options: { uploadId: string; data: string }): Promise<void>;
+  finishImageUpload(options: {
+    uploadId: string;
+    url: string;
+    token: string;
+    fileName: string;
+    mimeType: string;
+  }): Promise<NativeImageUploadResult>;
+  cancelImageUpload(options: { uploadId: string }): Promise<void>;
   downloadAndInstallUpdate(options: {
     url: string;
     checksumUrl: string;

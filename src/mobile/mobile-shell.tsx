@@ -31,6 +31,8 @@ import { mobileCopy } from "./mobile-copy";
 
 type MobileView = "connections" | "form" | "remote" | "settings";
 const CONNECTION_STATUS_TIMEOUT_MS = 8_000;
+const IMAGE_UPLOAD_CHUNK_BYTES = 256 * 1024;
+const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
 const CONNECTION_STATUS_REFRESH_MS = 15_000;
 
 type ConnectionStatusCheck = {
@@ -489,23 +491,44 @@ async function verifyRemote(baseUrl: string, token: string, signal?: AbortSignal
 }
 
 async function uploadNativeImage(baseUrl: string, token: string, file: File) {
-  const response = await CapacitorHttp.request({
-    url: `${normalizeRemoteUrl(baseUrl)}/api/images`,
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": file.type,
-      "x-file-name": encodeURIComponent(file.name),
-    },
-    data: await fileAsBase64(file),
-    dataType: "file",
-    responseType: "json",
-    disableRedirects: true,
+  let uploadId: string | undefined;
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      reject(new Error("图片上传超时，请检查连接后重试"));
+    }, IMAGE_UPLOAD_TIMEOUT_MS);
   });
-  return uploadedImageFromResponse(response.status, response.data);
+  const upload = (async () => {
+    const started = await CodexRemoteNative.startImageUpload();
+    uploadId = started.uploadId;
+    for (let offset = 0; offset < file.size; offset += IMAGE_UPLOAD_CHUNK_BYTES) {
+      const data = await blobAsBase64(file.slice(offset, offset + IMAGE_UPLOAD_CHUNK_BYTES));
+      if (timedOut) throw new Error("图片上传超时，请检查连接后重试");
+      await CodexRemoteNative.appendImageUpload({ uploadId, data });
+    }
+    if (timedOut) throw new Error("图片上传超时，请检查连接后重试");
+    const response = await CodexRemoteNative.finishImageUpload({
+      uploadId,
+      url: `${normalizeRemoteUrl(baseUrl)}/api/images`,
+      token,
+      fileName: encodeURIComponent(file.name),
+      mimeType: file.type,
+    });
+    return uploadedImageFromResponse(response.status, response.data);
+  })();
+  try {
+    return await Promise.race([upload, timeoutPromise]);
+  } catch (cause) {
+    if (uploadId) await CodexRemoteNative.cancelImageUpload({ uploadId }).catch(() => undefined);
+    throw cause;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
-function fileAsBase64(file: File) {
+function blobAsBase64(blob: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.addEventListener("load", () => {
@@ -521,7 +544,7 @@ function fileAsBase64(file: File) {
       resolve(reader.result.slice(separator + 1));
     });
     reader.addEventListener("error", () => reject(new Error("图片读取失败")));
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(blob);
   });
 }
 

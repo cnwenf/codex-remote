@@ -950,6 +950,20 @@ describe("gateway server", () => {
       });
       expect(spoofed.status).toBe(415);
 
+      const empty = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: { origin, cookie, "content-type": "image/png" },
+        body: Buffer.alloc(0),
+      });
+      expect(empty.status).toBe(400);
+
+      const unsupported = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: { origin, cookie, "content-type": "image/svg+xml" },
+        body: Buffer.from("<svg xmlns=\"http://www.w3.org/2000/svg\"/>", "utf8"),
+      });
+      expect(unsupported.status).toBe(415);
+
       const oversized = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
         method: "POST",
         headers: {

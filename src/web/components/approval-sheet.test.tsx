@@ -19,6 +19,24 @@ describe("ApprovalSheet", () => {
     expect(onResolve).not.toHaveBeenCalled();
   });
 
+  it("returns focus to the previous control after the dialog closes", () => {
+    const onResolve = vi.fn();
+    const { rerender } = render(<button type="button">Composer action</button>);
+    const trigger = screen.getByRole("button", { name: "Composer action" });
+    trigger.focus();
+    expect(trigger).toHaveFocus();
+
+    rerender(<>
+      <button type="button">Composer action</button>
+      <ApprovalSheet request={request} onResolve={onResolve} />
+    </>);
+    expect(screen.getByRole("button", { name: "Deny" })).toHaveFocus();
+
+    rerender(<button type="button">Composer action</button>);
+
+    expect(screen.getByRole("button", { name: "Composer action" })).toHaveFocus();
+  });
+
   it("resolves a request exactly once", async () => {
     const onResolve = vi.fn();
     render(<ApprovalSheet request={request} onResolve={onResolve} />);

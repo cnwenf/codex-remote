@@ -84,6 +84,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
         if (remote?.requestedThreadId) {
           pushView("thread", remote.requestedThreadId);
           await codex.selectThread(remote.requestedThreadId);
+        } else {
+          await restoreHistoryView(window.history.state);
         }
       })
       .catch(() => undefined);
@@ -93,14 +95,12 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     if (!asRemoteView(window.history.state)) {
       window.history.replaceState({ ...historyRecord(window.history.state), codexRemoteView: "list" }, "");
     }
-    const handleBack = () => {
-      setComposerExpanded(false);
-      setShowNewConversation(false);
-      codex.clearSelection();
+    const handleNavigation = (event: PopStateEvent) => {
+      void restoreHistoryView(event.state);
     };
-    window.addEventListener("popstate", handleBack);
-    return () => window.removeEventListener("popstate", handleBack);
-  }, [codex.clearSelection]);
+    window.addEventListener("popstate", handleNavigation);
+    return () => window.removeEventListener("popstate", handleNavigation);
+  }, [codex.clearSelection, codex.selectThread]);
 
   useEffect(() => {
     if (!codex.desktopControlAvailable || desktopRestartNotice !== copy.restartWaiting) return;
@@ -121,6 +121,24 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
       codexRemoteView: view,
       ...(threadId ? { codexRemoteThreadId: threadId } : {}),
     }, "");
+  }
+
+  async function restoreHistoryView(value: unknown) {
+    setComposerExpanded(false);
+    const view = asRemoteView(value);
+    const threadId = historyRecord(value).codexRemoteThreadId;
+    if (view === "thread" && typeof threadId === "string" && threadId) {
+      setShowNewConversation(false);
+      await codex.selectThread(threadId);
+      return;
+    }
+    if (view === "new") {
+      codex.clearSelection();
+      setShowNewConversation(true);
+      return;
+    }
+    setShowNewConversation(false);
+    codex.clearSelection();
   }
 
   function returnToList() {

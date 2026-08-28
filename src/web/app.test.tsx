@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
@@ -183,6 +183,62 @@ describe("App", () => {
       state: { codexRemoteView: "list" },
     })));
     expect(value.clearSelection).toHaveBeenCalled();
+  });
+
+  it("reopens the same conversation when browser history moves forward", async () => {
+    const thread = {
+      id: "thread-1",
+      title: "Forward history task",
+      status: "idle",
+      turnOrder: [],
+      turns: {},
+    };
+    const value = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+    });
+    useCodexMock.mockReturnValue(value);
+    window.history.replaceState({ codexRemoteView: "list" }, "", "/");
+    render(<App />);
+
+    await userEvent.click(screen.getByRole("button", { name: /^Forward history task，/ }));
+    value.selectThread.mockClear();
+    value.clearSelection.mockClear();
+    act(() => window.dispatchEvent(new PopStateEvent("popstate", {
+      state: { codexRemoteView: "list" },
+    })));
+    value.clearSelection.mockClear();
+
+    act(() => window.dispatchEvent(new PopStateEvent("popstate", {
+      state: { codexRemoteView: "thread", codexRemoteThreadId: thread.id },
+    })));
+
+    expect(value.selectThread).toHaveBeenCalledWith(thread.id);
+    expect(value.clearSelection).not.toHaveBeenCalled();
+  });
+
+  it("restores the selected conversation after a page reload", async () => {
+    const thread = {
+      id: "thread-1",
+      title: "Reloaded task",
+      status: "running",
+      turnOrder: [],
+      turns: {},
+    };
+    const value = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready",
+    });
+    useCodexMock.mockReturnValue(value);
+    window.history.replaceState({
+      codexRemoteView: "thread",
+      codexRemoteThreadId: thread.id,
+    }, "", "/");
+
+    render(<App />);
+
+    await waitFor(() => expect(value.selectThread).toHaveBeenCalledWith(thread.id));
+    expect(value.clearSelection).not.toHaveBeenCalled();
   });
 
   it("groups the native mobile conversation title, back action, status, and connection", () => {

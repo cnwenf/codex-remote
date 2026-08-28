@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { CodexThread } from "../../protocol/thread-store";
@@ -379,6 +379,36 @@ describe("Timeline", () => {
     expect(container.querySelector("script")).toBeNull();
   });
 
+  it("strips executable Markdown URLs while isolating ordinary external links", () => {
+    const thread: CodexThread = {
+      id: "unsafe-links",
+      title: "Unsafe links",
+      status: "idle",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          itemOrder: ["agent"],
+          items: {
+            agent: {
+              id: "agent",
+              type: "agentMessage",
+              text: "[脚本](javascript:alert(1)) [数据](data:text/html,<script>alert(1)</script>) [安全](https://example.com/docs)",
+            },
+          },
+        },
+      },
+    };
+
+    render(<Timeline thread={thread} />);
+
+    expect(screen.getByText("脚本").closest("a")).toHaveAttribute("href", "");
+    expect(screen.getByText("数据").closest("a")).toHaveAttribute("href", "");
+    expect(screen.getByRole("link", { name: "安全" })).toHaveAttribute("href", "https://example.com/docs");
+    expect(screen.getByRole("link", { name: "安全" })).toHaveAttribute("rel", "noreferrer noopener");
+  });
+
   it("routes conversation web links through the native browser callback", async () => {
     const openExternalUrl = vi.fn();
     const thread: CodexThread = {
@@ -438,5 +468,124 @@ describe("Timeline", () => {
       "src",
       "/api/images/e77e86c9-bc6b-4aaa-9b6a-d87a55f694c1",
     );
+    expect(screen.getByRole("link", { name: "打开用户上传的图片 1" })).toHaveAttribute(
+      "href",
+      "/api/images/e77e86c9-bc6b-4aaa-9b6a-d87a55f694c1",
+    );
+  });
+
+  it("opens remotely authenticated images from a revocable blob URL", async () => {
+    const createObjectURL = vi.fn(() => "blob:authenticated-image");
+    const revokeObjectURL = vi.fn();
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+    const fetchImage = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      blob: vi.fn(async () => new Blob(["image"], { type: "image/png" })),
+    } as unknown as Response);
+    const thread: CodexThread = {
+      id: "remote-image",
+      title: "Remote image",
+      status: "idle",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          itemOrder: ["user"],
+          items: {
+            user: { id: "user", type: "userMessage", text: "远端图片", imageIds: ["remote-image-id"] },
+          },
+        },
+      },
+    };
+
+    try {
+      const { unmount } = render(<Timeline
+        thread={thread}
+        imageRequest={{ baseUrl: "https://remote.example.test", token: "secret-token" }}
+      />);
+
+      const link = await screen.findByRole("link", { name: "打开用户上传的图片 1" });
+      await waitFor(() => expect(link).toHaveAttribute("href", "blob:authenticated-image"));
+      expect(fetchImage).toHaveBeenCalledWith(
+        "https://remote.example.test/api/images/remote-image-id",
+        { headers: { authorization: "Bearer secret-token" } },
+      );
+      expect(createObjectURL).toHaveBeenCalledOnce();
+
+      unmount();
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:authenticated-image");
+    } finally {
+      fetchImage.mockRestore();
+      if (originalCreateObjectURL) {
+        Object.defineProperty(URL, "createObjectURL", { configurable: true, value: originalCreateObjectURL });
+      } else {
+        Reflect.deleteProperty(URL, "createObjectURL");
+      }
+      if (originalRevokeObjectURL) {
+        Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: originalRevokeObjectURL });
+      } else {
+        Reflect.deleteProperty(URL, "revokeObjectURL");
+      }
+    }
+  });
+
+  it("does not render an input placeholder for an image-only user message", () => {
+    const thread: CodexThread = {
+      id: "image-only",
+      title: "Image only",
+      status: "idle",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          itemOrder: ["user"],
+          items: {
+            user: {
+              id: "user",
+              type: "userMessage",
+              text: "",
+              imageIds: ["image-only-id"],
+            },
+          },
+        },
+      },
+    };
+
+    render(<Timeline thread={thread} />);
+
+    expect(screen.queryByText("等待输入…")).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "用户上传的图片 1" })).toBeVisible();
+  });
+
+  it("does not flash an input placeholder while image metadata is still arriving", () => {
+    const thread: CodexThread = {
+      id: "image-pending-metadata",
+      title: "Image metadata pending",
+      status: "running",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "inProgress",
+          itemOrder: ["user"],
+          items: {
+            user: {
+              id: "user",
+              type: "userMessage",
+              text: "",
+            },
+          },
+        },
+      },
+    };
+
+    render(<Timeline thread={thread} />);
+
+    expect(screen.queryByText("等待输入…")).not.toBeInTheDocument();
   });
 });

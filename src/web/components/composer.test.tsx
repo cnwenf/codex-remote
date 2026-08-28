@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { Composer } from "./composer";
@@ -77,6 +77,19 @@ describe("Composer", () => {
     expect(input).toHaveValue("");
   });
 
+  it("submits only once when the send button is double-clicked", async () => {
+    let finish: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const onSend = vi.fn(() => pending);
+    render(<Composer onSend={onSend} running={false} />);
+
+    await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "Send once");
+    await userEvent.dblClick(screen.getByRole("button", { name: "Send" }));
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    await act(async () => finish?.());
+  });
+
   it("keeps composer text when sending fails", async () => {
     const onSend = vi.fn().mockRejectedValue(new Error("offline"));
     render(<Composer onSend={onSend} running={false} />);
@@ -89,11 +102,35 @@ describe("Composer", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("offline");
   });
 
+  it("does not submit a composing IME value on the send shortcut", async () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} running={false} />);
+    const input = screen.getByRole("textbox", { name: "Instruction" });
+    await userEvent.type(input, "拼音输入中");
+
+    fireEvent.keyDown(input, { key: "Enter", metaKey: true, isComposing: true });
+
+    expect(onSend).not.toHaveBeenCalled();
+    expect(input).toHaveValue("拼音输入中");
+  });
+
   it("offers stop and steer while a task is running", () => {
     render(<Composer onSend={vi.fn()} running onStop={vi.fn()} expanded />);
 
     expect(screen.getByRole("button", { name: "Steer" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  });
+
+  it("interrupts only once when the stop button is double-clicked", async () => {
+    let finish: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const onStop = vi.fn(() => pending);
+    render(<Composer onSend={vi.fn()} running onStop={onStop} expanded />);
+
+    await userEvent.dblClick(screen.getByRole("button", { name: "Stop" }));
+
+    expect(onStop).toHaveBeenCalledTimes(1);
+    await act(async () => finish?.());
   });
 
   it("labels the running Desktop action as queue", () => {
@@ -126,6 +163,18 @@ describe("Composer", () => {
 
     expect(screen.getByText("keep.png")).toBeVisible();
     expect(screen.getByRole("alert")).toHaveTextContent("upload failed");
+  });
+
+  it("explains when an image selection exceeds the four-file limit", async () => {
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+    const images = Array.from({ length: 5 }, (_, index) =>
+      new File([`image-${index}`], `image-${index}.png`, { type: "image/png" })
+    );
+
+    await userEvent.upload(screen.getByLabelText("添加图片"), images);
+
+    expect(screen.getAllByRole("button", { name: /^移除 / })).toHaveLength(4);
+    expect(screen.getByRole("alert")).toHaveTextContent(/最多.*4.*张/);
   });
 
   it("shows and updates the current model reasoning effort and permission", async () => {

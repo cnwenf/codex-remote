@@ -111,7 +111,11 @@ export function Composer({
       setError("单张图片不能超过 10 MB");
       return;
     }
-    setError(undefined);
+    if (images.length + accepted.length > 4) {
+      setError("最多添加 4 张图片");
+    } else {
+      setError(undefined);
+    }
     setImages((current) => [...current, ...accepted].slice(0, 4));
   }
 
@@ -129,6 +133,7 @@ export function Composer({
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.nativeEvent.isComposing) return;
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       void submit();
