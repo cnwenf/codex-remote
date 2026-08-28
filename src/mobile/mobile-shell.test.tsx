@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   findMobileUpdate: vi.fn(),
   isNativePlatform: vi.fn(() => false),
   capacitorHttpGet: vi.fn(),
+  capacitorHttpRequest: vi.fn(),
   capacitorListeners: new Map<string, (...args: unknown[]) => void>(),
   nativePlugin: {
     addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
@@ -16,11 +17,15 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../web/app", () => ({
-  App: ({ remote }: { remote: { connectionId: string; onOpenConnection?(id: string): void; onOpenExternalUrl?(url: string): void } }) => (
+  App: ({ remote }: { remote: { connectionId: string; imageUploader?(file: File): Promise<unknown>; onOpenConnection?(id: string): void; onOpenExternalUrl?(url: string): void } }) => (
     <main>
       <span data-testid="active-connection">{remote.connectionId}</span>
+      <span data-testid="image-upload-transport">{remote.imageUploader ? "native" : "web"}</span>
       <button type="button" onClick={() => remote.onOpenExternalUrl?.("https://docs.example.test/path")}>Open docs</button>
       <button type="button" onClick={() => remote.onOpenConnection?.("mac-2")}>Switch connection</button>
+      <button type="button" onClick={() => void remote.imageUploader?.(
+        new File(["image"], "screen.png", { type: "image/png" }),
+      )}>Upload image</button>
     </main>
   ),
 }));
@@ -30,7 +35,7 @@ vi.mock("@capacitor/core", () => ({
     getPlatform: () => "android",
     isNativePlatform: mocks.isNativePlatform,
   },
-  CapacitorHttp: { get: mocks.capacitorHttpGet },
+  CapacitorHttp: { get: mocks.capacitorHttpGet, request: mocks.capacitorHttpRequest },
   registerPlugin: () => mocks.nativePlugin,
 }));
 
@@ -209,6 +214,72 @@ describe("MobileShell updates", () => {
       "https://remote.example.test/api/mobile/status",
       expect.anything(),
     );
+  });
+
+  it("uploads conversation images through native HTTP inside the installed app", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    mocks.isNativePlatform.mockReturnValue(true);
+    mocks.capacitorHttpGet.mockResolvedValue({
+      status: 200,
+      data: { version: 1, generatedAt: 1, threads: [] },
+      headers: {},
+      url: "https://remote.example.test/api/mobile/status",
+    });
+    mocks.capacitorHttpRequest.mockResolvedValue({
+      status: 201,
+      data: { id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 },
+      headers: { "content-type": "application/json" },
+      url: "https://remote.example.test/api/images",
+    });
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "https://remote.example.test", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+      select: vi.fn(async () => undefined),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    const webFetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("webview-fetch-blocked"));
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+    await userEvent.click(await screen.findByRole("button", { name: "Upload image" }));
+
+    await waitFor(() => expect(mocks.capacitorHttpRequest).toHaveBeenCalledWith({
+      url: "https://remote.example.test/api/images",
+      method: "POST",
+      headers: {
+        authorization: "Bearer test-token",
+        "content-type": "image/png",
+        "x-file-name": "screen.png",
+      },
+      data: "aW1hZ2U=",
+      dataType: "file",
+      responseType: "json",
+      disableRedirects: true,
+    }));
+    expect(webFetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps WebView fetch for the non-native MobileShell preview", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    mocks.isNativePlatform.mockReturnValue(false);
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "https://remote.example.test", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+      select: vi.fn(async () => undefined),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+
+    expect(await screen.findByTestId("image-upload-transport")).toHaveTextContent("web");
   });
 
   it("marks a stalled connection unavailable after a bounded status check", async () => {

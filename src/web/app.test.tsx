@@ -219,6 +219,25 @@ describe("App", () => {
     expect(document.querySelector(".desktop-thread-context")).toBeNull();
   });
 
+  it("passes the native image uploader into the conversation state", () => {
+    const imageUploader = vi.fn();
+
+    render(<App remote={{
+      connectionId: "mac-1",
+      name: "macmini",
+      baseUrl: "https://remote.example.test",
+      token: "test-token",
+      imageUploader,
+      onManageConnections: vi.fn(),
+    }} />);
+
+    expect(useCodexMock).toHaveBeenCalledWith(undefined, {
+      baseUrl: "https://remote.example.test",
+      token: "test-token",
+      imageUploader,
+    });
+  });
+
   it("returns to saved connections from the Remote title and switches connection tabs", async () => {
     const onManageConnections = vi.fn();
     const onOpenConnection = vi.fn();

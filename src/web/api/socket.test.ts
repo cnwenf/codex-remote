@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexSocket, createBrowserSession, type BrowserSocket } from "./socket";
+import { CodexSocket, createBrowserSession, type BrowserSocket, uploadImage } from "./socket";
 
 class FakeBrowserSocket implements BrowserSocket {
   readonly OPEN = 1;
@@ -108,6 +108,22 @@ describe("CodexSocket", () => {
     await expect(createBrowserSession("wrong", async () =>
       new Response(null, { status: 401 })
     )).rejects.toThrow("codex-session-login-failed");
+  });
+
+  it("uses a configured native image uploader instead of WebView fetch", async () => {
+    const image = new File(["image"], "screen.png", { type: "image/png" });
+    const uploaded = { id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 };
+    const imageUploader = vi.fn(async () => uploaded);
+    const webFetch = vi.fn(() => Promise.reject(new Error("webview-fetch-blocked")));
+
+    await expect(uploadImage(image, webFetch as typeof fetch, {
+      baseUrl: "https://remote.example.test",
+      token: "test-token",
+      imageUploader,
+    })).resolves.toEqual(uploaded);
+
+    expect(imageUploader).toHaveBeenCalledWith(image);
+    expect(webFetch).not.toHaveBeenCalled();
   });
 
   it("resolves a request when its response arrives", async () => {

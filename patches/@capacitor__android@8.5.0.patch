@@ -1,0 +1,13 @@
+diff --git a/capacitor/src/main/java/com/getcapacitor/plugin/util/CapacitorHttpUrlConnection.java b/capacitor/src/main/java/com/getcapacitor/plugin/util/CapacitorHttpUrlConnection.java
+index 6180d64200a1b325604ff8a497b600e82744fdd6..108ba98aa1608401a6db2a1acf3cdb0a1ddbd3c8 100644
+--- a/capacitor/src/main/java/com/getcapacitor/plugin/util/CapacitorHttpUrlConnection.java
++++ b/capacitor/src/main/java/com/getcapacitor/plugin/util/CapacitorHttpUrlConnection.java
+@@ -213,6 +213,8 @@ public class CapacitorHttpUrlConnection implements ICapacitorHttpUrlConnection {
+             try (DataOutputStream os = new DataOutputStream(connection.getOutputStream())) {
+                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                     os.write(Base64.getDecoder().decode(body.toString()));
++                } else {
++                    os.write(android.util.Base64.decode(body.toString(), android.util.Base64.DEFAULT));
+                 }
+                 os.flush();
+             }

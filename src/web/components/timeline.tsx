@@ -284,9 +284,16 @@ function segmentItems(items: CodexItem[]): TurnSegment[] {
   return segments;
 }
 
-export function TodoListDock({ todoList }: { todoList?: CodexThread["todoList"] }) {
+export function TodoListDock({
+  todoList,
+  running,
+}: {
+  todoList?: CodexThread["todoList"];
+  running: boolean;
+}) {
   const [open, setOpen] = useState(false);
   if (
+    !running ||
     !todoList ||
     todoList.items.length === 0 ||
     todoList.items.every((item) => item.status === "completed")

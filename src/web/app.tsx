@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { createBrowserSession, remoteSocketUrl } from "./api/socket";
+import { createBrowserSession, remoteSocketUrl, type UploadedImage } from "./api/socket";
 import { ApprovalSheet, type ApprovalResolution } from "./components/approval-sheet";
 import { BrandMark } from "./components/brand-mark";
 import { Composer } from "./components/composer";
@@ -22,6 +22,7 @@ export type NativeRemoteSession = {
   requestedThreadId?: string;
   language?: MobileLanguage;
   messageSendMode?: MobileMessageSendMode;
+  imageUploader?: (file: File) => Promise<UploadedImage>;
   connections?: Array<{
     id: string;
     name: string;
@@ -36,7 +37,11 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
   const language = remote?.language ?? "zh-CN";
   const copy = appCopy(language);
   const separator = language === "en" ? ", " : "，";
-  const codex = useCodex(undefined, remote ? { baseUrl: remote.baseUrl, token: remote.token } : {});
+  const codex = useCodex(undefined, remote ? {
+    baseUrl: remote.baseUrl,
+    token: remote.token,
+    imageUploader: remote.imageUploader,
+  } : {});
   const autoConnectAttempted = useRef(false);
   const remoteSwipeOrigin = useRef<{ x: number; y: number } | null>(null);
   const [decisionNotice, setDecisionNotice] = useState<string>();
@@ -423,7 +428,10 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 ) : null}
               </ConversationViewport>
               <div className={`conversation-controls ${composerExpanded ? "controls-expanded" : "controls-collapsed"}`}>
-                <TodoListDock todoList={codex.selectedThread.todoList} />
+                <TodoListDock
+                  todoList={codex.selectedThread.todoList}
+                  running={codex.selectedThread.status === "running"}
+                />
                 <QueuedFollowUps
                   messages={codex.selectedQueuedMessages ?? []}
                   onSteer={codex.steerQueuedMessage}

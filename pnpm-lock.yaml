@@ -9,6 +9,11 @@ overrides:
   vite: 7.3.5
   ws: 8.21.0
 
+patchedDependencies:
+  '@capacitor/android@8.5.0':
+    hash: 84c43c7f8f678d348eea1e9a55731da3870f08e854b120e80ff95ef4e1b16ae7
+    path: patches/@capacitor__android@8.5.0.patch
+
 importers:
 
   .:
@@ -43,7 +48,7 @@ importers:
     devDependencies:
       '@capacitor/android':
         specifier: ^8.5.0
-        version: 8.5.0(@capacitor/core@8.5.0)
+        version: 8.5.0(patch_hash=84c43c7f8f678d348eea1e9a55731da3870f08e854b120e80ff95ef4e1b16ae7)(@capacitor/core@8.5.0)
       '@capacitor/cli':
         specifier: ^8.5.0
         version: 8.5.0
@@ -1957,7 +1962,7 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@capacitor/android@8.5.0(@capacitor/core@8.5.0)':
+  '@capacitor/android@8.5.0(patch_hash=84c43c7f8f678d348eea1e9a55731da3870f08e854b120e80ff95ef4e1b16ae7)(@capacitor/core@8.5.0)':
     dependencies:
       '@capacitor/core': 8.5.0
 

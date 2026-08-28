@@ -4,6 +4,7 @@ import { LocalNotifications } from "@capacitor/local-notifications";
 import { useEffect, useMemo, useRef, useState } from "react";
 import packageInfo from "../../package.json";
 import { App, type NativeRemoteSession } from "../web/app";
+import { uploadedImageFromResponse } from "../web/api/socket";
 import { CapacitorConnectionPersistence } from "./capacitor-persistence";
 import { ConnectionForm } from "./connection-form";
 import { ConnectionList } from "./connection-list";
@@ -284,6 +285,9 @@ export function MobileShell({
         requestedThreadId,
         language: settings.language,
         messageSendMode: settings.messageSendMode,
+        imageUploader: Capacitor.isNativePlatform()
+          ? (file) => uploadNativeImage(connection.baseUrl, token, file)
+          : undefined,
         connections: availableConnections.map(({ id: connectionId, name, pairingStatus }) => ({
           id: connectionId,
           name,
@@ -482,6 +486,43 @@ async function verifyRemote(baseUrl: string, token: string, signal?: AbortSignal
   });
   if (response.status === 401) throw new Error("remote-auth-failed");
   if (!response.ok) throw new Error("remote-unreachable");
+}
+
+async function uploadNativeImage(baseUrl: string, token: string, file: File) {
+  const response = await CapacitorHttp.request({
+    url: `${normalizeRemoteUrl(baseUrl)}/api/images`,
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": file.type,
+      "x-file-name": encodeURIComponent(file.name),
+    },
+    data: await fileAsBase64(file),
+    dataType: "file",
+    responseType: "json",
+    disableRedirects: true,
+  });
+  return uploadedImageFromResponse(response.status, response.data);
+}
+
+function fileAsBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("图片读取失败"));
+        return;
+      }
+      const separator = reader.result.indexOf(",");
+      if (separator < 0) {
+        reject(new Error("图片读取失败"));
+        return;
+      }
+      resolve(reader.result.slice(separator + 1));
+    });
+    reader.addEventListener("error", () => reject(new Error("图片读取失败")));
+    reader.readAsDataURL(file);
+  });
 }
 
 function messageForError(cause: unknown, language: MobileSettings["language"] = "zh-CN") {

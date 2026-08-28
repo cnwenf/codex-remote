@@ -6,3 +6,5 @@ overrides:
   esbuild: 0.28.1
   vite: 7.3.5
   ws: 8.21.0
+patchedDependencies:
+  '@capacitor/android@8.5.0': patches/@capacitor__android@8.5.0.patch

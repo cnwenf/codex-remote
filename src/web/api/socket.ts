@@ -280,6 +280,7 @@ export type UploadedImage = {
 export type RemoteApiOptions = {
   baseUrl?: string;
   token?: string;
+  imageUploader?: (file: File) => Promise<UploadedImage>;
 };
 
 export async function uploadImage(
@@ -287,6 +288,7 @@ export async function uploadImage(
   fetcher: typeof fetch = fetch,
   options: RemoteApiOptions = {},
 ): Promise<UploadedImage> {
+  if (options.imageUploader) return options.imageUploader(file);
   const response = await fetcher(`${options.baseUrl ?? ""}/api/images`, {
     method: "POST",
     credentials: options.baseUrl ? "omit" : "same-origin",
@@ -297,13 +299,15 @@ export async function uploadImage(
     },
     body: file,
   });
-  if (!response.ok) {
-    if (response.status === 413) throw new Error("图片不能超过 10 MB");
-    if (response.status === 415) throw new Error("仅支持 PNG、JPEG、GIF 和 WebP 图片");
-    if (response.status === 401) throw new Error("登录已失效，请重新登录");
-    throw new Error("图片上传失败");
-  }
-  const value = await response.json() as unknown;
+  const value = response.ok ? await response.json() as unknown : undefined;
+  return uploadedImageFromResponse(response.status, value);
+}
+
+export function uploadedImageFromResponse(status: number, value: unknown): UploadedImage {
+  if (status === 413) throw new Error("图片不能超过 10 MB");
+  if (status === 415) throw new Error("仅支持 PNG、JPEG、GIF 和 WebP 图片");
+  if (status === 401) throw new Error("登录已失效，请重新登录");
+  if (status < 200 || status >= 300) throw new Error("图片上传失败");
   if (!value || typeof value !== "object") throw new Error("图片上传响应无效");
   const image = value as Record<string, unknown>;
   if (

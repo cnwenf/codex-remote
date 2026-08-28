@@ -796,7 +796,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         }
       }
     },
-    [desktopControlAvailable, reconciler, remoteApi.baseUrl, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
+    [desktopControlAvailable, reconciler, remoteApi.baseUrl, remoteApi.imageUploader, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
   );
 
   const steerQueuedMessage = useCallback(async (messageId: string) => {

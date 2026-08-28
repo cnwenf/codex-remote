@@ -74,6 +74,20 @@ describe("native installer contract", () => {
     expect(nativePlugin).toContain("grantUriPermission");
   });
 
+  it("keeps Capacitor raw file uploads compatible with Android API 24 and 25", () => {
+    const capacitorHttp = readFileSync(join(
+      root,
+      "node_modules/@capacitor/android/capacitor/src/main/java/com/getcapacitor/plugin/util/CapacitorHttpUrlConnection.java",
+    ), "utf8");
+    const fileBranchStart = capacitorHttp.indexOf('bodyType.equals("file")');
+    const fileBranchEnd = capacitorHttp.indexOf('contentType.contains("application/x-www-form-urlencoded")', fileBranchStart);
+    const fileBranch = capacitorHttp.slice(fileBranchStart, fileBranchEnd);
+
+    expect(fileBranchStart).toBeGreaterThan(-1);
+    expect(fileBranchEnd).toBeGreaterThan(fileBranchStart);
+    expect(fileBranch).toContain("android.util.Base64.decode");
+  });
+
   it("accepts only the pinned Android signing certificate", () => {
     const fixture = mkdtempSync(join(tmpdir(), "codex-remote-android-signing."));
     const apk = join(fixture, "app.apk");

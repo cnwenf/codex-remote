@@ -22,7 +22,7 @@ describe("Timeline", () => {
       },
     };
 
-    render(<TodoListDock todoList={thread.todoList} />);
+    render(<TodoListDock todoList={thread.todoList} running />);
 
     expect(screen.getByRole("button", { name: "任务进度，第 2/3 步" })).toBeVisible();
     expect(screen.queryByText("Keep this list current")).not.toBeInTheDocument();
@@ -31,6 +31,15 @@ describe("Timeline", () => {
     expect(screen.getByText("Inspect").closest("li")).toHaveClass("todo-completed");
     expect(screen.getByText("Implement").closest("li")).toHaveClass("todo-inProgress");
     expect(screen.getByText("Verify").closest("li")).toHaveClass("todo-pending");
+  });
+
+  it("hides an unfinished todo dock while the thread is idle", () => {
+    render(<TodoListDock
+      running={false}
+      todoList={{ items: [{ step: "Wait for the next turn", status: "inProgress" }] }}
+    />);
+
+    expect(screen.queryByRole("button", { name: /任务进度/ })).not.toBeInTheDocument();
   });
 
   it("does not bury the current todo inside the scrollable conversation history", () => {
@@ -47,7 +56,7 @@ describe("Timeline", () => {
   });
 
   it("hides the todo dock after every item is completed", () => {
-    render(<TodoListDock todoList={{
+    render(<TodoListDock running todoList={{
       explanation: "All work is done",
       items: [
         { step: "Implement", status: "completed" },
