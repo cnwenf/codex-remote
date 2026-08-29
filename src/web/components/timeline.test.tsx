@@ -403,8 +403,10 @@ describe("Timeline", () => {
 
     render(<Timeline thread={thread} />);
 
-    expect(screen.getByText("脚本").closest("a")).toHaveAttribute("href", "");
-    expect(screen.getByText("数据").closest("a")).toHaveAttribute("href", "");
+    expect(screen.queryByRole("link", { name: "脚本" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "数据" })).not.toBeInTheDocument();
+    expect(screen.getByText("脚本")).toHaveAttribute("data-invalid-link", "true");
+    expect(screen.getByText("数据")).toHaveAttribute("data-invalid-link", "true");
     expect(screen.getByRole("link", { name: "安全" })).toHaveAttribute("href", "https://example.com/docs");
     expect(screen.getByRole("link", { name: "安全" })).toHaveAttribute("rel", "noreferrer noopener");
   });
@@ -439,7 +441,7 @@ describe("Timeline", () => {
     expect(openExternalUrl).toHaveBeenCalledWith("http://192.168.1.20:8080/status");
   });
 
-  it("renders authenticated uploaded images in user messages", () => {
+  it("previews authenticated uploaded images without navigating away from the conversation", async () => {
     const thread: CodexThread = {
       id: "images",
       title: "Images",
@@ -468,10 +470,15 @@ describe("Timeline", () => {
       "src",
       "/api/images/e77e86c9-bc6b-4aaa-9b6a-d87a55f694c1",
     );
-    expect(screen.getByRole("link", { name: "打开用户上传的图片 1" })).toHaveAttribute(
-      "href",
+    expect(screen.queryByRole("link", { name: "打开用户上传的图片 1" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "预览用户上传的图片 1" }));
+    expect(screen.getByRole("dialog", { name: "用户上传的图片 1" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "用户上传的图片 1 预览" })).toHaveAttribute(
+      "src",
       "/api/images/e77e86c9-bc6b-4aaa-9b6a-d87a55f694c1",
     );
+    await userEvent.click(screen.getByRole("button", { name: "关闭图片预览" }));
+    expect(screen.queryByRole("dialog", { name: "用户上传的图片 1" })).not.toBeInTheDocument();
   });
 
   it("opens remotely authenticated images from a revocable blob URL", async () => {
@@ -508,8 +515,12 @@ describe("Timeline", () => {
         imageRequest={{ baseUrl: "https://remote.example.test", token: "secret-token" }}
       />);
 
-      const link = await screen.findByRole("link", { name: "打开用户上传的图片 1" });
-      await waitFor(() => expect(link).toHaveAttribute("href", "blob:authenticated-image"));
+      const preview = await screen.findByRole("button", { name: "预览用户上传的图片 1" });
+      await waitFor(() => expect(screen.getByRole("img", { name: "用户上传的图片 1" }))
+        .toHaveAttribute("src", "blob:authenticated-image"));
+      await userEvent.click(preview);
+      expect(screen.getByRole("img", { name: "用户上传的图片 1 预览" }))
+        .toHaveAttribute("src", "blob:authenticated-image");
       expect(fetchImage).toHaveBeenCalledWith(
         "https://remote.example.test/api/images/remote-image-id",
         { headers: { authorization: "Bearer secret-token" } },

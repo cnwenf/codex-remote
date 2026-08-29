@@ -517,13 +517,40 @@ describe("DesktopState", () => {
     state.close();
   });
 
+  it("removes Desktop attachment envelopes and local paths from persisted user messages", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const privatePath = "/private/local-only/attachment.png";
+    appendFileSync(rolloutPath, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "user-private-image",
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: `Visible prompt\n<image name=[Image #1] path="${privatePath}">\n</image>`,
+        }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+    }) + "\n");
+    const state = new DesktopState(databasePath);
+
+    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+    const message = result.thread.turns[0].items.find((item: any) => item.id === "user-private-image");
+
+    expect(message.text).toBe("Visible prompt");
+    expect(JSON.stringify(message)).not.toContain(privatePath);
+    expect(JSON.stringify(message)).not.toContain("<image");
+    state.close();
+  });
+
   it("imports Desktop-local image references into the authenticated image store", () => {
     const { databasePath, rolloutPath } = fixture();
     const desktopImage = join(dirname(databasePath), "desktop-attachment.png");
-    writeFileSync(desktopImage, Buffer.from([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-      0x00, 0x00, 0x00, 0x00,
-    ]));
+    writeFileSync(desktopImage, Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ));
     appendFileSync(rolloutPath, [
       {
         type: "response_item",

@@ -301,7 +301,10 @@ export function MobileShell({
         onOpenConnection: (connectionId) => { void openConnectionId(connectionId); },
         onOpenExternalUrl: (url) => {
           if (!window.confirm(mobileCopy(settings.language).openExternalConfirmation(externalUrlHost(url)))) return;
-          void CodexRemoteNative.openExternalUrl({ url }).catch(() => undefined);
+          setError(undefined);
+          void CodexRemoteNative.openExternalUrl({ url }).catch(() => {
+            setError(mobileCopy(settings.language).openExternalFailed);
+          });
         },
       });
       setView("remote");
@@ -407,7 +410,12 @@ export function MobileShell({
   }
 
   if (view === "remote" && active) {
-    return <App key={`${active.connectionId}:${active.requestedThreadId ?? ""}`} remote={active} />;
+    return (
+      <>
+        <App key={`${active.connectionId}:${active.requestedThreadId ?? ""}`} remote={active} />
+        {error ? <p className="mobile-remote-error" role="alert">{error}</p> : null}
+      </>
+    );
   }
   if (view === "form") {
     return (

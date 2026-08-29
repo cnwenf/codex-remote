@@ -1,5 +1,6 @@
 const imageEnvelopePattern = /<image\b[\s\S]*?<\/image>/gi;
 const standaloneImageTagPattern = /<image\b[^>]*>/gi;
+const standaloneImageClosingTagPattern = /<\/image>/gi;
 const requestMarkerPattern = /(?:^|\n)#{1,3}\s*My request:\s*/i;
 
 export function sameUserInput(
@@ -23,6 +24,7 @@ export function displayUserInput(value: string) {
   return request
     .replace(imageEnvelopePattern, "")
     .replace(standaloneImageTagPattern, "")
+    .replace(standaloneImageClosingTagPattern, "")
     .trim();
 }
 
@@ -32,7 +34,8 @@ function normalizeAttachedUserInput(value: string) {
   return normalizeWhitespace(
     request
       .replace(imageEnvelopePattern, " ")
-      .replace(standaloneImageTagPattern, " "),
+      .replace(standaloneImageTagPattern, " ")
+      .replace(standaloneImageClosingTagPattern, " "),
   );
 }
 

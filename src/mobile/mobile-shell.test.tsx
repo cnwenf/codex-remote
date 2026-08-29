@@ -164,6 +164,28 @@ describe("MobileShell updates", () => {
     expect(mocks.nativePlugin.openExternalUrl).toHaveBeenCalledWith({ url: "https://docs.example.test/path" });
   });
 
+  it("keeps the active conversation visible and reports a native external-link failure", async () => {
+    mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
+    mocks.nativePlugin.openExternalUrl.mockRejectedValueOnce(new Error("external-url-open-failed"));
+    const connection = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 1, pairingStatus: "ready" as const };
+    const store = {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+      select: vi.fn(async () => undefined),
+    };
+    const settingsStore = {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    };
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Open docs" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("无法在系统浏览器中打开链接");
+    expect(screen.getByTestId("active-connection")).toHaveTextContent("mac-1");
+  });
+
   it("opens on the connection list and checks saved connections without auto-opening the last one", async () => {
     mocks.findMobileUpdate.mockResolvedValue({ state: "current" });
     const office = { id: "mac-1", name: "Office Mac", baseUrl: "http://127.0.0.1:4318", lastUsedAt: 2, pairingStatus: "ready" as const };

@@ -23,7 +23,6 @@ export interface DesktopBridgeClient {
   sendDesktopMessage(message: unknown): Promise<void>;
   requestThreadOwner(method: string, params: unknown): Promise<unknown>;
   broadcastQueuedFollowUps(conversationId: string, messages: unknown[]): Promise<void>;
-  promoteQueuedFollowUp(conversationId: string, messageId: string, text: string): Promise<boolean>;
   stop(): Promise<void>;
 }
 
@@ -1010,7 +1009,6 @@ export class DesktopBridgeTransport implements CodexTransport {
       void this.promoteVisibleQueuedMessage(
         pending.request,
         threadId,
-        messageId,
         message,
         state,
         messages,
@@ -1054,23 +1052,12 @@ export class DesktopBridgeTransport implements CodexTransport {
   private async promoteVisibleQueuedMessage(
     request: QueueRequest,
     threadId: string,
-    messageId: string,
     message: Record<string, unknown>,
     state: Record<string, unknown>,
     messages: Record<string, unknown>[],
   ) {
-    const text = typeof message.text === "string" ? message.text : "";
-    try {
-      if (await this.options.client.promoteQueuedFollowUp(threadId, messageId, text)) {
-        if (!this.isActiveQueueMutation(request)) return;
-        this.finishQueueRequest(request, { id: request.id, result: { messageId } });
-        return;
-      }
-    } catch {
-      // A hidden or remounting Desktop thread cannot expose its queue action.
-    }
     if (!this.isActiveQueueMutation(request)) return;
-    const remaining = messages.filter((item) => item.id !== messageId);
+    const remaining = messages.filter((item) => item.id !== message.id);
     const nextState = { ...state };
     if (remaining.length > 0) nextState[threadId] = remaining;
     else delete nextState[threadId];
@@ -1212,19 +1199,20 @@ export class DesktopBridgeTransport implements CodexTransport {
           return typeof record.src === "string" ? [{ type: "localImage", path: record.src }] : [];
         })
       : [];
+    const ownerParams = {
+      conversationId: threadId,
+      input: [
+        ...(text ? [{ type: "text", text, text_elements: [] }] : []),
+        ...imageInput,
+      ],
+      restoreMessage: message,
+      attachments: [],
+      clientUserMessageId: typeof message.id === "string" ? message.id : randomUUID(),
+    };
     try {
       await this.options.client.requestThreadOwner(
         "thread-follower-steer-turn",
-        {
-          conversationId: threadId,
-          input: [
-            ...(text ? [{ type: "text", text, text_elements: [] }] : []),
-            ...imageInput,
-          ],
-          restoreMessage: message,
-          attachments: [],
-          clientUserMessageId: typeof message.id === "string" ? message.id : randomUUID(),
-        },
+        ownerParams,
       );
       this.finishQueueRequest(request, { id: request.id, result: { messageId: message.id } });
     } catch (cause) {
@@ -1234,6 +1222,20 @@ export class DesktopBridgeTransport implements CodexTransport {
           id: request.id,
           error: { code: -32003, message: "Desktop queue promotion failed" },
         });
+        return;
+      }
+      if (isInactiveQueueSteerError(cause)) {
+        try {
+          await this.options.client.requestThreadOwner("thread-follower-start-turn", ownerParams);
+          this.finishQueueRequest(request, { id: request.id, result: { messageId: message.id } });
+        } catch (startCause) {
+          if (!this.isActiveQueueMutation(request)) return;
+          if (isInactiveQueueSteerError(startCause)) {
+            this.sendQueueRestoreRead(request, threadId, message, restoreMessages);
+          } else {
+            this.sendQueueConfirmationRead(request, threadId, message, restoreMessages);
+          }
+        }
         return;
       }
       if (isAmbiguousQueuePromotionError(cause)) {
@@ -1580,12 +1582,14 @@ function isOwnerUnavailable(cause: unknown) {
 }
 
 function isAmbiguousQueuePromotionError(cause: unknown) {
+  return !isInactiveQueueSteerError(cause);
+}
+
+function isInactiveQueueSteerError(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
-  return !(
-    message.includes("no active turn to steer") ||
+  return message.includes("no active turn to steer") ||
     message.includes("turn is not active") ||
-    message.includes("turn already completed")
-  );
+    message.includes("turn already completed");
 }
 
 function isDesktopEnvelope(value: unknown): value is DesktopEnvelope {

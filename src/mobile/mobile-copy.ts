@@ -60,6 +60,7 @@ export function mobileCopy(language: MobileLanguage) {
     openExternalConfirmation: (host: string) => english
       ? `Open ${host} in your browser?`
       : `将在浏览器中打开 ${host}，是否继续？`,
+    openExternalFailed: english ? "Unable to open the link in the system browser" : "无法在系统浏览器中打开链接",
     downloadingVersion: (version: string) => english ? `Downloading ${version}` : `正在下载 ${version}`,
     preparingInstall: english ? "Preparing install…" : "准备安装…",
     connectionActions: english ? "Connection actions" : "连接操作",

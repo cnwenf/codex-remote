@@ -8,6 +8,7 @@ import type { Duplex } from "node:stream";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import type { MobileTask } from "../mobile/types";
 import { RpcRouter } from "../protocol/rpc-router";
+import { displayUserInput } from "../protocol/user-message-identity";
 import {
   isRpcRequest,
   isRpcResponse,
@@ -1035,12 +1036,28 @@ function enrichDesktopImageMessage(message: RpcMessage, imageStore: ImageUploadS
       return id ? [id] : [];
     }),
   ])];
-  if (imageIds.length === 0) return message;
+  const sanitizedText = displayUserInput(text);
+  const needsRedaction = sanitizedText !== text || Object.hasOwn(item, "local_images");
+  if (imageIds.length === 0 && !needsRedaction) return message;
+  const sanitizedContent = Array.isArray(item.content)
+    ? item.content.map((entry) => {
+        const record = recordValue(entry);
+        return typeof record.text === "string"
+          ? { ...record, text: displayUserInput(record.text) }
+          : entry;
+      })
+    : item.content;
+  const { local_images: _localImages, ...publicItem } = item;
   return {
     ...message,
     params: {
       ...params,
-      item: { ...item, imageIds },
+      item: {
+        ...publicItem,
+        text: sanitizedText,
+        ...(sanitizedContent !== undefined ? { content: sanitizedContent } : {}),
+        ...(imageIds.length > 0 ? { imageIds } : {}),
+      },
     },
   };
 }

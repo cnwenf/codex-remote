@@ -126,6 +126,14 @@ describe("CodexSocket", () => {
     expect(webFetch).not.toHaveBeenCalled();
   });
 
+  it("shows a clear format error when image bytes do not match the claimed PNG type", async () => {
+    const image = new File(["not a png"], "screen.png", { type: "image/png" });
+    const webFetch = vi.fn(async () => new Response(null, { status: 415 }));
+
+    await expect(uploadImage(image, webFetch as typeof fetch))
+      .rejects.toThrow("仅支持 PNG、JPEG、GIF 和 WebP 图片");
+  });
+
   it("resolves a request when its response arrives", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

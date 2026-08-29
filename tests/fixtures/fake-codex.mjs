@@ -150,7 +150,10 @@ lines.on("line", (line) => {
     });
     {
       const text = message.params?.input?.find?.((item) => item.type === "text")?.text;
-      if (text) {
+      const localImages = message.params?.input
+        ?.filter?.((item) => item.type === "localImage" && typeof item.path === "string")
+        .map((item) => item.path) ?? [];
+      if (text || localImages.length > 0) {
         const isSteer = message.method === "turn/steer";
         send({
           method: "item/started",
@@ -160,7 +163,8 @@ lines.on("line", (line) => {
             item: {
               id: isSteer ? "fixture-official-steer" : "fixture-live-user",
               type: isSteer ? "user_message" : "userMessage",
-              content: [{ type: "text", text }],
+              content: text ? [{ type: "text", text }] : [],
+              ...(localImages.length > 0 ? { local_images: localImages } : {}),
             },
           },
         });

@@ -6,10 +6,10 @@ class FakeBridgeClient implements DesktopBridgeClient {
   sent: unknown[] = [];
   ownerRequests: Array<{ method: string; params: unknown }> = [];
   queueBroadcasts: Array<{ conversationId: string; messages: unknown[] }> = [];
-  queuePromotions: Array<{ conversationId: string; messageId: string; text: string }> = [];
   queuePromotionResult = true;
   ownerRequestResult: unknown = { method: "thread-follower-update-thread-settings", result: { ok: true } };
   ownerRequestError?: Error;
+  ownerRequestHandler?: (method: string, params: unknown) => Promise<unknown>;
   queueBroadcastError?: Error;
   startCalls = 0;
   startFailures = 0;
@@ -32,6 +32,7 @@ class FakeBridgeClient implements DesktopBridgeClient {
 
   async requestThreadOwner(method: string, params: unknown) {
     this.ownerRequests.push({ method, params });
+    if (this.ownerRequestHandler) return this.ownerRequestHandler(method, params);
     if (this.ownerRequestError) throw this.ownerRequestError;
     return this.ownerRequestResult;
   }
@@ -39,11 +40,6 @@ class FakeBridgeClient implements DesktopBridgeClient {
   async broadcastQueuedFollowUps(conversationId: string, messages: unknown[]) {
     this.queueBroadcasts.push({ conversationId, messages });
     if (this.queueBroadcastError) throw this.queueBroadcastError;
-  }
-
-  async promoteQueuedFollowUp(conversationId: string, messageId: string, text: string) {
-    this.queuePromotions.push({ conversationId, messageId, text });
-    return this.queuePromotionResult;
   }
 
   async stop() {}
@@ -861,9 +857,15 @@ describe("DesktopBridgeTransport", () => {
     const { client, messages, transport } = await createStartedTransport();
     client.queuePromotionResult = false;
     let rejectOwner!: (cause: Error) => void;
-    client.requestThreadOwner = vi.fn(() => new Promise((_resolve, reject) => {
-      rejectOwner = reject;
-    }));
+    client.requestThreadOwner = vi.fn((method: string) => {
+      client.ownerRequests.push({ method, params: {} });
+      if (method === "thread-follower-start-turn") {
+        return Promise.reject(new Error("desktop-thread-owner-request-failed:Error: no active turn to steer"));
+      }
+      return new Promise((_resolve, reject) => {
+        rejectOwner = reject;
+      });
+    });
     transport.send({
       id: 1694,
       method: "desktop/queue/steer",
@@ -927,7 +929,7 @@ describe("DesktopBridgeTransport", () => {
     await transport.stop();
   });
 
-  it("promotes one queued follow-up to Desktop steer and removes it from the shared queue", async () => {
+  it("removes one queued follow-up then steers it through the Desktop thread owner without clicking Desktop DOM", async () => {
     const { client, messages, transport } = await createStartedTransport();
     transport.send({
       id: 17,
@@ -949,15 +951,91 @@ describe("DesktopBridgeTransport", () => {
       } }),
     });
 
-    await vi.waitFor(() => expect(client.queuePromotions).toEqual([{
-      conversationId: "thread-1",
-      messageId: "queued-1",
-      text: "Guide now",
-    }]));
-    expect(client.sent).toHaveLength(1);
-    expect(client.queueBroadcasts).toEqual([]);
-    expect(client.ownerRequests).toEqual([]);
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    const writeRequest = client.sent[1] as Record<string, unknown>;
+    expect(JSON.parse(String(writeRequest.body))).toEqual({
+      key: "queued-follow-ups",
+      value: { "thread-1": [{ id: "queued-2", text: "Keep queued", createdAt: 8 }] },
+    });
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: writeRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ success: true }),
+    });
+
+    await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(1));
+    expect(client.ownerRequests[0]).toMatchObject({
+      method: "thread-follower-steer-turn",
+      params: {
+        conversationId: "thread-1",
+        input: [{ type: "text", text: "Guide now", text_elements: [] }],
+        clientUserMessageId: "queued-1",
+      },
+    });
     expect(messages).toContainEqual({ id: 17, result: { messageId: "queued-1" } });
+    await transport.stop();
+  });
+
+  it("starts the queued follow-up exactly once when Stop wins the active-turn race", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    client.queuePromotionResult = false;
+    client.ownerRequestHandler = async (method) => {
+      if (method === "thread-follower-steer-turn") {
+        throw new Error("desktop-thread-owner-request-failed:Error: no active turn to steer");
+      }
+      if (method === "thread-follower-start-turn") return { result: { turnId: "turn-after-stop" } };
+      throw new Error(`unexpected-owner-method:${method}`);
+    };
+    transport.send({
+      id: 1701,
+      method: "desktop/queue/steer",
+      params: { threadId: "thread-1", messageId: "queued-1", expectedTurnId: "turn-stopped" },
+    });
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+    const readRequest = client.sent[0] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: readRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ value: {
+        "thread-1": [{
+          id: "queued-1",
+          text: "Continue after Stop",
+          cwd: "/safe/project",
+          createdAt: 7,
+          context: { prompt: "Continue after Stop" },
+        }],
+      } }),
+    });
+
+    await vi.waitFor(() => expect(client.sent).toHaveLength(2));
+    const writeRequest = client.sent[1] as Record<string, unknown>;
+    client.onMessage?.({
+      type: "fetch-response",
+      requestId: writeRequest.requestId,
+      responseType: "success",
+      status: 200,
+      bodyJsonString: JSON.stringify({ success: true }),
+    });
+
+    await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(2));
+    expect(client.ownerRequests.map((request) => request.method)).toEqual([
+      "thread-follower-steer-turn",
+      "thread-follower-start-turn",
+    ]);
+    expect(client.ownerRequests[1]).toMatchObject({
+      params: {
+        conversationId: "thread-1",
+        input: [{ type: "text", text: "Continue after Stop", text_elements: [] }],
+        clientUserMessageId: "queued-1",
+      },
+    });
+    expect(messages).toContainEqual({ id: 1701, result: { messageId: "queued-1" } });
+    expect(client.sent).toHaveLength(2);
     await transport.stop();
   });
 
@@ -1000,7 +1078,11 @@ describe("DesktopBridgeTransport", () => {
       bodyJsonString: JSON.stringify({ success: true }),
     });
 
-    await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(1));
+    await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(2));
+    expect(client.ownerRequests.map((ownerRequest) => ownerRequest.method)).toEqual([
+      "thread-follower-steer-turn",
+      "thread-follower-start-turn",
+    ]);
     await vi.waitFor(() => expect(client.sent).toHaveLength(3));
     const restoreReadRequest = client.sent[2] as Record<string, unknown>;
     expect(restoreReadRequest).toMatchObject({
@@ -1548,7 +1630,7 @@ describe("DesktopBridgeTransport", () => {
         status: 200,
         bodyJsonString: JSON.stringify({ success: true }),
       });
-      await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(1));
+      await vi.waitFor(() => expect(client.ownerRequests).toHaveLength(2));
       await vi.waitFor(() => expect(client.sent).toHaveLength(3));
       const restoreRead = client.sent[2] as Record<string, unknown>;
       if (disconnectStage === "restore-write") {

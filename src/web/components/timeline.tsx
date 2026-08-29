@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-store";
 
 type ImageRequest = { baseUrl: string; token: string };
+type ImagePreview = { source: string; alt: string };
 
 export function Timeline({
   thread,
@@ -14,6 +15,9 @@ export function Timeline({
   imageRequest?: ImageRequest;
   onOpenExternalUrl?: (url: string) => void;
 }) {
+  const [imagePreview, setImagePreview] = useState<ImagePreview>();
+  useEffect(() => setImagePreview(undefined), [thread?.id]);
+
   if (!thread) {
     return (
       <div className="empty-thread">
@@ -40,25 +44,29 @@ export function Timeline({
   const liveTurnId = thread.status === "running" ? typingTurnId ?? thread.turnOrder.at(-1) : undefined;
 
   return (
-    <ol className="timeline" aria-label="对话内容">
-      {thread.turnOrder.map((turnId) => {
-        const turn = thread.turns[turnId];
-        return turn ? (
-          <TurnView
-            key={turnId}
-            turn={turn}
-            imageRequest={imageRequest}
-            onOpenExternalUrl={onOpenExternalUrl}
-            showTyping={turnId === liveTurnId}
-          />
-        ) : null;
-      })}
-      {thread.status === "running" && !liveTurnId ? (
-        <li className="conversation-turn conversation-turn-recovering" data-turn-id="recovering-active-turn">
-          <TypingIndicator />
-        </li>
-      ) : null}
-    </ol>
+    <>
+      <ol className="timeline" aria-label="对话内容">
+        {thread.turnOrder.map((turnId) => {
+          const turn = thread.turns[turnId];
+          return turn ? (
+            <TurnView
+              key={turnId}
+              turn={turn}
+              imageRequest={imageRequest}
+              onPreviewImage={setImagePreview}
+              onOpenExternalUrl={onOpenExternalUrl}
+              showTyping={turnId === liveTurnId}
+            />
+          ) : null;
+        })}
+        {thread.status === "running" && !liveTurnId ? (
+          <li className="conversation-turn conversation-turn-recovering" data-turn-id="recovering-active-turn">
+            <TypingIndicator />
+          </li>
+        ) : null}
+      </ol>
+      {imagePreview ? <ImagePreviewDialog preview={imagePreview} onClose={() => setImagePreview(undefined)} /> : null}
+    </>
   );
 }
 
@@ -66,11 +74,13 @@ function TurnView({
   turn,
   imageRequest,
   showTyping,
+  onPreviewImage,
   onOpenExternalUrl,
 }: {
   turn: CodexTurn;
   imageRequest?: ImageRequest;
   showTyping: boolean;
+  onPreviewImage: (preview: ImagePreview) => void;
   onOpenExternalUrl?: (url: string) => void;
 }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
@@ -85,6 +95,7 @@ function TurnView({
             key={segment.item.id}
             segment={segment}
             imageRequest={imageRequest}
+            onPreviewImage={onPreviewImage}
             onOpenExternalUrl={onOpenExternalUrl}
           />
         ))}
@@ -106,6 +117,7 @@ function TurnView({
                     key={segment.item.id}
                     segment={segment}
                     imageRequest={imageRequest}
+                    onPreviewImage={onPreviewImage}
                     onOpenExternalUrl={onOpenExternalUrl}
                   />
                 )
@@ -117,6 +129,7 @@ function TurnView({
           <MessageSegment
             segment={completedLayout.final}
             imageRequest={imageRequest}
+            onPreviewImage={onPreviewImage}
             onOpenExternalUrl={onOpenExternalUrl}
           />
         ) : null}
@@ -151,6 +164,7 @@ function TurnView({
             key={segment.item.id}
             segment={segment}
             imageRequest={imageRequest}
+            onPreviewImage={onPreviewImage}
             onOpenExternalUrl={onOpenExternalUrl}
           />
         );
@@ -176,10 +190,12 @@ function TypingIndicator() {
 function MessageSegment({
   segment,
   imageRequest,
+  onPreviewImage,
   onOpenExternalUrl,
 }: {
   segment: Extract<TurnSegment, { kind: "user" | "agent" }>;
   imageRequest?: ImageRequest;
+  onPreviewImage: (preview: ImagePreview) => void;
   onOpenExternalUrl?: (url: string) => void;
 }) {
   const item = segment.item;
@@ -196,6 +212,7 @@ function MessageSegment({
                 imageId={imageId}
                 request={imageRequest}
                 alt={`用户上传的图片 ${index + 1}`}
+                onPreview={onPreviewImage}
               />
             ))}
           </div>
@@ -211,7 +228,17 @@ function MessageSegment({
   );
 }
 
-function AuthenticatedImage({ imageId, request, alt }: { imageId: string; request?: ImageRequest; alt: string }) {
+function AuthenticatedImage({
+  imageId,
+  request,
+  alt,
+  onPreview,
+}: {
+  imageId: string;
+  request?: ImageRequest;
+  alt: string;
+  onPreview: (preview: ImagePreview) => void;
+}) {
   const fallback = `/api/images/${encodeURIComponent(imageId)}`;
   const [source, setSource] = useState(request ? undefined : fallback);
   useEffect(() => {
@@ -231,20 +258,51 @@ function AuthenticatedImage({ imageId, request, alt }: { imageId: string; reques
     }).catch(() => undefined);
     return () => {
       disposed = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (objectUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(objectUrl);
     };
   }, [fallback, imageId, request?.baseUrl, request?.token]);
   return source ? (
-    <a
+    <button
+      type="button"
       className="message-image-link"
-      href={source}
-      target="_blank"
-      rel="noreferrer"
-      aria-label={`打开${alt}`}
+      aria-label={`预览${alt}`}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={() => onPreview({ source, alt })}
     >
       <img src={source} alt={alt} loading="lazy" />
-    </a>
+    </button>
   ) : <span className="image-loading">正在加载图片…</span>;
+}
+
+function ImagePreviewDialog({ preview, onClose }: { preview: ImagePreview; onClose: () => void }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  return (
+    <div
+      className="image-preview-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={preview.alt}
+      onClick={onClose}
+    >
+      <div className="image-preview-content" onClick={(event) => event.stopPropagation()}>
+        <button
+          type="button"
+          className="image-preview-close"
+          aria-label="关闭图片预览"
+          onClick={onClose}
+        >
+          ×
+        </button>
+        <img src={preview.source} alt={`${preview.alt} 预览`} />
+      </div>
+    </div>
+  );
 }
 
 type TurnSegment =
@@ -356,16 +414,17 @@ function MarkdownContent({ text, onOpenExternalUrl }: { text: string; onOpenExte
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ children, href, ...props }) => {
-            const external = href && /^https?:\/\//i.test(href);
+            const external = isSafeExternalUrl(href);
+            if (!external) return <span data-invalid-link="true">{children}</span>;
             return (
               <a
                 {...props}
                 href={href}
                 target="_blank"
                 rel="noreferrer noopener"
-                onClick={external && onOpenExternalUrl ? (event) => {
+                onClick={onOpenExternalUrl ? (event) => {
                   event.preventDefault();
-                  onOpenExternalUrl(href);
+                  onOpenExternalUrl(href as string);
                 } : undefined}
               >
                 {children}
@@ -378,6 +437,16 @@ function MarkdownContent({ text, onOpenExternalUrl }: { text: string; onOpenExte
       </Markdown>
     </div>
   );
+}
+
+function isSafeExternalUrl(value?: string): value is string {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    return Boolean(url.hostname) && (url.protocol === "http:" || url.protocol === "https:");
+  } catch {
+    return false;
+  }
 }
 
 function ActivityItem({ item }: { item: CodexItem }) {

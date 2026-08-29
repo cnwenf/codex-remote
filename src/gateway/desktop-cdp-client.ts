@@ -160,66 +160,6 @@ export class DesktopCdpClient {
     throwRuntimeException(response, "desktop-queue-broadcast-failed");
   }
 
-  async promoteQueuedFollowUp(
-    conversationId: string,
-    messageId: string,
-    text: string,
-  ): Promise<boolean> {
-    if (!this.windowObjectId) throw new Error("desktop-cdp-not-ready");
-    const response = await this.call("Runtime.callFunctionOn", {
-      objectId: this.windowObjectId,
-      functionDeclaration: `function(conversationId, messageId, text) {
-        const root = document.querySelector('button[data-composer-navigation-target="permissions"]') ||
-          document.querySelector('[data-codex-composer-root]');
-        const fiberKey = root && Object.keys(root).find((key) => key.startsWith('__reactFiber$'));
-        let fiber = fiberKey ? root[fiberKey] : null;
-        let visibleConversationId = null;
-        for (let depth = 0; fiber && depth < 100; depth += 1, fiber = fiber.return) {
-          if (typeof fiber.memoizedProps?.conversationId === 'string') {
-            visibleConversationId = fiber.memoizedProps.conversationId;
-            break;
-          }
-        }
-        if (visibleConversationId !== conversationId) return false;
-        const actionPattern = /^(调整方向|引导|Steer|Guide now)$/i;
-        const findAction = () => {
-          const byId = document.querySelector('[data-message-id="' + CSS.escape(messageId) + '"]');
-          const candidates = [];
-          if (byId) candidates.push(byId);
-          const normalizedText = text.trim();
-          if (normalizedText) {
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-            let node;
-            while ((node = walker.nextNode())) {
-              if ((node.nodeValue || '').trim() === normalizedText && node.parentElement) {
-                candidates.push(node.parentElement);
-              }
-            }
-          }
-          for (const candidate of candidates) {
-            for (let element = candidate, depth = 0; element && depth < 10; element = element.parentElement, depth += 1) {
-              const button = Array.from(element.querySelectorAll('button')).find((value) => {
-                const label = (value.innerText || value.getAttribute('aria-label') || '').trim();
-                return actionPattern.test(label);
-              });
-              if (button) return button;
-            }
-          }
-          return null;
-        };
-        const action = findAction();
-        if (!action) return false;
-        action.click();
-        return true;
-      }`,
-      arguments: [{ value: conversationId }, { value: messageId }, { value: text }],
-      awaitPromise: false,
-      returnByValue: true,
-    }, 5_000);
-    throwRuntimeException(response, "desktop-queue-promotion-failed");
-    return asRecord(response.result).value === true;
-  }
-
   async inspectVisibleThreadSettings(): Promise<VisibleDesktopSettings> {
     if (!this.windowObjectId) throw new Error("desktop-cdp-not-ready");
     const response = await this.call("Runtime.callFunctionOn", {

@@ -2,6 +2,7 @@ import { closeSync, openSync, readFileSync, readSync, realpathSync, statSync } f
 import { dirname, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { permissionStateFromProtocol } from "../protocol/permissions";
+import { displayUserInput } from "../protocol/user-message-identity";
 import { ImageUploadStore } from "./image-upload-store";
 
 const MAX_THREAD_IDS = 100;
@@ -895,7 +896,8 @@ function rolloutItem(
     if (role === "user" && contentKinds.length > 0 && !contentKinds.some((kind) => kind.startsWith("user."))) {
       return undefined;
     }
-    const text = textContent(payload.content);
+    const rawText = textContent(payload.content);
+    const text = role === "user" ? displayUserInput(rawText) : rawText;
     if (!text && (role !== "user" || pendingUserImageIds.length === 0)) return undefined;
     return {
       id,

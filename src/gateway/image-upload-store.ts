@@ -18,32 +18,44 @@ const formats = [
   {
     mimeType: "image/png",
     extension: ".png",
-    matches: (buffer: Buffer) => buffer.length >= 8 && buffer.subarray(0, 8).equals(
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    ),
+    matches: matchesPng,
   },
   {
     mimeType: "image/jpeg",
     extension: ".jpg",
-    matches: (buffer: Buffer) => buffer.length >= 3 &&
-      buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff,
+    matches: (buffer: Buffer) => buffer.length >= 4 &&
+      buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff &&
+      buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9,
   },
   {
     mimeType: "image/gif",
     extension: ".gif",
-    matches: (buffer: Buffer) => buffer.length >= 6 &&
-      ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii")),
+    matches: (buffer: Buffer) => buffer.length >= 14 &&
+      ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii")) &&
+      buffer[buffer.length - 1] === 0x3b,
   },
   {
     mimeType: "image/webp",
     extension: ".webp",
-    matches: (buffer: Buffer) => buffer.length >= 12 &&
+    matches: (buffer: Buffer) => buffer.length >= 20 &&
       buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
-      buffer.subarray(8, 12).toString("ascii") === "WEBP",
+      buffer.readUInt32LE(4) === buffer.length - 8 &&
+      buffer.subarray(8, 12).toString("ascii") === "WEBP" &&
+      ["VP8 ", "VP8L", "VP8X"].includes(buffer.subarray(12, 16).toString("ascii")) &&
+      buffer.readUInt32LE(16) <= buffer.length - 20,
   },
 ] as const;
 
 const imageIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function matchesPng(buffer: Buffer) {
+  return buffer.length >= 45 &&
+    buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) &&
+    buffer.readUInt32BE(8) === 13 &&
+    buffer.subarray(12, 16).toString("ascii") === "IHDR" &&
+    buffer.readUInt32BE(buffer.length - 12) === 0 &&
+    buffer.subarray(buffer.length - 8, buffer.length - 4).toString("ascii") === "IEND";
+}
 
 export class ImageUploadStore {
   private readonly images = new Map<string, StoredImage>();

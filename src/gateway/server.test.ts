@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,11 @@ import type {
   TransportDiagnostic,
 } from "../protocol/types";
 import { createGateway } from "./server";
+
+const PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
 
 class FakeTransport implements CodexTransport {
   sent: RpcMessage[] = [];
@@ -788,7 +793,7 @@ describe("gateway server", () => {
         body: JSON.stringify({ token }),
       });
       const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
-      const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+      const png = PNG_1X1;
       const upload = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
         method: "POST",
         headers: {
@@ -877,7 +882,7 @@ describe("gateway server", () => {
     const uploadDir = await mkdtemp(join(tmpdir(), "codex-remote-live-images-"));
     const sourceDir = await mkdtemp(join(tmpdir(), "codex-remote-desktop-image-"));
     const source = join(sourceDir, "desktop.png");
-    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+    const png = PNG_1X1;
     await writeFile(source, png);
     const transport = new AlreadyInitializedTransport();
     const gateway = createGateway({ port: 0, token, allowedOrigins: [origin], uploadDir, transport });
@@ -903,9 +908,17 @@ describe("gateway server", () => {
         type: "rpc",
         payload: {
           method: "item/started",
-          params: { item: { imageIds: [expect.stringMatching(/^[0-9a-f-]{36}$/)] } },
+          params: {
+            item: {
+              text: "看图",
+              content: [{ type: "text", text: "看图" }],
+              imageIds: [expect.stringMatching(/^[0-9a-f-]{36}$/)],
+            },
+          },
         },
       });
+      expect(JSON.stringify(event)).not.toContain(source);
+      expect(JSON.stringify(event)).not.toContain("<image");
       const imageId = event.payload.params.item.imageIds[0] as string;
       expect(await readFile(join(uploadDir, `${imageId}.png`))).toEqual(png);
       socket.close();
@@ -914,6 +927,51 @@ describe("gateway server", () => {
       await gateway.stop();
       await rm(uploadDir, { recursive: true, force: true });
       await rm(sourceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts a missing Desktop-local image path from the live user message", async () => {
+    const token = "test-token";
+    const origin = "http://127.0.0.1:4310";
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-remote-missing-live-image-"));
+    const source = "/private/example/missing.png";
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({ port: 0, token, allowedOrigins: [origin], uploadDir, transport });
+    const address = await gateway.start();
+    try {
+      const socket = await connect(address, token, origin);
+      await nextJson(socket);
+      transport.emit({
+        method: "item/completed",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "missing-desktop-image",
+            type: "userMessage",
+            local_images: [source],
+            content: [{ type: "text", text: `看图\n<image name=[Image #1] path=\"${source}\">\n</image>` }],
+          },
+        },
+      });
+
+      const event = await nextJson(socket);
+      expect(event).toMatchObject({
+        type: "rpc",
+        payload: {
+          method: "item/completed",
+          params: { item: { text: "看图", content: [{ type: "text", text: "看图" }] } },
+        },
+      });
+      expect(event.payload.params.item).not.toHaveProperty("local_images");
+      expect(event.payload.params.item).not.toHaveProperty("imageIds");
+      expect(JSON.stringify(event)).not.toContain(source);
+      expect(JSON.stringify(event)).not.toContain("<image");
+      socket.close();
+      await once(socket, "close");
+    } finally {
+      await gateway.stop();
+      await rm(uploadDir, { recursive: true, force: true });
     }
   });
 
@@ -949,6 +1007,18 @@ describe("gateway server", () => {
         body: Buffer.from("not a png"),
       });
       expect(spoofed.status).toBe(415);
+      const truncatedPng = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: { origin, cookie, "content-type": "image/png" },
+        body: Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
+      });
+      expect(truncatedPng.status).toBe(415);
+      expect(await readdir(uploadDir)).toEqual([]);
+      const missingSpoof = await fetch(
+        `http://127.0.0.1:${address.port}/api/images/00000000-0000-8000-a000-000000000000`,
+        { headers: { origin, cookie } },
+      );
+      expect(missingSpoof.status).toBe(404);
 
       const empty = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
         method: "POST",

@@ -1,5 +1,10 @@
 import { expect, test } from "@playwright/test";
 
+const PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
 test("confirms a one-time Desktop restart before leaving read-only mode", async ({ page }) => {
   test.skip(process.env.CODEX_REMOTE_E2E_DESKTOP_MIRROR !== "1", "read-only Desktop fixture only");
   await page.goto("/");
@@ -237,25 +242,37 @@ test("uploads an image and sends it with the conversation", async ({ page }) => 
   await page.getByLabel("添加图片").setInputFiles({
     name: "screen.png",
     mimeType: "image/png",
-    buffer: Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
+    buffer: PNG_1X1,
   });
   await expect(page.getByText("screen.png")).toBeVisible();
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByText("screen.png")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "打开用户上传的图片 1" })).toBeVisible();
+  const imagePreview = page.getByRole("button", { name: "预览用户上传的图片 1" });
+  await expect(imagePreview).toBeVisible();
+  const approval = page.getByRole("dialog", { name: "Run a command?" });
+  await expect(approval).toBeVisible();
+  await approval.getByRole("button", { name: "Approve once" }).click();
+  await expect(approval).toHaveCount(0);
+  await expect(imagePreview).toBeEnabled();
+  await imagePreview.click();
+  await expect(page.getByRole("dialog", { name: "用户上传的图片 1" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fixture task" })).toBeVisible();
+  await page.getByRole("button", { name: "关闭图片预览" }).click();
+  await expect(page.getByRole("dialog", { name: "用户上传的图片 1" })).toHaveCount(0);
   await expect(page.getByText("等待输入…")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Checks complete", level: 2 })).toBeVisible();
 
   await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
+  await page.getByRole("textbox", { name: "Instruction" }).click();
   await page.getByLabel("添加图片").setInputFiles({
     name: "running-only.png",
     mimeType: "image/png",
-    buffer: Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
+    buffer: PNG_1X1,
   });
   await page.getByRole("button", { name: "Steer" }).dispatchEvent("click");
   await expect(page.getByText("running-only.png")).toHaveCount(0);
-  await expect(page.getByRole("link", { name: /打开用户上传的图片/ })).toHaveCount(2);
+  await expect(page.getByRole("button", { name: /预览用户上传的图片/ })).toHaveCount(2);
   await expect(page.getByText("等待输入…")).toHaveCount(0);
 });
 

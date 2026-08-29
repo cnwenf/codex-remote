@@ -25,8 +25,8 @@ android {
         applicationId "com.cnwenf.codexremote"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 30
-        versionName "0.5.21"
+        versionCode 31
+        versionName "0.5.22"
         ndk {
             abiFilters "arm64-v8a"
         }
