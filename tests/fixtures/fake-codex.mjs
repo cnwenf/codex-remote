@@ -4,6 +4,7 @@ const lines = readline.createInterface({ input: process.stdin });
 let createdThread;
 let approvalDeclines = 0;
 let activeTurnId;
+let persistedFixtureUserItems = [];
 const loadedThreads = new Set();
 const pinnedThreads = new Set();
 const archivedThreads = new Set();
@@ -115,6 +116,7 @@ lines.on("line", (line) => {
         sandboxPolicy: { type: "workspaceWrite" },
       },
     });
+    if (isFixture) persistedFixtureUserItems = [];
     return;
   }
   if (message.method === "thread/start") {
@@ -155,17 +157,23 @@ lines.on("line", (line) => {
         .map((item) => item.path) ?? [];
       if (text || localImages.length > 0) {
         const isSteer = message.method === "turn/steer";
+        const item = {
+          id: isSteer ? "fixture-official-steer" : "fixture-live-user",
+          type: isSteer ? "user_message" : "userMessage",
+          content: text ? [{ type: "text", text }] : [],
+          ...(localImages.length > 0 ? { local_images: localImages } : {}),
+        };
+        persistedFixtureUserItems.push({
+          ...item,
+          local_images: undefined,
+          imageIds: localImages.map((path) => path.split(/[\\/]/).at(-1)?.replace(/\.[^.]+$/, "")),
+        });
         send({
           method: "item/started",
           params: {
             threadId: "fixture-thread",
             turnId: isSteer ? "fixture-steer-confirmation" : "fixture-live-turn",
-            item: {
-              id: isSteer ? "fixture-official-steer" : "fixture-live-user",
-              type: isSteer ? "user_message" : "userMessage",
-              content: text ? [{ type: "text", text }] : [],
-              ...(localImages.length > 0 ? { local_images: localImages } : {}),
-            },
+            item,
           },
         });
       }
@@ -337,13 +345,18 @@ function fixtureThreadWithTurns() {
       },
     ],
   }));
+  const persistedTurn = persistedFixtureUserItems.length > 0 ? [{
+    id: "fixture-persisted-upload-turn",
+    status: "completed",
+    items: persistedFixtureUserItems,
+  }] : [];
   return {
     id: "fixture-thread",
     name: "Fixture task",
     cwd: "/tmp/codex-fixture",
     status: { type: "idle" },
     updatedAt: 1_787_200_000,
-    turns: [firstTurn, ...longTurns],
+    turns: [firstTurn, ...longTurns, ...persistedTurn],
   };
 }
 

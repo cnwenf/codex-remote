@@ -274,6 +274,10 @@ test("uploads an image and sends it with the conversation", async ({ page }) => 
   await expect(page.getByText("running-only.png")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /预览用户上传的图片/ })).toHaveCount(2);
   await expect(page.getByText("等待输入…")).toHaveCount(0);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Fixture task" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /预览用户上传的图片/ })).toHaveCount(2);
 });
 
 test("new conversation selects project permission model and reasoning effort", async ({ page }) => {

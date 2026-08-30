@@ -126,6 +126,29 @@ export class ImageUploadStore {
     }
   }
 
+  referenceForStoredUploadPath(path: string): string | undefined {
+    const name = basename(path);
+    const format = formats.find((candidate) => name.endsWith(candidate.extension));
+    if (!format) return undefined;
+    const id = name.slice(0, -format.extension.length);
+    if (!imageIdPattern.test(id) || resolve(this.root, name) !== resolve(path)) return undefined;
+
+    try {
+      const source = realpathSync(path);
+      const uploadRoot = realpathSync(this.root);
+      const info = lstatSync(path);
+      if (
+        source !== join(uploadRoot, name) ||
+        !info.isFile() ||
+        info.size <= 0 ||
+        info.size > MAX_IMAGE_BYTES
+      ) return undefined;
+      return format.matches(readFileSync(path)) ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   async open(id: string): Promise<StoredImage> {
     if (!imageIdPattern.test(id)) throw new ImageUploadError("image-upload-not-found", 404);
     for (const format of formats) {

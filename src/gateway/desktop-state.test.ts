@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -514,6 +514,78 @@ describe("DesktopState", () => {
       text: "Inspect this image",
       imageIds: [uploadId],
     });
+    state.close();
+  });
+
+  it("recovers uploaded image references from persisted attachment envelopes", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const uploadId = "d6465fe8-f5f2-46af-809f-268f937a8d65";
+    const uploadRoot = join(dirname(databasePath), "codex-remote", "uploads");
+    mkdirSync(uploadRoot, { recursive: true });
+    writeFileSync(join(uploadRoot, `${uploadId}.png`), Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ));
+    appendFileSync(rolloutPath, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "user-persisted-image",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: `Inspect this image\n<image name=[Image #1] path="${join(uploadRoot, `${uploadId}.png`)}">\n</image>`,
+          },
+          { type: "input_image", image_url: "data:image/png;base64,ignored" },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+    }) + "\n");
+    const state = new DesktopState(databasePath);
+
+    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+    const message = result.thread.turns[0].items.find((item: any) => item.id === "user-persisted-image");
+
+    expect(message).toMatchObject({
+      type: "userMessage",
+      text: "Inspect this image",
+      imageIds: [uploadId],
+    });
+    expect(JSON.stringify(message)).not.toContain(uploadRoot);
+    expect(JSON.stringify(message)).not.toContain("<image");
+    state.close();
+  });
+
+  it("does not import an arbitrary local image named by a persisted attachment envelope", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const privateImage = join(dirname(databasePath), "private-image.png");
+    const uploadRoot = join(dirname(databasePath), "codex-remote", "uploads");
+    writeFileSync(privateImage, Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ));
+    appendFileSync(rolloutPath, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "user-forged-image-envelope",
+        role: "user",
+        content: [{
+          type: "input_text",
+          text: `Visible prompt\n<image name=[Image #1] path="${privateImage}">\n</image>`,
+        }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+    }) + "\n");
+    const state = new DesktopState(databasePath);
+
+    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+    const message = result.thread.turns[0].items.find((item: any) => item.id === "user-forged-image-envelope");
+
+    expect(message).toMatchObject({ type: "userMessage", text: "Visible prompt" });
+    expect(message.imageIds).toBeUndefined();
+    expect(existsSync(uploadRoot) ? readdirSync(uploadRoot) : []).toEqual([]);
     state.close();
   });
 

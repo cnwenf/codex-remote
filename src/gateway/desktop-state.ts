@@ -858,7 +858,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     if (entry.type !== "response_item") continue;
     const itemTurnId = stringValue(asRecord(payload.internal_chat_message_metadata_passthrough).turn_id) ?? currentTurnId;
     if (!itemTurnId) continue;
-    const item = rolloutItem(payload, pendingUserImageIds);
+    const item = rolloutItem(payload, imageStore, pendingUserImageIds);
     if (!item) continue;
     if (item.type === "userMessage") pendingUserImageIds = [];
     const turn = ensureTurn(itemTurnId);
@@ -881,6 +881,7 @@ function rolloutPlan(value: unknown) {
 
 function rolloutItem(
   payload: Record<string, unknown>,
+  imageStore: ImageUploadStore,
   pendingUserImageIds: string[] = [],
 ): ParsedItem | undefined {
   const id = stringValue(payload.id) ?? stringValue(payload.call_id);
@@ -898,13 +899,22 @@ function rolloutItem(
     }
     const rawText = textContent(payload.content);
     const text = role === "user" ? displayUserInput(rawText) : rawText;
-    if (!text && (role !== "user" || pendingUserImageIds.length === 0)) return undefined;
+    const persistedImageIds = role === "user"
+      ? [...rawText.matchAll(/<image\b[^>]*\bpath=(?:"([^"]+)"|'([^']+)')[^>]*>/gi)]
+          .flatMap((match) => {
+            const path = match[1] ?? match[2];
+            const id = path ? imageStore.referenceForStoredUploadPath(path) : undefined;
+            return id ? [id] : [];
+          })
+      : [];
+    const imageIds = [...new Set([...pendingUserImageIds, ...persistedImageIds])];
+    if (!text && (role !== "user" || imageIds.length === 0)) return undefined;
     return {
       id,
       type: role === "user" ? "userMessage" : "agentMessage",
       text,
-      ...(role === "user" && pendingUserImageIds.length > 0
-        ? { imageIds: pendingUserImageIds }
+      ...(role === "user" && imageIds.length > 0
+        ? { imageIds }
         : {}),
     };
   }

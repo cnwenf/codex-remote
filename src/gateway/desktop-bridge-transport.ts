@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import {
   createProtocolCapabilities,
   isAllowedClientMethod,
@@ -91,6 +92,14 @@ type PendingQueueConfirmation = {
   seenCursors: Set<string>;
 };
 
+type PendingQueuePromotion = {
+  request: QueueRequest;
+  threadId: string;
+  message: Record<string, unknown>;
+  restoreMessages?: Record<string, unknown>[];
+  phase: "steer" | "start";
+};
+
 type DeferredQueueRecovery = Omit<PendingQueueConfirmation, "request" | "query"> & {
   key: string;
   phase: "confirmation" | "restore";
@@ -99,6 +108,7 @@ type DeferredQueueRecovery = Omit<PendingQueueConfirmation, "request" | "query">
 };
 
 const QUEUE_CONFIRMATION_PREFIX = "codex-remote-queue-confirm-";
+const QUEUE_PROMOTION_PREFIX = "codex-remote-queue-promote-";
 const QUEUE_CONFIRMATION_ABSENCE_CHECKS = 3;
 
 const HOST_ROUTES: Readonly<Record<string, string>> = Object.freeze({
@@ -129,6 +139,7 @@ export class DesktopBridgeTransport implements CodexTransport {
   };
   private pendingQueueConfirmation?: PendingQueueConfirmation;
   private pendingQueueConfirmationRequests = new Map<string, PendingQueueConfirmation>();
+  private pendingQueuePromotions = new Map<string, PendingQueuePromotion>();
   private queueConfirmationRequestIds = new Set<string>();
   private queueRequestTimeouts = new Map<string, {
     requestKey: string;
@@ -258,6 +269,7 @@ export class DesktopBridgeTransport implements CodexTransport {
     this.pendingQueueReads.clear();
     this.pendingQueueWrites.clear();
     this.pendingQueueConfirmationRequests.clear();
+    this.pendingQueuePromotions.clear();
     this.queueConfirmationRequestIds.clear();
     this.queueRequestTimeouts.clear();
     this.activeQueueMutation = undefined;
@@ -318,6 +330,17 @@ export class DesktopBridgeTransport implements CodexTransport {
       }
       if (isRpcResponse(value.message)) {
         const key = rpcKey(value.message.id);
+        const promotion = this.pendingQueuePromotions.get(key);
+        if (promotion) {
+          this.clearQueueRequestTimeout(`rpc:${key}`);
+          this.pendingQueuePromotions.delete(key);
+          this.receiveQueuePromotion(value.message, promotion);
+          return;
+        }
+        if (
+          typeof value.message.id === "string" &&
+          value.message.id.startsWith(QUEUE_PROMOTION_PREFIX)
+        ) return;
         const confirmation = this.pendingQueueConfirmationRequests.get(key);
         if (confirmation) {
           this.clearQueueRequestTimeout(`rpc:${key}`);
@@ -579,6 +602,9 @@ export class DesktopBridgeTransport implements CodexTransport {
     }
     for (const [requestId, pending] of this.pendingQueueConfirmationRequests) {
       if (rpcKey(pending.request.id) === key) this.pendingQueueConfirmationRequests.delete(requestId);
+    }
+    for (const [requestId, pending] of this.pendingQueuePromotions) {
+      if (rpcKey(pending.request.id) === key) this.pendingQueuePromotions.delete(requestId);
     }
     this.clearQueueRecoveryRetry();
     this.clearQueueRecoveryDeadline();
@@ -848,7 +874,7 @@ export class DesktopBridgeTransport implements CodexTransport {
         id: active.id,
         result: confirmation
           ? { messageId, pendingConfirmation: true }
-          : { message: source.message, pendingConfirmation: true },
+          : { message: outboundQueueMessage(source.message), pendingConfirmation: true },
       } : {
         id: active.id,
         error: {
@@ -993,7 +1019,10 @@ export class DesktopBridgeTransport implements CodexTransport {
       return;
     }
     if (pending.operation === "list") {
-      this.finishQueueRequest(pending.request, { id: pending.request.id, result: { messages } });
+      this.finishQueueRequest(pending.request, {
+        id: pending.request.id,
+        result: { messages: messages.map(outboundQueueMessage) },
+      });
       return;
     }
     if (pending.operation === "steer") {
@@ -1140,7 +1169,7 @@ export class DesktopBridgeTransport implements CodexTransport {
       }
       this.finishQueueRequest(pending.request, pending.recoveryOutcome === "add-pending" ? {
         id: pending.request.id,
-        result: { message: pending.message, pendingConfirmation: true },
+        result: { message: outboundQueueMessage(pending.message), pendingConfirmation: true },
       } : {
         id: pending.request.id,
         error: {
@@ -1157,7 +1186,7 @@ export class DesktopBridgeTransport implements CodexTransport {
       if (pending.operation === "add") {
         this.finishQueueRequest(pending.request, {
           id: pending.request.id,
-          result: { message: pending.message, pendingConfirmation: true },
+          result: { message: outboundQueueMessage(pending.message), pendingConfirmation: true },
         });
         return;
       }
@@ -1173,7 +1202,7 @@ export class DesktopBridgeTransport implements CodexTransport {
     if (pending.operation === "add") {
       this.finishQueueRequest(pending.request, {
         id: pending.request.id,
-        result: { message: pending.message },
+        result: { message: outboundQueueMessage(pending.message) },
       });
       return;
     }
@@ -1199,61 +1228,105 @@ export class DesktopBridgeTransport implements CodexTransport {
           return typeof record.src === "string" ? [{ type: "localImage", path: record.src }] : [];
         })
       : [];
-    const ownerParams = {
-      conversationId: threadId,
-      input: [
-        ...(text ? [{ type: "text", text, text_elements: [] }] : []),
-        ...imageInput,
-      ],
-      restoreMessage: message,
-      attachments: [],
-      clientUserMessageId: typeof message.id === "string" ? message.id : randomUUID(),
-    };
-    try {
-      await this.options.client.requestThreadOwner(
-        "thread-follower-steer-turn",
-        ownerParams,
-      );
-      this.finishQueueRequest(request, { id: request.id, result: { messageId: message.id } });
-    } catch (cause) {
-      if (!this.isActiveQueueMutation(request)) return;
-      if (!restoreMessages) {
-        this.finishQueueRequest(request, {
-          id: request.id,
+    const params = asRecord(request.params);
+    const expectedTurnId = typeof params.expectedTurnId === "string" && params.expectedTurnId
+      ? params.expectedTurnId
+      : undefined;
+    this.dispatchQueuePromotion({
+      request,
+      threadId,
+      message,
+      restoreMessages,
+      phase: expectedTurnId ? "steer" : "start",
+    }, [
+      ...(text ? [{ type: "text", text }] : []),
+      ...imageInput,
+    ]);
+  }
+
+  private dispatchQueuePromotion(
+    pending: PendingQueuePromotion,
+    input?: Array<Record<string, unknown>>,
+  ) {
+    if (!this.isActiveQueueMutation(pending.request)) return;
+    const requestId = `${QUEUE_PROMOTION_PREFIX}${randomUUID()}`;
+    const key = rpcKey(requestId);
+    this.pendingQueuePromotions.set(key, pending);
+    this.trackQueueRequestTimeout(`rpc:${key}`, pending.request, () => {
+      if (!this.pendingQueuePromotions.delete(key)) return;
+      if (pending.restoreMessages) {
+        this.sendQueueConfirmationRead(
+          pending.request,
+          pending.threadId,
+          pending.message,
+          pending.restoreMessages,
+        );
+      } else {
+        this.finishQueueRequest(pending.request, {
+          id: pending.request.id,
           error: { code: -32003, message: "Desktop queue promotion failed" },
         });
+      }
+    });
+    const messageContext = asRecord(pending.message.context);
+    const workspaceRoots = Array.isArray(messageContext.workspaceRoots)
+      ? messageContext.workspaceRoots
+      : [];
+    const cwd = typeof pending.message.cwd === "string"
+      ? pending.message.cwd
+      : workspaceRoots.find((value): value is string => typeof value === "string");
+    const sourceParams = asRecord(pending.request.params);
+    const expectedTurnId = typeof sourceParams.expectedTurnId === "string"
+      ? sourceParams.expectedTurnId
+      : undefined;
+    const promotionInput = input ?? queuedMessageInput(pending.message);
+    this.dispatch({
+      type: "mcp-request",
+      request: {
+        id: requestId,
+        method: pending.phase === "steer" ? "turn/steer" : "turn/start",
+        params: {
+          threadId: pending.threadId,
+          input: promotionInput,
+          ...(cwd ? { cwd } : {}),
+          ...(pending.phase === "steer" && expectedTurnId ? { expectedTurnId } : {}),
+          clientMessageId: typeof pending.message.id === "string"
+            ? pending.message.id
+            : randomUUID(),
+        },
+      },
+      hostId: this.hostId,
+      priority: "interactive",
+      source: "remote_control",
+    });
+  }
+
+  private receiveQueuePromotion(response: RpcResponse, pending: PendingQueuePromotion) {
+    if (!this.isActiveQueueMutation(pending.request)) return;
+    if (response.error) {
+      if (pending.phase === "steer" && isInactiveQueueSteerError(response.error)) {
+        this.dispatchQueuePromotion({ ...pending, phase: "start" });
         return;
       }
-      if (isInactiveQueueSteerError(cause)) {
-        try {
-          await this.options.client.requestThreadOwner("thread-follower-start-turn", ownerParams);
-          this.finishQueueRequest(request, { id: request.id, result: { messageId: message.id } });
-        } catch (startCause) {
-          if (!this.isActiveQueueMutation(request)) return;
-          if (isInactiveQueueSteerError(startCause)) {
-            this.sendQueueRestoreRead(request, threadId, message, restoreMessages);
-          } else {
-            this.sendQueueConfirmationRead(request, threadId, message, restoreMessages);
-          }
-        }
-        return;
-      }
-      if (isAmbiguousQueuePromotionError(cause)) {
-        this.sendQueueConfirmationRead(
-          request,
-          threadId,
-          message,
-          restoreMessages,
+      if (pending.restoreMessages) {
+        this.sendQueueRestoreRead(
+          pending.request,
+          pending.threadId,
+          pending.message,
+          pending.restoreMessages,
         );
-        return;
+      } else {
+        this.finishQueueRequest(pending.request, {
+          id: pending.request.id,
+          error: { code: -32003, message: "Desktop queue promotion failed" },
+        });
       }
-      this.sendQueueRestoreRead(
-        request,
-        threadId,
-        message,
-        restoreMessages,
-      );
+      return;
     }
+    this.finishQueueRequest(pending.request, {
+      id: pending.request.id,
+      result: { messageId: pending.message.id },
+    });
   }
 
   private denyUnsupportedServerRequest(request: RpcMessage) {
@@ -1315,6 +1388,23 @@ export class DesktopBridgeTransport implements CodexTransport {
     this.queueRequestTimeouts.clear();
     const activeRequest = this.activeQueueMutation?.request;
     const activeKey = activeRequest ? rpcKey(activeRequest.id) : undefined;
+    const uncertainPromotion = activeKey
+      ? [...this.pendingQueuePromotions.values()].find((pending) => (
+          rpcKey(pending.request.id) === activeKey
+        ))
+      : undefined;
+    if (!this.pendingQueueConfirmation && uncertainPromotion?.restoreMessages) {
+      this.pendingQueueConfirmation = {
+        request: uncertainPromotion.request,
+        threadId: uncertainPromotion.threadId,
+        message: uncertainPromotion.message,
+        originalMessages: uncertainPromotion.restoreMessages,
+        absenceChecks: 0,
+        query: "thread/read",
+        seenCursors: new Set<string>(),
+      };
+      this.ensureQueueRecoveryDeadline();
+    }
     const uncertainWrite = activeKey
       ? [...this.pendingQueueWrites.values()].find((pending) => (
           rpcKey(pending.request.id) === activeKey && pending.operation !== "restore"
@@ -1357,11 +1447,12 @@ export class DesktopBridgeTransport implements CodexTransport {
     this.pendingQueueReads.clear();
     this.pendingQueueWrites.clear();
     this.pendingQueueConfirmationRequests.clear();
+    this.pendingQueuePromotions.clear();
     this.queuedQueueMutations = [];
     if (persisted?.operation === "add" && activeRequest) {
       this.onMessage?.({
         id: activeRequest.id,
-        result: { message: persisted.message, pendingConfirmation: true },
+        result: { message: outboundQueueMessage(persisted.message), pendingConfirmation: true },
       });
       this.clearQueueRequestState(activeRequest);
       this.activeQueueMutation = undefined;
@@ -1581,15 +1672,52 @@ function isOwnerUnavailable(cause: unknown) {
     message.includes("webcontents-destroyed");
 }
 
-function isAmbiguousQueuePromotionError(cause: unknown) {
-  return !isInactiveQueueSteerError(cause);
-}
-
 function isInactiveQueueSteerError(cause: unknown) {
-  const message = cause instanceof Error ? cause.message : String(cause);
+  const record = asRecord(cause);
+  const message = cause instanceof Error
+    ? cause.message
+    : typeof record.message === "string" ? record.message : String(cause);
   return message.includes("no active turn to steer") ||
     message.includes("turn is not active") ||
     message.includes("turn already completed");
+}
+
+function queuedMessageInput(message: Record<string, unknown>): Array<Record<string, unknown>> {
+  const text = typeof message.text === "string" ? message.text : "";
+  const context = asRecord(message.context);
+  const images = Array.isArray(context.imageAttachments)
+    ? context.imageAttachments.flatMap((attachment) => {
+        const record = asRecord(attachment);
+        return typeof record.src === "string"
+          ? [{ type: "localImage", path: record.src }]
+          : [];
+      })
+    : [];
+  return [
+    ...(text ? [{ type: "text", text }] : []),
+    ...images,
+  ];
+}
+
+function outboundQueueMessage(message: Record<string, unknown>): Record<string, unknown> {
+  const context = asRecord(message.context);
+  const imageIds = Array.isArray(context.imageAttachments)
+    ? context.imageAttachments.flatMap((attachment) => {
+        const source = asRecord(attachment).src;
+        if (typeof source !== "string") return [];
+        const match = basename(source).match(
+          /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:png|jpg|gif|webp)$/i,
+        );
+        return match ? [match[1]] : [];
+      })
+    : [];
+  return {
+    id: message.id,
+    text: message.text,
+    ...(typeof message.createdAt === "number" ? { createdAt: message.createdAt } : {}),
+    ...(typeof message.cwd === "string" ? { cwd: message.cwd } : {}),
+    ...(imageIds.length > 0 ? { imageIds: [...new Set(imageIds)] } : {}),
+  };
 }
 
 function isDesktopEnvelope(value: unknown): value is DesktopEnvelope {
