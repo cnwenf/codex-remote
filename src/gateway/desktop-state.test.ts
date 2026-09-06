@@ -83,6 +83,7 @@ function fixture() {
         type: "message",
         id: "agent-1",
         role: "assistant",
+        phase: "final_answer",
         content: [{ type: "output_text", text: "Hello Web" }],
       },
     },
@@ -429,7 +430,7 @@ describe("DesktopState", () => {
       durationMs: 900,
       items: [
         { id: "user-1", type: "userMessage", text: "Hello Desktop" },
-        { id: "agent-1", type: "agentMessage", text: "Hello Web" },
+        { id: "agent-1", type: "agentMessage", text: "Hello Web", phase: "final_answer" },
       ],
     });
     state.close();

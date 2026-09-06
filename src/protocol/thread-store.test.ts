@@ -2,6 +2,25 @@ import { describe, expect, it } from "vitest";
 import { initialCodexState, reduceCodexState } from "./thread-store";
 
 describe("reduceCodexState", () => {
+  it("preserves the assistant message phase from item notifications", () => {
+    const next = reduceCodexState(initialCodexState, {
+      method: "item/completed",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          id: "agent-final",
+          type: "agentMessage",
+          text: "Done",
+          phase: "final_answer",
+          status: "completed",
+        },
+      },
+    });
+
+    expect(next.threads.t1.turns["turn-1"].items["agent-final"].phase).toBe("final_answer");
+  });
+
   it("appends streamed agent text without mutating the previous state", () => {
     const state = {
       ...initialCodexState,

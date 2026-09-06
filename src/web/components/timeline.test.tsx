@@ -142,6 +142,46 @@ describe("Timeline", () => {
     expect(screen.getByText("测试已经通过。")).toBeVisible();
   });
 
+  it("keeps the semantic final answer visible when older commentary arrives late", async () => {
+    const thread: CodexThread = {
+      id: "late-commentary",
+      title: "Late commentary",
+      status: "idle",
+      turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1",
+          status: "completed",
+          itemOrder: ["user", "tool-1", "agent-final", "tool-2", "agent-late"],
+          items: {
+            user: { id: "user", type: "userMessage", text: "执行复杂任务" },
+            "tool-1": { id: "tool-1", type: "commandExecution", text: "first", status: "completed" },
+            "agent-final": {
+              id: "agent-final",
+              type: "agentMessage",
+              text: "真正的最终回复",
+              phase: "final_answer",
+            },
+            "tool-2": { id: "tool-2", type: "commandExecution", text: "second", status: "completed" },
+            "agent-late": {
+              id: "agent-late",
+              type: "agentMessage",
+              text: "较早但晚到的过程说明",
+              phase: "commentary",
+            },
+          },
+        },
+      },
+    };
+
+    render(<Timeline thread={thread} />);
+
+    expect(screen.getByText("真正的最终回复")).toBeVisible();
+    expect(screen.getByText("较早但晚到的过程说明")).not.toBeVisible();
+    await userEvent.click(screen.getByText("执行过程（3 项）"));
+    expect(screen.getByText("较早但晚到的过程说明")).toBeVisible();
+  });
+
   it("keeps tool activity after the assistant text that preceded it and shows a running ellipsis", () => {
     const thread: CodexThread = {
       id: "ordered",

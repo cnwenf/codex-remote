@@ -23,6 +23,81 @@ class FakeBrowserSocket implements BrowserSocket {
 }
 
 describe("ConversationReconciler", () => {
+  it("preserves the assistant message phase from a Desktop snapshot", () => {
+    const reconciler = new ConversationReconciler();
+
+    const next = reconciler.hydrate(initialCodexState, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          items: [{
+            id: "agent-final",
+            type: "agentMessage",
+            text: "Done",
+            phase: "final_answer",
+          }],
+        }],
+      },
+    });
+
+    expect(next.threads.t1.turns["turn-1"].items["agent-final"].phase).toBe("final_answer");
+  });
+
+  it("keeps a snapshot final-answer phase when the matching live item has no phase", () => {
+    const reconciler = new ConversationReconciler();
+    const state: CodexState = {
+      stale: false,
+      threadOrder: ["t1"],
+      threads: {
+        t1: {
+          id: "t1",
+          title: "Task",
+          status: "idle",
+          turnOrder: ["turn-1"],
+          turns: {
+            "turn-1": {
+              id: "turn-1",
+              status: "completed",
+              itemOrder: ["agent-final"],
+              items: {
+                "agent-final": {
+                  id: "agent-final",
+                  type: "agentMessage",
+                  text: "Done",
+                  phase: undefined,
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    const next = reconciler.hydrate(state, {
+      desktopMirror: true,
+      thread: {
+        id: "t1",
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          items: [{
+            id: "agent-final",
+            type: "agentMessage",
+            text: "Done",
+            phase: "final_answer",
+          }],
+        }],
+      },
+    });
+
+    expect(next.threads.t1.turns["turn-1"].items["agent-final"].phase).toBe("final_answer");
+  });
+
   it("selects the latest in-progress turn from a recovered Desktop snapshot", () => {
     const reconciler = new ConversationReconciler();
 

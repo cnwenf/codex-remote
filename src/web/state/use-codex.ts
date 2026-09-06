@@ -1373,6 +1373,7 @@ function hydrateThread(
         id: itemId,
         type: itemType,
         text: extractItemText(item),
+        phase: stringValue(item.phase),
         clientMessageId: stringValue(item.clientMessageId) ??
           stringValue(item.clientUserMessageId) ??
           stringValue(item.client_message_id),
@@ -1698,6 +1699,7 @@ function mergeHydratedItem(
     ...snapshot,
     ...live,
     text,
+    phase: live.phase ?? snapshot.phase,
     ...(imageIds.length > 0 ? { imageIds } : {}),
     status: snapshotTerminal ? snapshot.status ?? "completed" : live.status ?? snapshot.status,
   };

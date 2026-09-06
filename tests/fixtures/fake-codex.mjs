@@ -157,8 +157,13 @@ lines.on("line", (line) => {
     if (text || localImages.length > 0) {
       const isSteer = message.method === "turn/steer";
       const isCompactTurn = text === "Finish a compact mobile turn";
+      const isLateCommentaryTurn = text === "Finish a late commentary turn";
       const item = {
-        id: isCompactTurn ? "fixture-compact-user" : isSteer ? "fixture-official-steer" : "fixture-live-user",
+        id: isCompactTurn
+          ? "fixture-compact-user"
+          : isLateCommentaryTurn
+            ? "fixture-late-commentary-user"
+            : isSteer ? "fixture-official-steer" : "fixture-live-user",
         type: isSteer ? "user_message" : "userMessage",
         content: text ? [{ type: "text", text }] : [],
         ...(localImages.length > 0 ? { local_images: localImages } : {}),
@@ -204,6 +209,71 @@ lines.on("line", (line) => {
       send({
         method: "turn/completed",
         params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn", status: "completed" } },
+      });
+      activeTurnId = undefined;
+      return;
+    }
+    if (text === "Finish a late commentary turn") {
+      send({
+        method: "item/completed",
+        params: {
+          threadId: "fixture-thread",
+          turnId: "fixture-live-turn",
+          item: {
+            id: "fixture-initial-commentary",
+            type: "agentMessage",
+            text: "Initial commentary before tools",
+            phase: "commentary",
+            status: "completed",
+          },
+        },
+      });
+      for (let index = 1; index <= 8; index += 1) {
+        send({
+          method: "item/completed",
+          params: {
+            threadId: "fixture-thread",
+            turnId: "fixture-live-turn",
+            item: {
+              id: `fixture-late-tool-${index}`,
+              type: "commandExecution",
+              command: `tool-${index}`,
+              status: "completed",
+            },
+          },
+        });
+      }
+      send({
+        method: "item/completed",
+        params: {
+          threadId: "fixture-thread",
+          turnId: "fixture-live-turn",
+          item: {
+            id: "fixture-semantic-final",
+            type: "agentMessage",
+            text: "Semantic final reply remains visible",
+            phase: "final_answer",
+            status: "completed",
+          },
+        },
+      });
+      send({
+        method: "turn/completed",
+        params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn", status: "completed" } },
+      });
+      send({
+        method: "item/completed",
+        params: {
+          threadId: "fixture-thread",
+          turnId: "fixture-live-turn",
+          item: {
+            id: "fixture-late-commentary",
+            type: "agentMessage",
+            text: "Older commentary delivered after completion",
+            phase: "commentary",
+            status: "completed",
+          },
+        },
       });
       activeTurnId = undefined;
       return;

@@ -46,6 +46,7 @@ type ParsedItem = {
   id: string;
   type: string;
   text: string;
+  phase?: string;
   status?: string;
   imageIds?: string[];
   explanation?: string;
@@ -913,6 +914,9 @@ function rolloutItem(
       id,
       type: role === "user" ? "userMessage" : "agentMessage",
       text,
+      ...(role === "assistant" && stringValue(payload.phase)
+        ? { phase: stringValue(payload.phase) }
+        : {}),
       ...(role === "user" && imageIds.length > 0
         ? { imageIds }
         : {}),

@@ -16,6 +16,7 @@ export type CodexItem = {
   id: string;
   type: string;
   text: string;
+  phase?: string;
   status?: string;
   imageIds?: string[];
   clientMessageId?: string;
@@ -357,6 +358,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           id: itemId,
           type: itemType,
           text: resolvedText,
+          phase: stringValue(item.phase) ?? previous?.phase,
           clientMessageId: clientMessageId ?? previous?.clientMessageId ?? reconciledMatch?.item.clientMessageId,
           lifecycle: isUserMessageType(itemType) ? "confirmed" : previous?.lifecycle,
           ...(imageIds.length > 0 ? { imageIds } : {}),

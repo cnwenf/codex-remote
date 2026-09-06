@@ -315,9 +315,17 @@ function completedTurnLayout(segments: TurnSegment[], status: CodexTurn["status"
   if (status === "inProgress" || status === "unknown") return undefined;
   let finalIndex = -1;
   for (let index = segments.length - 1; index >= 0; index -= 1) {
-    if (segments[index].kind !== "agent") continue;
+    const segment = segments[index];
+    if (segment.kind !== "agent" || !isFinalAnswerPhase(segment.item.phase)) continue;
     finalIndex = index;
     break;
+  }
+  if (finalIndex < 0) {
+    for (let index = segments.length - 1; index >= 0; index -= 1) {
+      if (segments[index].kind !== "agent") continue;
+      finalIndex = index;
+      break;
+    }
   }
   let processStart = 0;
   while (processStart < segments.length && segments[processStart].kind === "user") processStart += 1;
@@ -327,6 +335,10 @@ function completedTurnLayout(segments: TurnSegment[], status: CodexTurn["status"
     process,
     final: finalIndex >= 0 ? segments[finalIndex] as MessageTurnSegment : undefined,
   };
+}
+
+function isFinalAnswerPhase(phase?: string) {
+  return phase?.replace(/[_-]/g, "").toLocaleLowerCase() === "finalanswer";
 }
 
 function segmentItemCount(segments: TurnSegment[]) {
