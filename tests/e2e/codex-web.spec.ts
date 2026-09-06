@@ -156,6 +156,38 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   ).toBe(true);
 });
 
+test("keeps the completed final reply above expanded mobile controls", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "chrome-mobile", "mobile conversation behavior");
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+
+  const instruction = page.getByRole("textbox", { name: "Instruction" });
+  await instruction.fill("Finish a compact mobile turn");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  await expect(page.locator(".task-status")).toHaveText("空闲");
+  const completedTurn = page.locator('[data-turn-id="fixture-live-turn"]').last();
+  await expect(completedTurn.getByText("执行过程（1 项）")).toBeVisible();
+  await expect(page.locator(".composer")).toHaveClass(/composer-expanded/);
+  await page.getByLabel("添加图片").setInputFiles({
+    name: "next-message.png",
+    mimeType: "image/png",
+    buffer: PNG_1X1,
+  });
+  await expect(page.getByText("next-message.png")).toBeVisible();
+  const finalReply = completedTurn.locator(":scope > .message-agent").last();
+  await expect(finalReply).toContainText("Compact final reply");
+  const finalBox = await finalReply.boundingBox();
+  const controlsBox = await page.locator(".conversation-controls").boundingBox();
+  expect(finalBox).not.toBeNull();
+  expect(controlsBox).not.toBeNull();
+  expect(finalBox!.y + finalBox!.height).toBeLessThanOrEqual(controlsBox!.y);
+});
+
 test("pins the latest long user question in two lines after it leaves the mobile viewport", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chrome-mobile", "mobile conversation behavior");
   await page.goto("/");

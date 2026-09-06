@@ -631,13 +631,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .task-header { min-height: 58px; grid-template-columns: 44px minmax(0, 1fr) auto; margin: 6px 12px 0; padding: 5px 10px 5px 5px; }
   .back-button { display: grid; width: 46px; height: 46px; place-items: center; padding: 0; border-radius: 999px; font-size: 2rem; background: var(--surface); }
   .task-status { max-width: 70px; overflow: hidden; text-overflow: ellipsis; }
-  .timeline-scroll { padding: 24px 20px calc(178px + env(safe-area-inset-bottom)); scroll-padding-bottom: calc(178px + env(safe-area-inset-bottom)); }
+  .timeline-scroll { padding: 24px 20px 48px; scroll-padding-bottom: 48px; }
   .timeline, .conversation-turn, .message-agent, .message-agent .markdown-body { width: 100%; max-width: 100%; }
   .new-conversation { width: 100%; padding: 24px 18px max(28px, env(safe-area-inset-bottom)); }
   .new-conversation form { grid-template-columns: 1fr; }
   .new-conversation .inline-error, .catalog-error, .create-conversation-button { grid-column: 1; }
   .choice-field small { min-height: 0; }
-  .conversation-controls { position: fixed; z-index: 8; right: max(14px, env(safe-area-inset-right)); bottom: max(10px, env(safe-area-inset-bottom)); left: max(14px, env(safe-area-inset-left)); display: flex; min-width: 0; flex-direction: column; align-items: stretch; }
+  .conversation-controls { position: relative; z-index: 8; display: flex; min-width: 0; flex-direction: column; align-items: stretch; padding: 0 max(14px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); }
   .conversation-controls .todo-list-dock { order: 0; width: 100%; margin: 0 0 4px; }
   .conversation-controls .queued-followups { order: 1; width: 100%; max-height: min(28dvh, 220px); margin: 0 0 4px; overflow-y: auto; }
   .conversation-controls .composer { order: 2; position: static; width: 100%; margin: 0; }

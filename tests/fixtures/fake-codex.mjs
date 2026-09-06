@@ -150,33 +150,63 @@ lines.on("line", (line) => {
       method: "turn/started",
       params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn" } },
     });
-    {
-      const text = message.params?.input?.find?.((item) => item.type === "text")?.text;
-      const localImages = message.params?.input
-        ?.filter?.((item) => item.type === "localImage" && typeof item.path === "string")
-        .map((item) => item.path) ?? [];
-      if (text || localImages.length > 0) {
-        const isSteer = message.method === "turn/steer";
-        const item = {
-          id: isSteer ? "fixture-official-steer" : "fixture-live-user",
-          type: isSteer ? "user_message" : "userMessage",
-          content: text ? [{ type: "text", text }] : [],
-          ...(localImages.length > 0 ? { local_images: localImages } : {}),
-        };
+    const text = message.params?.input?.find?.((item) => item.type === "text")?.text;
+    const localImages = message.params?.input
+      ?.filter?.((item) => item.type === "localImage" && typeof item.path === "string")
+      .map((item) => item.path) ?? [];
+    if (text || localImages.length > 0) {
+      const isSteer = message.method === "turn/steer";
+      const isCompactTurn = text === "Finish a compact mobile turn";
+      const item = {
+        id: isCompactTurn ? "fixture-compact-user" : isSteer ? "fixture-official-steer" : "fixture-live-user",
+        type: isSteer ? "user_message" : "userMessage",
+        content: text ? [{ type: "text", text }] : [],
+        ...(localImages.length > 0 ? { local_images: localImages } : {}),
+      };
+      if (!isCompactTurn) {
         persistedFixtureUserItems.push({
           ...item,
           local_images: undefined,
           imageIds: localImages.map((path) => path.split(/[\\/]/).at(-1)?.replace(/\.[^.]+$/, "")),
         });
-        send({
-          method: "item/started",
-          params: {
-            threadId: "fixture-thread",
-            turnId: isSteer ? "fixture-steer-confirmation" : "fixture-live-turn",
-            item,
-          },
-        });
       }
+      send({
+        method: "item/started",
+        params: {
+          threadId: "fixture-thread",
+          turnId: isSteer ? "fixture-steer-confirmation" : "fixture-live-turn",
+          item,
+        },
+      });
+    }
+    if (text === "Finish a compact mobile turn") {
+      send({
+        method: "item/started",
+        params: {
+          threadId: "fixture-thread",
+          turnId: "fixture-live-turn",
+          item: { id: "fixture-compact-reason", type: "reasoning", summary: ["Finishing"] },
+        },
+      });
+      send({
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "fixture-thread",
+          turnId: "fixture-live-turn",
+          itemId: "fixture-compact-final",
+          delta: "Compact final reply",
+        },
+      });
+      send({
+        method: "turn/diff/updated",
+        params: { threadId: "fixture-thread", turnId: "fixture-live-turn", diff: "" },
+      });
+      send({
+        method: "turn/completed",
+        params: { threadId: "fixture-thread", turn: { id: "fixture-live-turn", status: "completed" } },
+      });
+      activeTurnId = undefined;
+      return;
     }
     send({
       method: "item/started",
