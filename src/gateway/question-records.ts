@@ -143,7 +143,8 @@ export class QuestionRecordReader {
         this.textGroup.visible.write(text);
       }
       else collect(this.slice, text);
-    } else if (this.keyString || identityKeys.has(this.key) || this.stack.at(-1) === "[") {
+    } else if (this.keyString || identityKeys.has(this.key) ||
+      this.stack.at(-1) === "[" && this.key === "content_item_kinds") {
       if (this.scalar.length + text.length > 1024) this.invalid = true;
       else this.scalar += text;
     }

@@ -28,6 +28,28 @@ async function ready(index: QuestionIndex, path: string, req: QuestionContextReq
 }
 
 describe("persistent question index", () => {
+  it("keeps an answer associated across a legal long command array", async () => {
+    const { index, path } = fixture([context, message("u1", "user", "original question"),
+      { type: "event_msg", payload: { type: "item_completed", turn_id: "turn-1", item: {
+        type: "CommandExecution", id: "exec-1", command: ["zsh", "-lc", "x".repeat(2000)],
+        aggregated_output: "ok", status: "completed",
+      } } }, message("a1", "assistant", "answer")]);
+    expect(await ready(index, path)).toMatchObject({ question: { id: "u1", text: "original question" } });
+  });
+
+  it("rebuilds a persisted index from older parser semantics", async () => {
+    const { index, path, dir } = fixture([context, message("u1", "user", "question"), message("a1", "assistant", "answer")]);
+    await ready(index, path);
+    index.close();
+    const database = new DatabaseSync(join(dir, "questions.sqlite"));
+    database.exec("PRAGMA user_version=0; UPDATE question_anchors SET question=NULL; UPDATE question_files SET barrier=size");
+    database.close();
+    const reopened = new QuestionIndex(join(dir, "questions.sqlite"));
+    resources.push({ index: reopened, dir });
+    expect(reopened.read(path, request).state).toBe("pending");
+    expect(await ready(reopened, path)).toMatchObject({ question: { id: "u1" } });
+  });
+
   it("returns pending immediately then isolates answers around same-turn identical inputs", async () => {
     const { index, path } = fixture([context, message("u1", "user", "same"), message("a1", "assistant", "answer"), message("u2", "user", "same"), message("a2", "assistant", "second")]);
     expect(index.read(path, request).state).toBe("pending");

@@ -6,6 +6,7 @@ import type { QuestionContext, QuestionContextRequest } from "../protocol/questi
 import { QuestionRecordReader, type QuestionRecord } from "./question-records";
 
 const BLOCK = 64 * 1024;
+const INDEX_VERSION = 1;
 type FileRow = { path: string; thread: string; generation: string; identity: string; size: number; mtime: number; ctime: number;
   fingerprint: string; scanned: number; observed: number; turn: string | null; error: string | null; barrier: number };
 type QuestionRow = { id: string; text: string; length: number; images: number; source: "user" | "delegated";
@@ -59,6 +60,10 @@ export class QuestionIndex {
       CREATE TABLE IF NOT EXISTS question_anchors (
         generation TEXT NOT NULL, thread TEXT NOT NULL, turn TEXT NOT NULL, id TEXT NOT NULL, question TEXT,
         PRIMARY KEY(generation, thread, turn, id));`);
+    const version = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+    if (version.user_version !== INDEX_VERSION) this.db.exec(`BEGIN;
+      DELETE FROM question_anchors; DELETE FROM questions; DELETE FROM question_files;
+      PRAGMA user_version=${INDEX_VERSION}; COMMIT;`);
   }
 
   read(path: string, request: QuestionContextRequest): QuestionContext {

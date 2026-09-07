@@ -10,6 +10,27 @@ function parse(value: unknown, offset = 0) {
 }
 
 describe("bounded question record projection", () => {
+  it("skips a long command array without treating the legal record as corrupt", () => {
+    const reader = new QuestionRecordReader();
+    reader.write(Buffer.from(JSON.stringify({ type: "event_msg", payload: {
+      type: "item_completed", turn_id: "turn", item: {
+        type: "CommandExecution", id: "exec", command: ["zsh", "-lc", "x".repeat(2000)],
+      },
+    } })));
+    expect(reader.finish()).toBeUndefined();
+    expect(reader.valid).toBe(true);
+  });
+
+  it("keeps steering metadata array strings bounded", () => {
+    const reader = new QuestionRecordReader();
+    reader.write(Buffer.from(JSON.stringify({ type: "response_item", payload: {
+      type: "message", role: "user", id: "u", content: [{ type: "input_text", text: "question" }],
+      internal_chat_message_metadata_passthrough: { content_item_kinds: ["x".repeat(2000)] },
+    } })));
+    expect(reader.finish()).toBeUndefined();
+    expect(reader.valid).toBe(false);
+  });
+
   it("finds user metadata after a giant reversed image field", () => {
     expect(parse({ payload: { content: [{ image_url: "data:image/png;base64," + "a".repeat(2 ** 22), type: "input_image" }],
       role: "user", id: "u", type: "message", internal_chat_message_metadata_passthrough: { turn_id: "turn" } }, type: "response_item" }))
