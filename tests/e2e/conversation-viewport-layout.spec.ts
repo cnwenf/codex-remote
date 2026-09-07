@@ -12,13 +12,16 @@ test("keeps the pinned question out of the conversation flow while paging upward
         import { ConversationViewport } from "./src/web/components/conversation-viewport";
         const question = "A long original question that stays available while reading the final answer.";
         function Fixture() {
-          const [currentQuestion, setCurrentQuestion] = useState();
-          window.enablePinnedQuestion = () => setCurrentQuestion(question);
-          return <main data-current-question={currentQuestion ?? ""} style={{ height: "640px", display: "flex", flexDirection: "column" }}>
-              <ConversationViewport threadId="fixture" currentQuestion={currentQuestion}
+          const [enabled, setEnabled] = useState(false);
+          window.enablePinnedQuestion = () => setEnabled(true);
+          return <main data-current-question={enabled ? question : ""} style={{ height: "640px", display: "flex", flexDirection: "column" }}>
+              <ConversationViewport threadId="fixture" connection="ready"
+                readQuestionContext={async (request) => ({ ...request, state: "ready", revision: "generation-1",
+                  question: { id: "question-1", text: question, imageCount: 0, source: "user", truncated: false, textOffset: 0 } })}
                 history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={async () => {}}>
-                <article data-user-message="true" style={{ minHeight: 80 }}>{question}</article>
-                <div style={{ height: 1800, flex: "0 0 1800px" }}>Long final answer</div>
+                <article data-user-message="true" data-item-id="question-1" style={{ minHeight: 80 }}>{question}</article>
+                <div data-question-anchor={enabled ? "true" : undefined} data-turn-id="turn-1" data-anchor-item-id="answer-1"
+                  style={{ height: 1800, flex: "0 0 1800px" }}>Long final answer</div>
               </ConversationViewport>
             </main>;
         }

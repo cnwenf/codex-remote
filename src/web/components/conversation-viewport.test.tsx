@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CodexThread } from "../../protocol/thread-store";
-import { ConversationViewport, currentThreadQuestion } from "./conversation-viewport";
+import type { QuestionContextRequest } from "../../protocol/question-context";
+import { ConversationViewport, selectVisibleQuestionAnchor } from "./conversation-viewport";
 
 let scrollHeight = 1_000;
 let clientHeight = 300;
@@ -32,6 +32,132 @@ afterEach(() => {
 });
 
 describe("ConversationViewport", () => {
+  it("selects the topmost visible answer from fixed geometry and ignores offscreen answers", () => {
+    expect(selectVisibleQuestionAnchor([
+      { anchor: { turnId: "old", anchorItemId: "old-answer" }, top: -240, bottom: -20 },
+      { anchor: { turnId: "reading", anchorItemId: "reading-answer" }, top: 110, bottom: 260 },
+      { anchor: { turnId: "next", anchorItemId: "next-answer" }, top: 250, bottom: 420 },
+    ], 100, 300)).toEqual({ turnId: "reading", anchorItemId: "reading-answer" });
+    expect(selectVisibleQuestionAnchor([
+      { anchor: { turnId: "old", anchorItemId: "old-answer" }, top: -240, bottom: 90 },
+      { anchor: { turnId: "next", anchorItemId: "next-answer" }, top: 310, bottom: 420 },
+    ], 100, 300)).toBeUndefined();
+    expect(selectVisibleQuestionAnchor([
+      { anchor: { turnId: "older" }, top: 110, bottom: 170 },
+      { anchor: { turnId: "latest" }, top: 180, bottom: 260 },
+    ], 100, 300, true)).toEqual({ turnId: "latest" });
+  });
+
+  it("pins RPC question context when only an answer is rendered", async () => {
+    const readQuestionContext = vi.fn(async (request: QuestionContextRequest) => ({
+      ...request, state: "ready" as const, revision: "1",
+      question: { id: "question-1", text: "解释这段日志", imageCount: 0, source: "user" as const, truncated: false, textOffset: 0 },
+    }));
+    render(<ConversationViewport threadId="thread-1" connection="ready"
+      readQuestionContext={readQuestionContext} history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <article data-testid="visible-answer" data-question-anchor="true" data-turn-id="turn-1" data-anchor-item-id="answer-1">回答正文</article>
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 } as DOMRect);
+    screen.getByTestId("visible-answer").getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+
+    fireEvent.scroll(viewport);
+
+    expect(await screen.findByRole("button", { name: /原始问题：解释这段日志/ })).toBeVisible();
+    expect(screen.queryByTestId("offscreen-original-user")).not.toBeInTheDocument();
+    expect(readQuestionContext).toHaveBeenCalledWith(
+      { threadId: "thread-1", turnId: "turn-1", anchorItemId: "answer-1" },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("keeps expansion while a new visible anchor confirms the same question generation", async () => {
+    let answerBReads = 0;
+    const readQuestionContext = vi.fn(async (request: QuestionContextRequest) => {
+      if (request.textOffset === 5) return {
+        ...request, state: "ready" as const, revision: "generation-1",
+        question: { id: "question-1", text: "续页", imageCount: 0, source: "user" as const, truncated: false, textOffset: 5 },
+      };
+      if (request.anchorItemId === "answer-b" && ++answerBReads === 1) {
+        return { ...request, state: "pending" as const, revision: "generation-1" };
+      }
+      return {
+        ...request, state: "ready" as const, revision: request.anchorItemId === "answer-c" ? "generation-2" : "generation-1",
+        question: { id: "question-1", text: "同一个问题", imageCount: 0, source: "user" as const,
+          truncated: request.anchorItemId !== "answer-c", textOffset: 0,
+          ...(request.anchorItemId === "answer-c" ? {} : { nextTextOffset: 5 }) },
+      };
+    });
+    render(<ConversationViewport threadId="thread-1" connection="ready"
+      readQuestionContext={readQuestionContext} history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <article data-testid="answer-a" data-question-anchor="true" data-turn-id="turn-1" data-anchor-item-id="answer-a">回答 A</article>
+      <article data-testid="answer-b" data-question-anchor="true" data-turn-id="turn-1" data-anchor-item-id="answer-b">回答 B</article>
+      <article data-testid="answer-c" data-question-anchor="true" data-turn-id="turn-1" data-anchor-item-id="answer-c">回答 C</article>
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 } as DOMRect);
+    const a = screen.getByTestId("answer-a");
+    const b = screen.getByTestId("answer-b");
+    const c = screen.getByTestId("answer-c");
+    a.getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+    b.getBoundingClientRect = () => ({ top: 520, bottom: 620 } as DOMRect);
+    c.getBoundingClientRect = () => ({ top: 640, bottom: 740 } as DOMRect);
+    fireEvent.scroll(viewport);
+    const pinned = await screen.findByRole("button", { name: /原始问题：同一个问题/ });
+    fireEvent.click(pinned);
+    expect(pinned).toHaveAttribute("aria-expanded", "true");
+    await screen.findByText("同一个问题续页");
+
+    a.getBoundingClientRect = () => ({ top: -20, bottom: 80 } as DOMRect);
+    b.getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+    fireEvent.scroll(viewport);
+    await screen.findByText("正在定位原始问题…");
+    await screen.findByRole("button", { name: /原始问题：同一个问题/ });
+    expect(screen.getByRole("button", { name: /原始问题：同一个问题续页/ })).toHaveAttribute("aria-expanded", "true");
+
+    b.getBoundingClientRect = () => ({ top: -20, bottom: 80 } as DOMRect);
+    c.getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+    fireEvent.scroll(viewport);
+    await screen.findByRole("button", { name: /原始问题：同一个问题/ });
+    expect(screen.getByRole("button", { name: /原始问题：同一个问题/ })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("shows pending, not-found, error, and delegated image-only context explicitly", async () => {
+    const readQuestionContext = vi.fn(async (request: QuestionContextRequest) => ({
+      ...request, state: "not_found" as const, revision: "missing",
+    }));
+    const view = render(<ConversationViewport threadId="thread-1" connection="ready"
+      readQuestionContext={readQuestionContext} history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <article data-testid="status-answer" data-question-anchor="true" data-turn-id="turn-1" data-anchor-item-id="answer-1">回答</article>
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 } as DOMRect);
+    screen.getByTestId("status-answer").getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+    fireEvent.scroll(viewport);
+    expect(screen.getByText("正在定位原始问题…")).toBeVisible();
+    await screen.findByText("未找到对应的原始问题");
+
+    const errorReader = vi.fn(async () => { throw new Error("索引暂不可用"); });
+    view.rerender(<ConversationViewport threadId="thread-2" connection="ready"
+      readQuestionContext={errorReader} history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <article data-testid="error-answer" data-question-anchor="true" data-turn-id="turn-2">回答</article>
+    </ConversationViewport>);
+    screen.getByTestId("error-answer").getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+    fireEvent.scroll(viewport);
+    expect(await screen.findByRole("alert")).toHaveTextContent("索引暂不可用");
+
+    const imageReader = vi.fn(async (request: QuestionContextRequest) => ({
+      ...request, state: "ready" as const, revision: "image",
+      question: { id: "image-question", text: "", imageCount: 2, source: "delegated" as const, sourceThreadId: "child", truncated: false, textOffset: 0 },
+    }));
+    view.rerender(<ConversationViewport threadId="thread-3" connection="ready"
+      readQuestionContext={imageReader} history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <article data-testid="image-answer" data-question-anchor="true" data-turn-id="turn-3">回答</article>
+    </ConversationViewport>);
+    screen.getByTestId("image-answer").getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+    fireEvent.scroll(viewport);
+    expect(await screen.findByRole("button", { name: /原始问题：2 张图片/ })).toHaveTextContent("委派问题");
+  });
   it.each([
     { layout: "delayed image", initialHeight: 1_000, initialTop: 700, anchoredTop: 900 },
     { layout: "cold short-to-long hydration", initialHeight: 200, initialTop: 0, anchoredTop: 0 },
@@ -248,80 +374,6 @@ describe("ConversationViewport", () => {
     expect(onInteract).toHaveBeenCalledTimes(1);
   });
 
-  it("pins the latest user question after it scrolls above the viewport and collapses outside", () => {
-    const question = "这是一个很长的用户问题，需要在离开窗口后固定在顶部，并且默认只显示两行。";
-    render(
-      <ConversationViewport
-        threadId="thread-1"
-        history={{ hasMoreBefore: false, loading: false }}
-        currentQuestion={question}
-        onLoadEarlier={vi.fn()}
-      >
-        <article data-user-message="true">
-          <div className="markdown-body">{question}</div>
-        </article>
-        <div>Long running answer</div>
-      </ConversationViewport>,
-    );
-    const viewport = screen.getByTestId("timeline-scroll");
-    const prompt = viewport.querySelector<HTMLElement>("[data-user-message='true']")!;
-    viewport.getBoundingClientRect = () => ({ top: 100 } as DOMRect);
-    prompt.getBoundingClientRect = () => ({ bottom: 80 } as DOMRect);
-
-    fireEvent.scroll(viewport);
-    const pinned = screen.getByRole("button", { name: `展开原始问题：${question}` });
-    expect(pinned).toHaveTextContent(question);
-    expect(pinned).toHaveAttribute("aria-expanded", "false");
-    expect(pinned).toHaveClass("pinned-user-question-collapsed");
-
-    fireEvent.click(pinned);
-    expect(pinned).toHaveAttribute("aria-expanded", "true");
-    expect(pinned).toHaveClass("pinned-user-question-expanded");
-
-    fireEvent.pointerDown(document.body);
-    expect(pinned).toHaveAttribute("aria-expanded", "false");
-
-    prompt.getBoundingClientRect = () => ({ bottom: 140 } as DOMRect);
-    fireEvent.scroll(viewport);
-    expect(screen.queryByRole("button", { name: `展开原始问题：${question}` })).not.toBeInTheDocument();
-  });
-
-  it.each(Array.from({ length: 11 }, (_, index) => 150 + index))(
-    "keeps the pinned question stable across the %ipx flow boundary",
-    (shiftedBottom) => {
-      const question = "原始问题";
-      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-        if (this.dataset.testid === "timeline-scroll") return { top: 150 } as DOMRect;
-        if (this.matches("[data-user-message='true']")) {
-          const pinned = document.querySelector(".pinned-user-question");
-          const pinnedInFlow = pinned && !pinned.parentElement?.matches(".pinned-user-question-layer");
-          return { bottom: pinnedInFlow ? shiftedBottom : 149 } as DOMRect;
-        }
-        return {} as DOMRect;
-      });
-      render(
-        <ConversationViewport
-          threadId="thread-1"
-          history={{ hasMoreBefore: false, loading: false }}
-          currentQuestion={question}
-          onLoadEarlier={vi.fn()}
-        >
-          <article data-user-message="true">{question}</article>
-          <div>Long final answer</div>
-        </ConversationViewport>,
-      );
-
-      fireEvent.scroll(screen.getByTestId("timeline-scroll"));
-
-      const pinned = screen.getByRole("button", { name: `展开原始问题：${question}` });
-      expect(pinned).toBeVisible();
-      fireEvent.click(pinned);
-      expect(pinned).toHaveAttribute("aria-expanded", "true");
-      fireEvent.pointerDown(document.body);
-      expect(pinned).toHaveAttribute("aria-expanded", "false");
-    },
-  );
-
   it("does not pin the previous turn while the current running turn has no user item yet", () => {
     render(
       <ConversationViewport
@@ -343,36 +395,4 @@ describe("ConversationViewport", () => {
     expect(screen.queryByRole("button", { name: /原始问题/ })).not.toBeInTheDocument();
   });
 
-  it("selects the raw user text only from the current turn", () => {
-    const thread: CodexThread = {
-      id: "thread-1",
-      title: "Task",
-      status: "running",
-      activeTurnId: "turn-current",
-      turnOrder: ["turn-old", "turn-current"],
-      turns: {
-        "turn-old": {
-          id: "turn-old",
-          status: "completed",
-          itemOrder: ["old-user"],
-          items: { "old-user": { id: "old-user", type: "userMessage", text: "上一轮问题" } },
-        },
-        "turn-current": {
-          id: "turn-current",
-          status: "inProgress",
-          itemOrder: ["current-user"],
-          items: { "current-user": { id: "current-user", type: "user_message", text: "**当前**\n问题" } },
-        },
-      },
-    };
-
-    expect(currentThreadQuestion(thread)).toBe("**当前**\n问题");
-    thread.activeTurnId = undefined;
-    expect(currentThreadQuestion(thread)).toBeUndefined();
-    thread.activeTurnId = "turn-current";
-    thread.turns["turn-current"].itemOrder = [];
-    expect(currentThreadQuestion(thread)).toBeUndefined();
-    thread.status = "idle";
-    expect(currentThreadQuestion(thread)).toBeUndefined();
-  });
 });

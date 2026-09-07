@@ -43,6 +43,9 @@ function codexState(overrides: Record<string, unknown> = {}) {
       runningThreadCount: 1,
     }),
     confirmDesktopRestart: vi.fn().mockResolvedValue({ accepted: true }),
+    readQuestionContext: vi.fn().mockResolvedValue({
+      threadId: "unused", turnId: "unused", state: "not_found", revision: "unused",
+    }),
     interrupt: vi.fn().mockResolvedValue(undefined),
     resolveRequest: vi.fn(),
     ...overrides,
@@ -473,5 +476,35 @@ describe("App", () => {
     await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "Guide now");
     await userEvent.click(screen.getByRole("button", { name: "Steer" }));
     expect(value.sendInstruction).toHaveBeenCalledWith("Guide now", [], "steer");
+  });
+
+  it("wires the visible assistant identity to the dedicated question RPC", async () => {
+    const thread = {
+      id: "thread-1", title: "Task", status: "idle", turnOrder: ["turn-1"],
+      turns: { "turn-1": { id: "turn-1", status: "completed", itemOrder: ["answer-1"], items: {
+        "answer-1": { id: "answer-1", type: "agentMessage", text: "回答正文" },
+      } } },
+    };
+    const readQuestionContext = vi.fn(async (request) => ({
+      ...request, state: "ready", revision: "1",
+      question: { id: "question-1", text: "解释这段日志", imageCount: 0, source: "user", truncated: false, textOffset: 0 },
+    }));
+    useCodexMock.mockReturnValue(codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready", selectedThreadId: thread.id, selectedThread: thread, readQuestionContext,
+    }));
+    const { container } = render(<App />);
+    const viewport = screen.getByTestId("timeline-scroll");
+    const answer = container.querySelector<HTMLElement>('[data-anchor-item-id="answer-1"]')!;
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 } as DOMRect);
+    answer.getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+
+    fireEvent.scroll(viewport);
+
+    expect(await screen.findByRole("button", { name: /原始问题：解释这段日志/ })).toBeVisible();
+    expect(readQuestionContext).toHaveBeenCalledWith(
+      { threadId: "thread-1", turnId: "turn-1", anchorItemId: "answer-1" },
+      expect.any(AbortSignal),
+    );
   });
 });

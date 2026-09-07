@@ -148,6 +148,53 @@ describe("CodexSocket", () => {
     await expect(result).resolves.toEqual({ data: [{ id: "t1" }] });
   });
 
+  it("removes an aborted request and ignores its late response", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    await socket.connect("secret", "ws://127.0.0.1/rpc");
+    const controller = new AbortController();
+
+    const abandoned = socket.request("desktopState/readQuestionContext", { turnId: "old" }, {
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(abandoned).rejects.toThrow("codex-socket-request-aborted");
+
+    const current = socket.request("desktopState/readQuestionContext", { turnId: "current" });
+    fake.serverSend({ type: "rpc", payload: { id: 1, result: { stale: true } } });
+    fake.serverSend({ type: "rpc", payload: { id: 2, result: { stale: false } } });
+    await expect(current).resolves.toEqual({ stale: false });
+  });
+
+  it("rejects immediately without sending when the request signal is already aborted", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    await socket.connect("secret", "ws://127.0.0.1/rpc");
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(socket.request("thread/list", {}, { signal: controller.signal }))
+      .rejects.toThrow("codex-socket-request-aborted");
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it("expires one unresolved request without affecting later responses", async () => {
+    vi.useFakeTimers();
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    await socket.connect("secret", "ws://127.0.0.1/rpc");
+
+    const stalled = socket.request("desktopState/readQuestionContext", { turnId: "old" }, { timeoutMs: 25 });
+    const timeout = expect(stalled).rejects.toThrow("codex-socket-request-timeout");
+    await vi.advanceTimersByTimeAsync(25);
+    await timeout;
+
+    const current = socket.request("desktopState/readQuestionContext", { turnId: "current" });
+    fake.serverSend({ type: "rpc", payload: { id: 1, result: { stale: true } } });
+    fake.serverSend({ type: "rpc", payload: { id: 2, result: { stale: false } } });
+    await expect(current).resolves.toEqual({ stale: false });
+  });
+
   it("rejects pending requests when the connection closes", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

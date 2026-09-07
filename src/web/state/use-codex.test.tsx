@@ -704,6 +704,23 @@ describe("ConversationReconciler", () => {
 });
 
 describe("useCodex", () => {
+  it("applies a deadline only to the read-only question RPC", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const request = vi.spyOn(socket, "request").mockResolvedValue({
+      threadId: "t", turnId: "turn", anchorItemId: "answer", state: "not_found", revision: "1",
+    });
+    const { result } = renderHook(() => useCodex(socket));
+
+    await result.current.readQuestionContext({ threadId: "t", turnId: "turn", anchorItemId: "answer" });
+
+    expect(request).toHaveBeenCalledWith(
+      "desktopState/readQuestionContext",
+      { threadId: "t", turnId: "turn", anchorItemId: "answer" },
+      { signal: undefined, timeoutMs: 10_000 },
+    );
+  });
+
   it("marks only the first task-list request as loading", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

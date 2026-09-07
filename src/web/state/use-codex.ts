@@ -21,6 +21,7 @@ import {
   type PermissionModeVisibility,
 } from "../../protocol/permissions";
 import { CodexSocket, uploadImage, type RemoteApiOptions } from "../api/socket";
+import { isQuestionContext, type QuestionContextRequest } from "../../protocol/question-context";
 
 export type ConnectionState = "disconnected" | "connecting" | "reconnecting" | "ready";
 export type TransportMode = "desktop-live" | "desktop-cold" | "web-live";
@@ -966,6 +967,12 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     };
   }, [socket]);
 
+  const readQuestionContext = useCallback(async (request: QuestionContextRequest, signal?: AbortSignal) => {
+    const result = await socket.request("desktopState/readQuestionContext", request, { signal, timeoutMs: 10_000 });
+    if (!isQuestionContext(result)) throw new Error("原始问题响应无效");
+    return result;
+  }, [socket]);
+
   const resolveRequest = useCallback(
     (requestId: RpcRequest["id"], result: unknown) => {
       socket.respond(requestId, result);
@@ -1018,6 +1025,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       sendInstruction,
       prepareDesktopRestart,
       confirmDesktopRestart,
+      readQuestionContext,
       steerQueuedMessage,
       interrupt,
       resolveRequest,
@@ -1030,6 +1038,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       threadsLoading,
       threadsError,
       confirmDesktopRestart,
+      readQuestionContext,
       createThread,
       creationOptions,
       defaultCwd,

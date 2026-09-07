@@ -111,13 +111,16 @@ function TurnView({
     <li className="conversation-turn" data-turn-id={turn.id}>
       {segments.map((segment, segmentIndex) => {
         if (segment.kind === "activity") {
+          const anchorItem = indexedActivityAnchor(segment.items);
           const hasLaterOutput = segments.slice(segmentIndex + 1).some((candidate) => candidate.kind !== "activity");
           const explicitlyRunning = segment.items.some((item) => item.status === "running" || item.status === "inProgress");
           const activityRunning = !hasLaterOutput && turn.status === "inProgress" && (
             explicitlyRunning || segment.items.some((item) => item.status === undefined)
           );
           return (
-            <details key={segment.key} className="activity-group">
+            <details key={segment.key} className="activity-group"
+              data-question-anchor={anchorItem ? "true" : undefined}
+              data-turn-id={turn.id} data-anchor-item-id={anchorItem?.id}>
               <summary>
                 <span className={`run-indicator run-${activityRunning ? "inProgress" : "completed"}`} aria-hidden="true" />
                 <span>执行过程（{segment.items.length} 项）</span>
@@ -133,6 +136,7 @@ function TurnView({
           <MessageSegment
             key={segment.item.id}
             segment={segment}
+            turnId={turn.id}
             imageRequest={imageRequest}
             onPreviewImage={onPreviewImage}
             onOpenExternalUrl={onOpenExternalUrl}
@@ -169,25 +173,29 @@ function TypingIndicator() {
 
 function MessageSegment({
   segment,
+  turnId,
   imageRequest,
   onPreviewImage,
   onOpenExternalUrl,
 }: {
   segment: Extract<TurnSegment, { kind: "user" | "agent" | "delegated" }>;
+  turnId: string;
   imageRequest?: ImageRequest;
   onPreviewImage: (preview: ImagePreview) => void;
   onOpenExternalUrl?: (url: string) => void;
 }) {
   const item = segment.item;
   if (segment.kind === "delegated") return (
-    <article className="message message-delegated" data-delegated-input="true">
+    <article className="message message-delegated" data-delegated-input="true"
+      data-turn-id={turnId} data-item-id={item.id}>
       <span className="message-author" title={item.sourceThreadId}>来自任务 {item.sourceThreadId?.slice(0, 8) ?? "未知来源"}</span>
       <div className="delegated-input-text">{item.text}</div>
     </article>
   );
   if (segment.kind === "user") {
     return (
-      <article className="message message-user" data-user-message="true">
+      <article className="message message-user" data-user-message="true"
+        data-turn-id={turnId} data-item-id={item.id}>
         <span className="message-author">你</span>
         {item.text ? <MarkdownContent text={item.text} onOpenExternalUrl={onOpenExternalUrl} /> : null}
         {item.imageIds?.length ? (
@@ -207,7 +215,8 @@ function MessageSegment({
     );
   }
   return (
-    <article className="message message-agent">
+    <article className="message message-agent" data-question-anchor="true"
+      data-turn-id={turnId} data-anchor-item-id={item.id}>
       <span className="message-author">Codex</span>
       <MarkdownContent text={item.text || "等待输出…"} assistant onOpenExternalUrl={onOpenExternalUrl}
         localImages={item.localImages} imageRequest={imageRequest} onPreviewImage={onPreviewImage} />
@@ -325,6 +334,13 @@ function segmentItems(items: CodexItem[]): TurnSegment[] {
     else segments.push({ kind: "activity", key: `activity-${item.id}`, items: [item] });
   }
   return segments;
+}
+
+function indexedActivityAnchor(items: CodexItem[]) {
+  return items.find((item) => {
+    const type = item.type.replace(/[_-]/g, "").toLocaleLowerCase();
+    return type === "reasoning" || type === "functioncall" || type === "customtoolcall" || type.endsWith("toolcall");
+  });
 }
 
 export function TodoListDock({
@@ -448,7 +464,7 @@ function ActivityItem({ item, imageRequest, onPreviewImage }: {
     ? running ? "正在查看图片" : item.status === "completed" ? "已查看图片" : item.status === "failed" ? "查看图片失败" : "查看图片"
     : item.text || (running ? "等待结果…" : "未收到结果正文");
   return (
-    <li>
+    <li data-item-id={item.id}>
       <span className="activity-icon" aria-hidden="true">{iconForType(item.type)}</span>
       <div className="activity-copy">
         <strong>{imageView ? "查看图片" : labelForType(item.type)}</strong>

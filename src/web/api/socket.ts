@@ -16,6 +16,7 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
 };
+type RequestOptions = { signal?: AbortSignal; timeoutMs?: number };
 
 type RecoveryEvent = "online" | "visibilitychange";
 type SocketOptions = {
@@ -117,15 +118,38 @@ export class CodexSocket {
     });
   }
 
-  request(method: string, params?: unknown): Promise<unknown> {
+  request(method: string, params?: unknown, options: RequestOptions = {}): Promise<unknown> {
+    if (options.signal?.aborted) return Promise.reject(new Error("codex-socket-request-aborted"));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        options.signal?.removeEventListener("abort", abort);
+        if (timeout !== undefined) clearTimeout(timeout);
+      };
+      const pending = {
+        resolve: (value: unknown) => { cleanup(); resolve(value); },
+        reject: (reason: Error) => { cleanup(); reject(reason); },
+      };
+      const abort = () => {
+        if (this.pending.get(id) !== pending) return;
+        this.pending.delete(id);
+        pending.reject(new Error("codex-socket-request-aborted"));
+      };
+      this.pending.set(id, pending);
+      options.signal?.addEventListener("abort", abort, { once: true });
+      if (options.timeoutMs !== undefined) {
+        timeout = setTimeout(() => {
+          if (this.pending.get(id) !== pending) return;
+          this.pending.delete(id);
+          pending.reject(new Error("codex-socket-request-timeout"));
+        }, options.timeoutMs);
+      }
       try {
         this.sendRpc({ id, method, params });
       } catch (error) {
         this.pending.delete(id);
-        reject(error);
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
   }

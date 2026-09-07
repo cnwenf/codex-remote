@@ -4,7 +4,7 @@ import { ApprovalSheet, type ApprovalResolution } from "./components/approval-sh
 import { BrandMark } from "./components/brand-mark";
 import { Composer } from "./components/composer";
 import { QueuedFollowUps } from "./components/queued-follow-ups";
-import { ConversationViewport, currentThreadQuestion } from "./components/conversation-viewport";
+import { ConversationViewport } from "./components/conversation-viewport";
 import { DiffViewer } from "./components/diff-viewer";
 import { NewConversation } from "./components/new-conversation";
 import { isDirectThread, projectsFromThreads, TaskList } from "./components/task-list";
@@ -432,7 +432,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 threadId={codex.selectedThread.id}
                 initialHistoryPending={Boolean(codex.selectedThreadLoading || codex.selectedThreadError) && codex.selectedThread.turnOrder.length === 0}
                 history={codex.selectedThreadHistory}
-                currentQuestion={currentThreadQuestion(codex.selectedThread)}
+                connection={codex.connection}
+                readQuestionContext={codex.readQuestionContext}
                 onLoadEarlier={codex.loadEarlierThreadHistory}
                 onInteract={() => setComposerExpanded(false)}
               >

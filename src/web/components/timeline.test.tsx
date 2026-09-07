@@ -6,6 +6,27 @@ import { hydrateThread } from "../state/conversation-history";
 import { Timeline, TodoListDock } from "./timeline";
 
 describe("Timeline", () => {
+  it("exposes exact answer anchors without treating user or delegated input as an answer", () => {
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", status: "idle", turns: [{
+      id: "turn-1", status: "completed", items: [
+        { id: "user-1", type: "userMessage", text: "原问题" },
+        { id: "agent-1", type: "agentMessage", text: "回答" },
+        { id: "tool-1", type: "commandExecution", command: "pwd", status: "completed" },
+        { id: "reason-1", type: "reasoning", text: "继续分析" },
+        { id: "delegated-1", type: "delegatedInput", text: "补充", sourceThreadId: "child" },
+        { id: "native-completion-only", type: "commandExecution", command: "pwd", status: "completed" },
+      ],
+    }] } });
+    const { container } = render(<Timeline thread={state.threads.t} />);
+
+    expect(container.querySelector('[data-question-anchor="true"][data-turn-id="turn-1"][data-anchor-item-id="agent-1"]')).toBeInTheDocument();
+    expect(container.querySelector('.activity-group[data-turn-id="turn-1"][data-anchor-item-id="reason-1"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-item-id="native-completion-only"]')?.closest(".activity-group"))
+      .not.toHaveAttribute("data-question-anchor");
+    expect(container.querySelector('[data-user-message="true"]')).not.toHaveAttribute("data-question-anchor");
+    expect(container.querySelector('[data-delegated-input="true"]')).not.toHaveAttribute("data-question-anchor");
+  });
+
   it("marks an interrupted QA without discarding its partial text or inventing a final", () => {
     const state = hydrateThread(initialCodexState, { thread: { id: "t", status: "idle", turns: [
       { id: "turn", status: "interrupted", items: [

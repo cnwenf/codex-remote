@@ -248,19 +248,11 @@ test("pins the latest long user question in two lines after it leaves the mobile
   await page.locator(".diff-panel").evaluate((element: HTMLDetailsElement) => {
     element.open = true;
   });
-  await viewport.evaluate((element) => {
-    element.scrollTop = element.scrollHeight;
-    element.dispatchEvent(new Event("scroll"));
-  });
-  await expect.poll(() => viewport.evaluate((element) => {
-    const prompts = element.querySelectorAll<HTMLElement>("[data-user-message='true']");
-    const prompt = prompts.item(prompts.length - 1);
-    return Boolean(prompt && prompt.getBoundingClientRect().bottom <= element.getBoundingClientRect().top);
-  })).toBe(true);
-
+  await page.locator('[data-anchor-item-id="fixture-agent"]').scrollIntoViewIfNeeded();
+  await viewport.dispatchEvent("scroll");
   const pinned = page.locator(".pinned-user-question");
   await expect(page.getByRole("button", { name: `展开原始问题：${question}` })).toBeVisible();
-  await expect(pinned).toHaveText(question);
+  await expect(pinned).toContainText(question);
   expect(await pinned.locator("span").evaluate((element) => getComputedStyle(element).webkitLineClamp)).toBe("2");
 
   await pinned.click();
@@ -270,7 +262,7 @@ test("pins the latest long user question in two lines after it leaves the mobile
 
   await viewport.evaluate((element) => {
     const prompts = element.querySelectorAll<HTMLElement>("[data-user-message='true']");
-    prompts.item(prompts.length - 1)?.scrollIntoView({ block: "start" });
+    prompts.item(prompts.length - 1)?.scrollIntoView({ block: "center" });
     element.dispatchEvent(new Event("scroll"));
   });
   await expect(page.getByRole("button", { name: `展开原始问题：${question}` })).toHaveCount(0);

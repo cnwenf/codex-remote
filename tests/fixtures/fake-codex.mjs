@@ -431,11 +431,13 @@ function fixtureThreadWithTurns() {
     status: "completed",
     durationMs: 1_500 + index,
     items: [
-      {
-        id: `user-${index}`,
-        type: "userMessage",
-        content: [{ type: "text", text: `Follow-up instruction ${index + 1}` }],
-      },
+      ...(index === 9 ? [] : [
+        {
+          id: `user-${index}`,
+          type: "userMessage",
+          content: [{ type: "text", text: `Follow-up instruction ${index + 1}` }],
+        },
+      ]),
       {
         id: `agent-${index}`,
         type: "agentMessage",
@@ -450,13 +452,22 @@ function fixtureThreadWithTurns() {
     status: "completed",
     items: persistedFixtureUserItems,
   }] : [];
+  const paginatedTurn = {
+    id: "fixture-paginated-turn",
+    status: "completed",
+    items: [{
+      id: "fixture-paginated-agent",
+      type: "agentMessage",
+      text: "A long hidden-source question was handled here.\n\n".repeat(16),
+    }],
+  };
   return {
     id: "fixture-thread",
     name: "Fixture task",
     cwd: "/tmp/codex-fixture",
     status: { type: "idle" },
     updatedAt: 1_787_200_000,
-    turns: [firstTurn, ...longTurns, ...persistedTurn],
+    turns: [firstTurn, ...longTurns, paginatedTurn, ...persistedTurn],
   };
 }
 
