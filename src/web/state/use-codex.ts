@@ -189,6 +189,7 @@ export type ThreadHistoryState = {
 };
 
 const HISTORY_PAGE = { limitTurns: 8, maxBytes: 2 * 1024 * 1024 } as const;
+const THREAD_LIST_REQUEST_TIMEOUT_MS = 5_000;
 const emptyThreadHistory: ThreadHistoryState = { hasMoreBefore: false, loading: false };
 
 const emptyCreationOptions = {
@@ -203,6 +204,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const [reconciler] = useState(() => new ConversationReconciler());
   const [state, setState] = useState<CodexState>(initialCodexState);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
+  const [threadsLoading, setThreadsLoading] = useState(true);
+  const [threadsError, setThreadsError] = useState<string>();
   const [defaultCwd, setDefaultCwd] = useState<string>();
   const [selectedThreadId, setSelectedThreadId] = useState<string>();
   const [loadingThreadId, setLoadingThreadId] = useState<string>();
@@ -216,6 +219,9 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const [creationOptions, setCreationOptions] = useState(emptyCreationOptions);
   const [desktopStateAvailable, setDesktopStateAvailable] = useState(false);
   const desktopStateAvailableRef = useRef(false);
+  const initialThreadsPending = useRef(true);
+  const threadListRequestVersion = useRef(0);
+  const threadListSettledVersion = useRef(0);
   const [transportMode, setTransportMode] = useState<TransportMode>();
   const [transportReadOnly, setTransportReadOnly] = useState(false);
   const [error, setError] = useState<string>();
@@ -312,32 +318,44 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   }, [socket]);
 
   const refreshThreads = useCallback(async () => {
-    let result: unknown;
-    try {
-      result = await socket.request("thread/list", {
-        limit: 100,
-        sortKey: "updated_at",
-      });
-    } catch {
-      // A renderer reload can briefly make the live bridge read-only.
-    }
-    let desktopList: unknown;
-    try {
-      desktopList = await socket.request("desktopState/listThreads", {});
+    const version = ++threadListRequestVersion.current;
+    const liveList = boundedRequest(socket.request("thread/list", {
+      limit: 100,
+      sortKey: "updated_at",
+    }), THREAD_LIST_REQUEST_TIMEOUT_MS).catch(() => undefined);
+    const desktopListRequest = boundedRequest(
+      socket.request("desktopState/listThreads", {}),
+      THREAD_LIST_REQUEST_TIMEOUT_MS,
+    ).then((desktopList) => {
       desktopStateAvailableRef.current = true;
       setDesktopStateAvailable(true);
-    } catch {
-      // Older/test gateways can still provide a useful App Server list.
+      return desktopList;
+    }).catch(() => {
       if (!desktopStateAvailableRef.current) setDesktopStateAvailable(false);
-    }
+      return undefined;
+    });
+    const [result, desktopList] = await Promise.all([liveList, desktopListRequest]);
+    if (version <= threadListSettledVersion.current) return;
+    threadListSettledVersion.current = version;
     if (result === undefined && desktopList === undefined) {
-      throw new Error("读取对话列表失败");
+      const message = "读取对话列表失败";
+      if (initialThreadsPending.current) {
+        setThreadsError(message);
+        initialThreadsPending.current = false;
+        setThreadsLoading(false);
+      }
+      throw new Error(message);
     }
     setState((current) => replaceThreadList(
       current,
       mergeDesktopThreadList(result ?? { data: [] }, desktopList),
       desktopList,
     ));
+    setThreadsError(undefined);
+    if (initialThreadsPending.current) {
+      initialThreadsPending.current = false;
+      setThreadsLoading(false);
+    }
   }, [socket]);
 
   const refreshArchivedThreads = useCallback(async () => {
@@ -963,6 +981,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       archivedThreadsLoading,
       creationOptions,
       connection,
+      threadsLoading,
+      threadsError,
       defaultCwd,
       desktopStateAvailable,
       transportMode,
@@ -1007,6 +1027,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       archivedThreads,
       archivedThreadsLoading,
       connection,
+      threadsLoading,
+      threadsError,
       confirmDesktopRestart,
       createThread,
       creationOptions,
@@ -1354,6 +1376,14 @@ function historyState(value: unknown): ThreadHistoryState {
     hasMoreBefore: history.hasMoreBefore === true && Boolean(beforeCursor),
     loading: false,
   };
+}
+
+function boundedRequest<T>(request: Promise<T>, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("request timed out")), timeoutMs);
+  });
+  return Promise.race([request, deadline]).finally(() => clearTimeout(timer));
 }
 
 function mergeDesktopThreadList(appServerValue: unknown, desktopValue: unknown) {

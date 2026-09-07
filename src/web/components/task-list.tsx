@@ -6,6 +6,8 @@ type TaskListProps = {
   threads: CodexThread[];
   archivedThreads?: CodexThread[];
   archivedLoading?: boolean;
+  loading?: boolean;
+  loadError?: string;
   directCwd?: string;
   selectedId?: string;
   onSelect: (id: string) => void;
@@ -42,6 +44,8 @@ export function TaskList({
   threads,
   archivedThreads = [],
   archivedLoading = false,
+  loading = false,
+  loadError,
   directCwd,
   selectedId,
   onSelect,
@@ -156,7 +160,11 @@ export function TaskList({
     <nav className="task-nav" aria-label={copy.navigation}>
       <div className="task-list" data-testid="task-list-scroll">
         {filtered.length === 0 ? (
-          <p className="empty-list">{threads.length === 0 ? copy.noActive : copy.noMatches}</p>
+          <p className="empty-list" role={threads.length === 0 && loadError ? "alert" : undefined}>
+            {threads.length === 0
+              ? loading ? copy.loading : loadError ?? copy.noActive
+              : copy.noMatches}
+          </p>
         ) : (
           <>
             <section className="nav-section" aria-labelledby="pinned-heading">

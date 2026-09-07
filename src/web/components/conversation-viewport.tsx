@@ -7,6 +7,7 @@ const BOTTOM_FOLLOW_THRESHOLD = 120;
 
 type ConversationViewportProps = {
   threadId: string;
+  initialHistoryPending?: boolean;
   history: ThreadHistoryState;
   currentQuestion?: string;
   onLoadEarlier: () => Promise<void>;
@@ -18,6 +19,7 @@ type ScrollAnchor = { scrollHeight: number; scrollTop: number };
 
 export function ConversationViewport({
   threadId,
+  initialHistoryPending = false,
   history,
   currentQuestion,
   onLoadEarlier,
@@ -148,26 +150,28 @@ export function ConversationViewport({
       }}
     >
       {pinnedQuestion ? (
-        <button
-          ref={pinnedQuestionRef}
-          type="button"
-          className={`pinned-user-question ${questionExpanded
-            ? "pinned-user-question-expanded"
-            : "pinned-user-question-collapsed"}`}
-          aria-label={`${questionExpanded ? "收起" : "展开"}原始问题：${pinnedQuestion}`}
-          aria-expanded={questionExpanded}
-          onClick={() => setQuestionExpanded((current) => !current)}
-        >
-          <span>{pinnedQuestion}</span>
-        </button>
+        <div className="pinned-user-question-layer">
+          <button
+            ref={pinnedQuestionRef}
+            type="button"
+            className={`pinned-user-question ${questionExpanded
+              ? "pinned-user-question-expanded"
+              : "pinned-user-question-collapsed"}`}
+            aria-label={`${questionExpanded ? "收起" : "展开"}原始问题：${pinnedQuestion}`}
+            aria-expanded={questionExpanded}
+            onClick={() => setQuestionExpanded((current) => !current)}
+          >
+            <span>{pinnedQuestion}</span>
+          </button>
+        </div>
       ) : null}
-      <div className="history-sentinel" role="status" aria-live="polite">
+      {!initialHistoryPending ? <div className="history-sentinel" role="status" aria-live="polite">
         {history.loading
           ? "正在加载更早内容…"
           : history.hasMoreBefore
             ? "继续向上滚动可加载更早内容"
             : "已显示最早内容"}
-      </div>
+      </div> : null}
       <div ref={contentRef}>{children}</div>
     </div>
   );

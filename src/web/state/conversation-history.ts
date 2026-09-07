@@ -1,7 +1,9 @@
 import { todoItems, turnErrorFromProtocol, type CodexState, type CodexThread, type CodexTurn, type ThreadStatus, type TurnStatus } from "../../protocol/thread-store";
 import { compatibleUserImages, sameUserInput } from "../../protocol/user-message-identity";
-import { itemText, mergeMessageItem, messageKind } from "../../protocol/message-content";
+import { itemText, localImagesFromProtocol, mergeMessageItem, messageKind } from "../../protocol/message-content";
+import { MAX_PENDING_TOOL_OUTPUTS, toolDetailsFromProtocol, type PendingToolOutput } from "../../protocol/tool-content";
 import { mergeMessageOrder } from "../../protocol/message-order";
+import { delegatedInputFromProtocol } from "../../protocol/delegated-input";
 import { permissionStateFromProtocol } from "../../protocol/permissions";
 
 // Pure history reconciliation: no sockets, React state, or rendering decisions.
@@ -27,6 +29,7 @@ export function hydrateThread(
     };
   }
   const snapshotTurnOrder: string[] = [];
+  const snapshotTerminalTurnIds = new Set<string>();
   const snapshotFallbackItemKeys = new Set<string>();
   let snapshotHasInProgressTurn = false;
   const turnValues = Array.isArray(record.turns) ? record.turns : [];
@@ -39,10 +42,11 @@ export function hydrateThread(
     const snapshotStatus = normalizeTurnStatus(turnRecord.status);
     if (snapshotStatus === "inProgress") snapshotHasInProgressTurn = true;
     const snapshotTerminal = isTerminalTurnStatus(snapshotStatus);
+    if (snapshotTerminal) snapshotTerminalTurnIds.add(turnId);
     const snapshotItems: CodexTurn["items"] = {};
     const snapshotItemOrder: string[] = [];
     for (const itemValue of Array.isArray(turnRecord.items) ? turnRecord.items : []) {
-      const item = asRecord(itemValue);
+      const item: Record<string, unknown> = delegatedInputFromProtocol(asRecord(itemValue)) ?? asRecord(itemValue);
       const itemId = stringValue(item.id);
       if (!itemId) continue;
       const itemType = stringValue(item.type) ?? "item";
@@ -61,6 +65,11 @@ export function hydrateThread(
         id: itemId,
         type: itemType,
         text: itemText(item),
+        sourceThreadId: stringValue(item.sourceThreadId),
+        delegatedInputIsReplay: typeof item.delegatedInputIsReplay === "boolean" ? item.delegatedInputIsReplay : undefined,
+        ...toolDetailsFromProtocol(item),
+        toolOutputFromPending: item.toolOutputFromPending === true || undefined,
+        localImages: localImagesFromProtocol(item.localImages),
         textSource: messageKind(itemType) === "agent"
           ? snapshotTerminal || item.status === "completed" ? "completed" : "snapshot"
           : undefined,
@@ -117,9 +126,10 @@ export function hydrateThread(
       retainedExistingOrder.push(itemId);
     }
     const existingTerminal = existing ? isTerminalTurnStatus(existing.status) : false;
-    hydratedTurns[turnId] = {
+    const hydratedTurn: CodexTurn = {
       id: turnId,
-      status: existing?.status === "failed" || snapshotStatus === "failed" ? "failed" : existingTerminal
+      status: existing?.status === "failed" || snapshotStatus === "failed" ? "failed"
+        : snapshotStatus === "interrupted" ? "interrupted" : existingTerminal
         ? existing.status
         : snapshotTerminal
         ? snapshotStatus
@@ -128,7 +138,10 @@ export function hydrateThread(
           : snapshotStatus,
       error: turnErrorFromProtocol(turnRecord.error) ?? existing?.error,
       itemOrder: mergeMessageOrder(
-        (existing?.itemOrder ?? []).filter((id) => retainedExistingOrder.includes(id)),
+        (existing?.itemOrder ?? []).filter((id) => retainedExistingOrder.includes(id) && !(
+          placement === "prepend" && existing?.items[id]?.delegatedInputIsReplay === true &&
+          snapshotItems[id]?.delegatedInputIsReplay === false
+        )),
         snapshotItemOrder,
         placement === "prepend" || snapshotTurnIsComplete,
       ),
@@ -141,6 +154,9 @@ export function hydrateThread(
         ? numberValue(turnRecord.durationMs) ?? existing?.durationMs
         : existing?.durationMs ?? numberValue(turnRecord.durationMs),
     };
+    hydratedTurns[turnId] = snapshotTerminal
+      ? completeRetainedItems(hydratedTurn)
+      : hydratedTurn;
   }
   const initialTurnOrder = mergeMessageOrder(current.turnOrder, snapshotTurnOrder, placement !== "append");
   const snapshotStatus = normalizeStatus(record.status, current.status);
@@ -151,9 +167,14 @@ export function hydrateThread(
     snapshotStatus === "idle" &&
     !snapshotHasInProgressTurn
   ) {
-    for (const turnId of initialTurnOrder) {
+    const latestTerminalSnapshotTurnId = [...snapshotTurnOrder].reverse()
+      .find((turnId) => snapshotTerminalTurnIds.has(turnId));
+    const latestTerminalSnapshotIndex = latestTerminalSnapshotTurnId
+      ? initialTurnOrder.indexOf(latestTerminalSnapshotTurnId)
+      : -1;
+    for (const [index, turnId] of initialTurnOrder.entries()) {
       const turn = hydratedTurns[turnId];
-      if (!turn || turn.status !== "inProgress") continue;
+      if (!turn || turn.status !== "inProgress" || index >= latestTerminalSnapshotIndex) continue;
       hydratedTurns[turnId] = completeRetainedTurn(turn);
     }
   }
@@ -163,6 +184,7 @@ export function hydrateThread(
     snapshotFallbackItemKeys,
   );
   const deduplicatedTurns = deduplicated.turns;
+  const toolResults = reconcilePendingToolOutputs(current, record, placement, deduplicatedTurns);
   const turnOrder = deduplicated.turnOrder;
   const activeTurnId = [...turnOrder].reverse().find(
     (turnId) => deduplicatedTurns[turnId]?.status === "inProgress",
@@ -205,6 +227,7 @@ export function hydrateThread(
           stringArray(record.projectRootPaths) ?? stringArray(outer.projectRootPaths) ?? current.projectRootPaths,
         status: reconciledStatus,
         turns: deduplicatedTurns,
+        ...toolResults,
         turnOrder,
         activeTurnId,
         model: stringValue(outer.model) ?? current.model,
@@ -220,10 +243,93 @@ export function hydrateThread(
   };
 }
 
+function reconcilePendingToolOutputs(
+  current: CodexThread,
+  record: Record<string, unknown>,
+  placement: "snapshot" | "prepend" | "append",
+  turns: Record<string, CodexTurn>,
+) {
+  const incoming = Array.isArray(record.pendingToolOutputs) ? record.pendingToolOutputs : [];
+  const values = placement === "prepend"
+    ? [...incoming, ...(current.pendingToolOutputs ?? [])]
+    : [...(current.pendingToolOutputs ?? []), ...incoming];
+  const retained = new Map<string, PendingToolOutput>();
+  let toolOutputOverflow = current.toolOutputOverflow === true || record.toolOutputOverflow === true;
+  const retain = (value: unknown) => {
+    const output = asRecord(value);
+    const id = stringValue(output.id);
+    if (!id) return;
+    const details = toolDetailsFromProtocol({ ...output, type: "toolCall" });
+    if (details.toolOutput === undefined) return;
+    const turnId = stringValue(output.turnId);
+    const key = JSON.stringify([turnId, id]);
+    retained.delete(key);
+    retained.set(key, { id, turnId, toolOutput: details.toolOutput,
+      toolOutputTruncated: details.toolOutputTruncated, toolOutputLength: details.toolOutputLength,
+      toolOutputImageIds: details.toolOutputImageIds, toolOutputImagesIncomplete: details.toolOutputImagesIncomplete });
+    if (retained.size > MAX_PENDING_TOOL_OUTPUTS) {
+      retained.delete(retained.keys().next().value as string);
+      toolOutputOverflow = true;
+    }
+  };
+  for (const value of values) retain(value);
+  // Resolved results live only on their items, with a small provenance marker.
+  // A later page revealing duplicate ids moves ambiguous results back into the
+  // bounded queue, rather than keeping an unbounded second copy of tool output.
+  for (const [turnId, turn] of Object.entries(turns)) {
+    for (const item of Object.values(turn.items)) {
+      if (!item.toolOutputFromPending) continue;
+      const matches = Object.values(turns).filter((candidate) =>
+        (!item.toolOutputTurnId || candidate.id === item.toolOutputTurnId) &&
+        candidate.items[item.id]?.toolInput !== undefined);
+      if (matches.length === 1) continue;
+      retain({ id: item.id, turnId: item.toolOutputTurnId, toolOutput: item.toolOutput,
+        toolOutputTruncated: item.toolOutputTruncated, toolOutputLength: item.toolOutputLength,
+        toolOutputImageIds: item.toolOutputImageIds, toolOutputImagesIncomplete: item.toolOutputImagesIncomplete });
+      turns[turnId] = { ...turns[turnId], items: { ...turns[turnId].items, [item.id]: {
+        ...item, toolOutput: undefined, toolOutputTruncated: undefined,
+        toolOutputLength: undefined, toolOutputFromPending: undefined, toolOutputTurnId: undefined,
+        toolOutputImageIds: undefined, toolOutputImagesIncomplete: undefined,
+      } } };
+    }
+  }
+  let unresolved = 0;
+  for (const [key, output] of retained) {
+    const matches = Object.values(turns).filter((turn) =>
+      (!output.turnId || output.turnId === turn.id) && turn.items[output.id]?.toolInput !== undefined);
+    if (matches.length !== 1) { unresolved++; continue; }
+    const turn = matches[0];
+    const item = turn.items[output.id];
+    // An unrelated raw stream cannot certify or consume an anonymous result.
+    if (!output.turnId && item.toolOutput !== undefined && !item.toolOutputFromPending &&
+      (item.toolOutput !== output.toolOutput || JSON.stringify(item.toolOutputImageIds ?? []) !== JSON.stringify(output.toolOutputImageIds ?? []))) { unresolved++; continue; }
+    retained.delete(key);
+    if (item.toolOutput !== undefined && !item.toolOutputFromPending) continue;
+    turns[turn.id] = { ...turn, items: { ...turn.items, [item.id]: {
+      ...item, toolOutput: output.toolOutput, toolOutputTruncated: output.toolOutputTruncated,
+      toolOutputLength: output.toolOutputLength, toolOutputFromPending: true, toolOutputTurnId: output.turnId,
+      toolOutputImageIds: output.toolOutputImageIds, toolOutputImagesIncomplete: output.toolOutputImagesIncomplete,
+    } } };
+  }
+  return {
+    pendingToolOutputs: [...retained.values()],
+    toolOutputOverflow,
+    toolOutputWarning: toolOutputOverflow
+      ? "部分工具结果超过历史缓存上限；可继续加载较早对话，未恢复的结果请在 Codex Desktop 查看。"
+      : unresolved > 0 ? "部分工具结果尚未找到对应历史；请继续加载较早对话以恢复。" : undefined,
+  };
+}
+
 function completeRetainedTurn(turn: CodexTurn): CodexTurn {
   return {
-    ...turn,
+    ...completeRetainedItems(turn),
     status: "completed",
+  };
+}
+
+function completeRetainedItems(turn: CodexTurn): CodexTurn {
+  return {
+    ...turn,
     items: Object.fromEntries(Object.entries(turn.items).map(([itemId, item]) => [
       itemId,
       item.status === "running" || item.status === "inProgress"

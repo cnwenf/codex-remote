@@ -22,6 +22,20 @@ function snapshot(item: CodexItem) {
 }
 
 describe("user identity during history reconciliation", () => {
+  it.each(["snapshot", "prepend", "append"] as const)("restores native interrupted over raw completed during %s without losing final text", (placement) => {
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", status: "idle", turns: [
+      { id: "old", status: "completed", items: [{ id: "final", type: "agentMessage", text: "Retained final" }] },
+      { id: "new", status: "completed", items: [{ id: "new-final", type: "agentMessage", text: "Latest final" }] },
+    ] } });
+    const restored = hydrateThread(state, { thread: { id: "t", status: "idle", turns: [
+      { id: "old", status: "interrupted", items: [] },
+    ] } }, placement);
+    expect(restored.threads.t.turns.old.status).toBe("interrupted");
+    expect(restored.threads.t.turns.old.items.final.text).toBe("Retained final");
+    expect(restored.threads.t.turns.new.items["new-final"].text).toBe("Latest final");
+    expect(restored.threads.t.status).toBe("idle");
+  });
+
   it("does not confirm a pending send with another client's same-text message", () => {
     const pending = user("pending", [], "client-local");
     const next = hydrateThread(stateWith([pending]), snapshot(user("server", [], "client-other")));
@@ -89,5 +103,39 @@ describe("failed turn history", () => {
     expect(stale.threads.t.status).toBe("error");
     expect(stale.threads.t.turns.turn).toMatchObject({ status: "failed", error: { message: '{"detail":"Bad Request"}' } });
     expect(stale.threads.t.turns.turn.items.answer.text).toBe("Partial answer");
+  });
+});
+
+describe("running turn history", () => {
+  it("keeps a local active turn that is newer than an idle Desktop snapshot", () => {
+    let state = reduceCodexState(initialCodexState, { method: "turn/completed", params: {
+      threadId: "t", turn: { id: "old", status: "completed", items: [] },
+    } });
+    state = reduceCodexState(state, { method: "turn/started", params: {
+      threadId: "t", turn: { id: "new" },
+    } });
+
+    const hydrated = hydrateThread(state, { desktopMirror: true, thread: {
+      id: "t", status: "idle", turns: [{ id: "old", status: "completed", items: [] }],
+    } });
+
+    expect(hydrated.threads.t).toMatchObject({ status: "running", activeTurnId: "new" });
+    expect(hydrated.threads.t.turns.new.status).toBe("inProgress");
+  });
+
+  it("closes an older local active turn when the idle snapshot has a newer terminal turn", () => {
+    let state = reduceCodexState(initialCodexState, { method: "turn/started", params: {
+      threadId: "t", turn: { id: "old" },
+    } });
+    state = reduceCodexState(state, { method: "turn/completed", params: {
+      threadId: "t", turn: { id: "new", status: "completed", items: [] },
+    } });
+
+    const hydrated = hydrateThread(state, { desktopMirror: true, thread: {
+      id: "t", status: "idle", turns: [{ id: "new", status: "completed", items: [] }],
+    } });
+
+    expect(hydrated.threads.t).toMatchObject({ status: "idle", activeTurnId: undefined });
+    expect(hydrated.threads.t.turns.old.status).toBe("completed");
   });
 });

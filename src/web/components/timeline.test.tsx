@@ -6,6 +6,21 @@ import { hydrateThread } from "../state/conversation-history";
 import { Timeline, TodoListDock } from "./timeline";
 
 describe("Timeline", () => {
+  it("marks an interrupted QA without discarding its partial text or inventing a final", () => {
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", status: "idle", turns: [
+      { id: "turn", status: "interrupted", items: [
+        { id: "question", type: "userMessage", text: "检查这份结果" },
+        { id: "partial", type: "agentMessage", phase: "commentary", text: "已经读取第一部分" },
+      ] },
+    ] } });
+    render(<Timeline thread={state.threads.t} />);
+    expect(screen.getByText("本轮已停止")).toBeVisible();
+    expect(screen.getByText("检查这份结果")).toBeVisible();
+    expect(screen.getByText("已经读取第一部分")).toBeVisible();
+    expect(screen.queryByLabelText("Codex 仍在输出")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("shows the real failed turn error after refresh alongside any assistant output", () => {
     const state = hydrateThread(initialCodexState, { thread: { id: "t", status: { type: "systemError" }, turns: [
       { id: "turn", status: "failed", error: { message: '{"detail":"Bad Request"}', additionalDetails: null }, items: [

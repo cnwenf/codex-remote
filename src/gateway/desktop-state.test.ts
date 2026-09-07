@@ -1,12 +1,12 @@
 // @vitest-environment node
 
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DesktopState } from "./desktop-state";
-import { initialCodexState } from "../protocol/thread-store";
+import { initialCodexState, reduceCodexState } from "../protocol/thread-store";
 import { hydrateThread } from "../web/state/conversation-history";
 
 function fixture() {
@@ -23,7 +23,7 @@ function fixture() {
     sandbox_policy TEXT NOT NULL, approval_mode TEXT NOT NULL,
     updated_at_ms INTEGER, recency_at_ms INTEGER,
     section_position INTEGER, created_at_ms INTEGER,
-    thread_source TEXT
+    thread_source TEXT, source TEXT
   )`);
   database.prepare(`INSERT INTO threads (
     id, rollout_path, archived, name, title, preview, cwd, is_pinned,
@@ -120,7 +120,333 @@ function completedTurn(index: number) {
   ];
 }
 
+function syntheticPng(size: number) {
+  const image = Buffer.alloc(size);
+  Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").copy(image);
+  image.writeUInt32BE(0, image.length - 12);
+  image.write("IEND", image.length - 8, "ascii");
+  return image;
+}
+
 describe("DesktopState", () => {
+  it("reads anchored question context outside the visible history page without accepting a client path", async () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, completedTurn(2).map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const page = desktop.request("desktopState/readThread", {
+        threadId: "thread-1",
+        history: { limitTurns: 1, maxBytes: 64 * 1024 },
+      }) as any;
+      expect(page.thread.turns.map((turn: { id: string }) => turn.id)).toEqual(["turn-2"]);
+
+      const request = () => desktop.request("desktopState/readQuestionContext", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        anchorItemId: "agent-1",
+        path: join(dirname(databasePath), "outside.jsonl"),
+      }) as any;
+      expect(request().state).toBe("pending");
+      await vi.waitFor(() => expect(request()).toMatchObject({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        anchorItemId: "agent-1",
+        state: "ready",
+        question: { id: "user-1", text: "Hello Desktop", source: "user" },
+      }));
+      expect(existsSync(join(dirname(databasePath), "codex-remote", "questions.sqlite"))).toBe(true);
+      expect(existsSync(join(dirname(databasePath), "questions.sqlite"))).toBe(false);
+    } finally { desktop.close(); }
+  });
+
+  it.each([
+    {},
+    { threadId: "", turnId: "turn-1" },
+    { threadId: "x".repeat(1025), turnId: "turn-1" },
+    { threadId: "thread-1", turnId: "" },
+    { threadId: "thread-1", turnId: "x".repeat(1025) },
+    { threadId: "thread-1", turnId: "turn-1", anchorItemId: "" },
+    { threadId: "thread-1", turnId: "turn-1", textOffset: -1 },
+    { threadId: "thread-1", turnId: "turn-1", textOffset: 1.5 },
+  ])("rejects invalid question context params %#", (params) => {
+    const { databasePath } = fixture();
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(() => desktop.request("desktopState/readQuestionContext", params))
+        .toThrow("Question context params are invalid");
+    } finally { desktop.close(); }
+  });
+
+  it.each(["missing", "archived"])("rejects a %s Desktop thread before reading question context", (kind) => {
+    const { databasePath } = fixture();
+    if (kind === "archived") {
+      const database = new DatabaseSync(databasePath);
+      database.prepare("UPDATE threads SET archived = 1 WHERE id = 'thread-1'").run();
+      database.close();
+    }
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(() => desktop.request("desktopState/readQuestionContext", {
+        threadId: kind === "missing" ? "missing-thread" : "thread-1",
+        turnId: "turn-1",
+      })).toThrow("Desktop thread not found");
+    } finally { desktop.close(); }
+  });
+
+  it("rejects a Desktop-owned rollout path outside the allowed sessions root", () => {
+    const { databasePath } = fixture();
+    const outside = join(dirname(databasePath), "outside.jsonl");
+    writeFileSync(outside, "\n");
+    const database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE threads SET rollout_path = ? WHERE id = 'thread-1'").run(outside);
+    database.close();
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(() => desktop.request("desktopState/readQuestionContext", {
+        threadId: "thread-1", turnId: "turn-1",
+      })).toThrow("Desktop rollout path is outside the Codex sessions directory");
+    } finally { desktop.close(); }
+  });
+
+  it("returns a bounded error when the validated Desktop rollout cannot be indexed", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const database = new DatabaseSync(databasePath);
+    database.prepare("UPDATE threads SET rollout_path = ? WHERE id = 'thread-1'").run(dirname(rolloutPath));
+    database.close();
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(desktop.request("desktopState/readQuestionContext", {
+        threadId: "thread-1", turnId: "turn-1",
+      })).toMatchObject({
+        threadId: "thread-1", turnId: "turn-1", state: "error", revision: "unavailable",
+      });
+    } finally { desktop.close(); }
+  });
+
+  it("retracts an anonymous result when an older page reveals a duplicate call id", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "older" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "reused", name: "old", arguments: "old" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "older" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "newer" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "reused", name: "new", arguments: "new" } },
+      { type: "response_item", payload: { type: "function_call_output", call_id: "reused", output: "uncertain result" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "newer" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const latest = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { limitTurns: 1 } }) as any;
+      let state = hydrateThread(initialCodexState, latest);
+      expect(state.threads["thread-1"].turns.newer.items.reused.toolOutput).toBe("uncertain result");
+      const older = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor: latest.history.beforeCursor } });
+      state = hydrateThread(state, older, "prepend");
+      expect(state.threads["thread-1"].turns.newer.items.reused.toolOutput).toBeUndefined();
+      expect(state.threads["thread-1"].turns.older.items.reused.toolOutput).toBeUndefined();
+      expect(state.threads["thread-1"].toolOutputWarning).toContain("工具结果");
+    } finally { desktop.close(); }
+  });
+  it.each(["function_call", "custom_tool_call"])("keeps historical %s input and output together by call_id", (type) => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "tools" } },
+      { type: "response_item", payload: { type, id: "record-id", call_id: "call-id", name: "inspect", arguments: type === "function_call" ? '{"path":"src"}' : undefined, input: type === "custom_tool_call" ? "inspect src" : undefined } },
+      { type: "response_item", payload: { type: `${type}_output`, id: "output-record", call_id: "call-id", output: "first line\nsecond line" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "tools" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const snapshot = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(snapshot.thread.turns[0].items).toEqual([expect.objectContaining({
+        id: "call-id", type: "toolCall", toolInput: type === "function_call" ? '{"path":"src"}' : "inspect src",
+        toolOutput: "first line\nsecond line", toolOutputTruncated: false, toolOutputLength: 22,
+      })]);
+      const state = hydrateThread(initialCodexState, snapshot);
+      expect(state.threads["thread-1"].turns.tools.items["call-id"].toolOutput).toBe("first line\nsecond line");
+    } finally { desktop.close(); }
+  });
+
+  it("preserves bounded historical tool details across output-first pages without duplicate calls or cross-turn results", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const records = [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "older" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "old-call", name: "old", arguments: "old input" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "older" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "current" } },
+      { type: "response_item", payload: { type: "function_call", id: "current-record", call_id: "current-call", name: "current", arguments: "i".repeat(20_000) } },
+      { type: "response_item", payload: { type: "reasoning", id: "padding", summary: [{ text: "p".repeat(80_000) }] } },
+      { type: "response_item", payload: { type: "function_call_output", call_id: "current-call", output: "o".repeat(20_000) } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "current" } },
+    ];
+    writeFileSync(rolloutPath, records.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const latest = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { maxBytes: 64 * 1024 } }) as any;
+      expect(latest.history.hasMoreBefore).toBe(true);
+      let state = hydrateThread(initialCodexState, latest);
+      expect(state.threads["thread-1"].pendingToolOutputs?.[0]).toMatchObject({
+        toolOutput: "o".repeat(16_384), toolOutputTruncated: true, toolOutputLength: 20_000,
+      });
+      let cursor = latest.history.beforeCursor;
+      for (let count = 0; cursor && count < 10; count++) {
+        const page = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { maxBytes: 64 * 1024, beforeCursor: cursor } }) as any;
+        state = hydrateThread(state, page, "prepend");
+        cursor = page.history.hasMoreBefore ? page.history.beforeCursor : undefined;
+      }
+      expect(cursor).toBeUndefined();
+      const thread = state.threads["thread-1"];
+      expect(thread.turns.current.itemOrder.filter((id) => id === "current-call")).toHaveLength(1);
+      expect(thread.turns.current.items["current-call"]).toMatchObject({
+        toolInput: "i".repeat(16_384), toolInputTruncated: true, toolInputLength: 20_000,
+        toolOutput: "o".repeat(16_384), toolOutputTruncated: true, toolOutputLength: 20_000,
+      });
+      expect(thread.turns.older.items["old-call"].toolOutput).toBeUndefined();
+      expect(thread.turns.older.items["current-call"]).toBeUndefined();
+    } finally { desktop.close(); }
+  });
+
+  it("projects oversized historical tool strings with escaped and Unicode boundaries as explicit truncated output", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const text = '中\\"🙂\n'.repeat(400_000);
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "large-tool" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "large-call", name: "inspect", arguments: text } },
+      { type: "response_item", payload: { output: text, call_id: "large-call", type: "function_call_output" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "large-tool" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      let state = initialCodexState;
+      let cursor: string | undefined;
+      for (let pageNumber = 0; pageNumber < 10; pageNumber++) {
+        const page = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor: cursor } }) as any;
+        state = hydrateThread(state, page, pageNumber ? "prepend" : "snapshot");
+        if (!page.history.hasMoreBefore) { cursor = undefined; break; }
+        const next = page.history.beforeCursor;
+        if (cursor) expect(Number(next)).toBeLessThan(Number(cursor));
+        cursor = next;
+      }
+      expect(cursor).toBeUndefined();
+      expect(state.threads["thread-1"].turns["large-tool"].items["large-call"]).toMatchObject({
+        toolInput: text.slice(0, 16_384), toolOutput: text.slice(0, 16_384),
+        toolInputTruncated: true, toolOutputTruncated: true,
+      });
+      expect(state.threads["thread-1"].turns["large-tool"].items["large-call"].toolOutputLength).toBeUndefined();
+      expect(state.threads["thread-1"].turns["large-tool"].itemOrder).toEqual(["large-call"]);
+    } finally { desktop.close(); }
+  });
+
+  it("keeps a readable final after a tool record over 64 MiB but rejects loading that record without advancing its cursor", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "huge-tool" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "huge-call", name: "inspect", arguments: "test" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + '\n{"type":"response_item","payload":{"type":"function_call_output","call_id":"huge-call","output":"');
+    const chunk = "x".repeat(1024 * 1024);
+    for (let index = 0; index < 65; index++) appendFileSync(rolloutPath, chunk);
+    appendFileSync(rolloutPath, '"}}\n' + [
+      { type: "response_item", payload: { type: "message", id: "readable-final", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "Still readable" }], internal_chat_message_metadata_passthrough: { turn_id: "huge-tool" } } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "huge-tool" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const latest = desktop.request("desktopState/readThread", { threadId: "thread-1", history: {} }) as any;
+      expect(latest.thread.turns[0].items).toEqual([expect.objectContaining({ id: "readable-final", text: "Still readable" })]);
+      expect(latest.history.hasMoreBefore).toBe(true);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        expect(() => desktop.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor: latest.history.beforeCursor } }))
+          .toThrow(/too large.*cursor was not advanced/);
+      }
+    } finally { desktop.close(); }
+  });
+
+  it("associates a late historical output with its known earlier call without moving later messages to the old turn", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "earlier" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "earlier-call", name: "inspect" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "earlier" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "later" } },
+      { type: "response_item", payload: { type: "function_call_output", call_id: "earlier-call", output: "earlier result" } },
+      { type: "response_item", payload: { type: "message", id: "later-message", role: "assistant", content: [{ type: "output_text", text: "later answer" }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "later" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const result = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(result.thread.turns.map((t: any) => t.items.map((i: any) => i.id))).toEqual([["earlier-call"], ["later-message"]]);
+      expect(result.thread.turns[0].items[0].toolOutput).toBe("earlier result");
+    } finally { desktop.close(); }
+  });
+
+  it.each([false, true])("keeps an unpaired older output outside a newer QA until the older call page is loaded (explicit turn: %s)", (explicitTurn) => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "older" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "older-call", name: "inspect", arguments: "old input" } },
+      { type: "response_item", payload: { type: "reasoning", id: "padding", summary: [{ text: "p".repeat(100_000) }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "older" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "newer" } },
+      { type: "response_item", payload: { type: "message", id: "new-user", role: "user", content: [{ type: "input_text", text: "New question" }] } },
+      { type: "response_item", payload: { type: "function_call_output", call_id: "older-call", output: "old result", ...(explicitTurn ? { internal_chat_message_metadata_passthrough: { turn_id: "older" } } : {}) } },
+      { type: "response_item", payload: { type: "message", id: "new-final", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "New answer" }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "newer" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const latest = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { maxBytes: 64 * 1024 } }) as any;
+      expect(latest.thread.turns[0].items.map((i: any) => i.id)).toEqual(["new-user", "new-final"]);
+      expect(latest.thread.turns.map((turn: any) => turn.id)).toEqual(["newer"]);
+      expect(latest.thread.pendingToolOutputs).toEqual([expect.objectContaining({ id: "older-call", toolOutput: "old result" })]);
+      let state = hydrateThread(initialCodexState, latest);
+      expect(state.threads["thread-1"].toolOutputWarning).toBeTruthy();
+      let cursor = latest.history.beforeCursor;
+      for (let n = 0; cursor && n < 10; n++) {
+        const page = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { maxBytes: 64 * 1024, beforeCursor: cursor } }) as any;
+        state = hydrateThread(state, page, "prepend");
+        cursor = page.history.hasMoreBefore ? page.history.beforeCursor : undefined;
+      }
+      expect(cursor).toBeUndefined();
+      const thread = state.threads["thread-1"];
+      expect(thread.turns.older.items["older-call"].toolOutput).toBe("old result");
+      expect(thread.turns.newer.items["older-call"]).toBeUndefined();
+      expect(thread.turns.newer.items["new-final"].text).toBe("New answer");
+      expect(thread.toolOutputWarning).toBeUndefined();
+    } finally { desktop.close(); }
+  });
+
+  it("rejects an unprojectable large final without claiming its history is complete", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "large-final" } },
+      { type: "response_item", payload: { type: "message", id: "question", role: "user", content: [{ type: "input_text", text: "Question" }] } },
+      { type: "response_item", payload: { type: "message", id: "answer", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "a".repeat(3 * 1024 * 1024) }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "large-final" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      for (let n = 0; n < 2; n++) expect(() => desktop.request("desktopState/readThread", { threadId: "thread-1", history: {} }))
+        .toThrow(/too large.*cursor was not advanced/);
+    } finally { desktop.close(); }
+  });
+
+  it("keeps a historical plan projection when its tool output arrives", () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "plan" } },
+      { type: "response_item", payload: { type: "custom_tool_call", id: "plan-record", call_id: "plan-call", name: "exec", input: 'await tools.update_plan({plan:[{step:"Inspect",status:"completed"}]});' } },
+      { type: "response_item", payload: { type: "custom_tool_call_output", call_id: "plan-call", output: "Plan updated" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "plan" } },
+    ].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const result = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(result.thread.turns.find((t: any) => t.id === "plan").items).toEqual([
+        expect.objectContaining({ id: "plan-call", type: "todoList", plan: [{ step: "Inspect", status: "completed" }], toolOutput: "Plan updated" }),
+      ]);
+    } finally { desktop.close(); }
+  });
+
   it("projects persisted Desktop plan updates as structured todo-list items", () => {
     const { databasePath, rolloutPath } = fixture();
     appendFileSync(rolloutPath, JSON.stringify({
@@ -244,6 +570,92 @@ describe("DesktopState", () => {
     } finally { state.close(); }
   });
 
+  it("restores one native command card from repeated persisted completion with live-equivalent details", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const completed = {
+      id: "exec-1", type: "CommandExecution", command: "pnpm test",
+      aggregatedOutput: "All tests passed", status: "completed",
+    };
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "command-turn" } },
+      { type: "event_msg", payload: { type: "item_completed", turn_id: "command-turn", item: completed } },
+      { type: "event_msg", payload: { type: "item_completed", turn_id: "command-turn", item: completed } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "command-turn" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const snapshot = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(snapshot.thread.turns[0].items).toHaveLength(1);
+      const hydrated = hydrateThread(initialCodexState, snapshot);
+      let live = reduceCodexState(initialCodexState, { method: "turn/started", params: {
+        threadId: "thread-1", turn: { id: "command-turn" },
+      } });
+      live = reduceCodexState(live, { method: "item/completed", params: {
+        threadId: "thread-1", turnId: "command-turn", item: { ...completed, type: "commandExecution" },
+      } });
+      const pick = (item: any) => ({ id: item.id, type: item.type, text: item.text, status: item.status,
+        toolInput: item.toolInput, toolOutput: item.toolOutput, toolInputTruncated: item.toolInputTruncated,
+        toolOutputTruncated: item.toolOutputTruncated });
+      expect(pick(hydrated.threads["thread-1"].turns["command-turn"].items["exec-1"]))
+        .toEqual(pick(live.threads["thread-1"].turns["command-turn"].items["exec-1"]));
+      expect(hydrated.threads["thread-1"].turns["command-turn"].itemOrder).toEqual(["exec-1"]);
+    } finally { desktop.close(); }
+  });
+
+  it("keeps a late native command completion on its exact older turn", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "older" } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "older" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "current" } },
+      { type: "response_item", payload: { type: "message", id: "current-user", role: "user", content: [{ type: "input_text", text: "Current" }] } },
+      { type: "event_msg", payload: { type: "item_completed", turn_id: "older", item: {
+        id: "late-command", type: "CommandExecution", command: "pwd", aggregatedOutput: "/code", status: "completed",
+      } } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const result = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      const older = result.thread.turns.find((turn: any) => turn.id === "older");
+      const current = result.thread.turns.find((turn: any) => turn.id === "current");
+      expect(older.items).toEqual([expect.objectContaining({ id: "late-command", type: "commandExecution" })]);
+      expect(current.items.map((item: any) => item.id)).toEqual(["current-user"]);
+    } finally { desktop.close(); }
+  });
+
+  it("restores an explicitly attributed command completion without inventing an active turn", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, `${JSON.stringify({ type: "event_msg", payload: {
+      type: "item_completed", turn_id: "orphan-turn", item: {
+        id: "orphan-command", type: "CommandExecution", command: "pwd", aggregatedOutput: "/code", status: "completed",
+      },
+    } })}\n`);
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(desktop.request("desktopState/readThread", { threadId: "thread-1" }))
+        .toMatchObject({ thread: { status: { type: "idle" }, turns: [{
+          id: "orphan-turn", status: "unknown", items: [{ id: "orphan-command", type: "commandExecution" }],
+        }] } });
+    } finally { desktop.close(); }
+  });
+
+  it("keeps a context-only native command completion historical", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "turn_context", payload: { turn_id: "context-only-turn" } },
+      { type: "event_msg", payload: { type: "item_completed", turn_id: "context-only-turn", item: {
+        id: "context-command", type: "CommandExecution", command: "pwd", aggregatedOutput: "/code", status: "completed",
+      } } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(desktop.request("desktopState/readThread", { threadId: "thread-1" }))
+        .toMatchObject({ thread: { status: { type: "idle" }, turns: [{
+          id: "context-only-turn", status: "unknown", items: [{ id: "context-command", type: "commandExecution" }],
+        }] } });
+    } finally { desktop.close(); }
+  });
+
   it("keeps the latest Desktop todo list when it predates the paged conversation tail", () => {
     const { databasePath, rolloutPath } = fixture();
     appendFileSync(rolloutPath, JSON.stringify({
@@ -308,25 +720,36 @@ describe("DesktopState", () => {
     state.close();
   });
 
-  it("keeps archived and subagent threads out of the Desktop top-level task projection", () => {
+  it("keeps internal thread classifications out of lists and direct history without hiding user CLI tasks", () => {
     const { databasePath, rolloutPath } = fixture();
     const database = new DatabaseSync(databasePath);
     const insert = database.prepare(`INSERT INTO threads (
       id, rollout_path, archived, name, title, preview, cwd, is_pinned,
-      sandbox_policy, approval_mode, updated_at_ms, recency_at_ms, thread_source
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`);
+      sandbox_policy, approval_mode, updated_at_ms, recency_at_ms, thread_source, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`);
     insert.run(
       "subagent-1", rolloutPath, 0, null, "", "", "/code/app",
-      '{"type":"disabled"}', "never", 44, 45, "subagent",
+      '{"type":"disabled"}', "never", 44, 45, "subagent", "subagent",
     );
     insert.run(
       "archived-1", rolloutPath, 1, "Archived task", "", "", "/code/app",
-      '{"type":"disabled"}', "never", 46, 47, "user",
+      '{"type":"disabled"}', "never", 46, 47, "user", "cli",
     );
     insert.run(
       "user-1", rolloutPath, 0, "Visible user task", "", "", "/code/app",
-      '{"type":"disabled"}', "never", 48, 49, "user",
+      '{"type":"disabled"}', "never", 48, 49, "user", "cli",
     );
+    database.prepare("UPDATE threads SET source = 'cli' WHERE id = 'thread-1'").run();
+    for (const [index, source] of ["subagent", '{"subagent":{"other":"guardian"}}'].entries()) {
+      insert.run(
+        `guardian-${index}`, rolloutPath, 0, "Visible user task", "", "", "/code/app",
+        '{"type":"disabled"}', "never", 50 + index, 50 + index, "guardian_review", source,
+      );
+      insert.run(
+        `archived-guardian-${index}`, rolloutPath, 1, "Archived task", "", "", "/code/app",
+        '{"type":"disabled"}', "never", 50 + index, 50 + index, "guardian_review", source,
+      );
+    }
     database.close();
     const state = new DesktopState(databasePath);
 
@@ -340,17 +763,25 @@ describe("DesktopState", () => {
       data: [expect.objectContaining({ id: "archived-1", title: "Archived task" })],
     });
     expect(state.request("desktopState/listThreadMetadata", {
-      threadIds: ["thread-1", "user-1", "subagent-1", "archived-1"],
+      threadIds: ["thread-1", "user-1", "subagent-1", "archived-1", "guardian-0", "guardian-1"],
     })).toEqual({ data: [
       expect.objectContaining({ id: "thread-1" }),
       expect.objectContaining({ id: "user-1" }),
     ] });
     expect((state.request("desktopState/readThread", { threadId: "user-1" }) as any).thread.id)
       .toBe("user-1");
+    expect((state.request("desktopState/readThread", { threadId: "thread-1", history: {} }) as any).thread.id)
+      .toBe("thread-1");
     expect(() => state.request("desktopState/readThread", { threadId: "subagent-1" }))
       .toThrow("Desktop thread not found");
     expect(() => state.request("desktopState/readThread", { threadId: "archived-1" }))
       .toThrow("Desktop thread not found");
+    for (const threadId of ["guardian-0", "guardian-1"]) {
+      expect(() => state.request("desktopState/readThread", { threadId }))
+        .toThrow("Desktop thread not found");
+      expect(() => state.request("desktopState/readThread", { threadId, history: {} }))
+        .toThrow("Desktop thread not found");
+    }
     state.close();
   });
 
@@ -557,7 +988,7 @@ describe("DesktopState", () => {
           role: "user",
           content: [
             { type: "input_text", text: "Inspect this image" },
-            { type: "input_image", image_url: "data:image/jpeg;base64,ignored" },
+            { type: "ignored_image", image_url: "data:image/jpeg;base64,ignored" },
           ],
         },
       },
@@ -621,6 +1052,141 @@ describe("DesktopState", () => {
     expect(JSON.stringify(message)).not.toContain(uploadRoot);
     expect(JSON.stringify(message)).not.toContain("<image");
     state.close();
+  });
+
+  it("restores a native data-URI image from persisted user content", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const image = syntheticPng(1024);
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "native-image" } },
+      { type: "response_item", payload: {
+        type: "message",
+        id: "native-user",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Inspect native image" },
+          { type: "input_image", image_url: `data:image/png;base64,${image.toString("base64")}`, detail: "auto" },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "native-image" },
+      } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "native-image" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      const message = result.thread.turns[0].items.find((item: any) => item.id === "native-user");
+      const imageId = message.imageIds[0] as string;
+
+      expect(message).toMatchObject({
+        text: "Inspect native image",
+        imageIds: [expect.stringMatching(/^[0-9a-f-]{36}$/)],
+      });
+      expect(readFileSync(join(dirname(databasePath), "codex-remote", "uploads", `${imageId}.png`))).toEqual(image);
+      expect(JSON.stringify(result)).not.toContain("data:image/");
+    } finally { state.close(); }
+  });
+
+  it("restores a projected large native image exactly once across history pages", () => {
+    const { databasePath, rolloutPath } = fixture();
+    const image = syntheticPng(1537 * 1024);
+    writeFileSync(rolloutPath, `${completedTurn(1).map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+    appendFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "native-large" } },
+      { type: "response_item", payload: {
+        type: "message",
+        id: "native-large-user",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Inspect projected image" },
+          { image_url: `data:image/png;base64,${image.toString("base64")}`, type: "input_image", detail: "auto" },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "native-large" },
+      } },
+      { type: "response_item", payload: {
+        type: "message", id: "native-large-reply", role: "assistant",
+        content: [{ type: "output_text", text: "Image received" }],
+      } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "native-large" } },
+      ...completedTurn(2),
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      let beforeCursor: string | undefined;
+      const pages: any[] = [];
+      for (let index = 0; index < 10; index++) {
+        const page = state.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor } }) as any;
+        pages.unshift(page);
+        if (!page.history.hasMoreBefore) break;
+        if (beforeCursor) expect(Number(page.history.beforeCursor)).toBeLessThan(Number(beforeCursor));
+        beforeCursor = page.history.beforeCursor;
+      }
+      const messages = pages.flatMap((page) => page.thread.turns.flatMap((turn: any) => turn.items))
+        .filter((item: any) => item.id === "native-large-user");
+      const imageId = messages[0].imageIds[0] as string;
+
+      expect(pages[0].history.hasMoreBefore).toBe(false);
+      expect(messages).toHaveLength(1);
+      expect(readFileSync(join(dirname(databasePath), "codex-remote", "uploads", `${imageId}.png`))).toEqual(image);
+      expect(JSON.stringify(pages).length).toBeLessThan(30_000);
+    } finally { state.close(); }
+  });
+
+  it("projects a task_complete error as a failed turn", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "failed-turn" } },
+      { type: "response_item", payload: {
+        type: "message", id: "partial-answer", role: "assistant", phase: "commentary",
+        content: [{ type: "output_text", text: "Partial answer" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "failed-turn" },
+      } },
+      { type: "event_msg", payload: {
+        type: "task_complete", turn_id: "failed-turn",
+        error: { message: "Usage limit exceeded", codex_error_info: "usage_limit_exceeded" },
+      } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      expect((state.request("desktopState/listThreads", {}) as any).data[0].status).toEqual({ type: "error" });
+      const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(result.thread.status).toEqual({ type: "error" });
+      expect(result.thread.turns[0]).toMatchObject({
+        id: "failed-turn",
+        status: "failed",
+        error: { message: "Usage limit exceeded" },
+        items: [expect.objectContaining({ id: "partial-answer", text: "Partial answer" })],
+      });
+    } finally { state.close(); }
+  });
+
+  it.each([
+    {
+      label: "oversized",
+      dataUrl: () => `data:image/png;base64,${syntheticPng(10 * 1024 * 1024 + 1).toString("base64")}`,
+      error: /History image could not be restored: image-too-large/,
+    },
+    {
+      label: "unreadable",
+      dataUrl: () => "data:image/png;base64,AAAA",
+      error: /History image could not be restored: image-type-invalid/,
+    },
+  ])("reports an explicit error for an $label native history image", ({ dataUrl, error }) => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message", id: "invalid-native-image", role: "user",
+        content: [
+          { type: "input_text", text: "Invalid image" },
+          { type: "input_image", image_url: dataUrl() },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      },
+    }) + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      expect(() => state.request("desktopState/readThread", { threadId: "thread-1" })).toThrow(error);
+    } finally { state.close(); }
   });
 
   it("does not import an arbitrary local image named by a persisted attachment envelope", () => {
@@ -916,6 +1482,25 @@ describe("DesktopState", () => {
     } finally { desktop.close(); }
   });
 
+  it.each([
+    { ending: undefined, status: "inProgress", threadStatus: "active" },
+    { ending: "task_complete", status: "completed", threadStatus: "idle" },
+    { ending: "turn_aborted", status: "interrupted", threadStatus: "idle" },
+  ])("keeps an empty turn with a known task start through $status", ({ ending, status, threadStatus }) => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "empty-turn" } },
+      ...(ending ? [{ type: "event_msg", payload: { type: ending, turn_id: "empty-turn" } }] : []),
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(desktop.request("desktopState/readThread", { threadId: "thread-1", history: {} }))
+        .toMatchObject({ thread: { status: { type: threadStatus }, turns: [{
+          id: "empty-turn", status, completeFromTurnStart: true, items: [],
+        }] } });
+    } finally { desktop.close(); }
+  });
+
   it("skips oversized non-conversation records while loading the previous page", () => {
     const { databasePath, rolloutPath } = fixture();
     writeFileSync(
@@ -958,7 +1543,7 @@ describe("DesktopState", () => {
     appendFileSync(rolloutPath, '{"type":"response_item","payload":{"type":"message","id":"large-user","role":"user","content":[');
     for (const [index, id] of imageIds.entries()) {
       if (index) appendFileSync(rolloutPath, ",");
-      appendFileSync(rolloutPath, JSON.stringify({ type: "input_text", text: `${index === 0 ? 'data:image/png;base64,literal \\"quoted\\" 中文\n' : ''}<image name=[Image #${index + 1}] path="${join(uploadRoot, `${id}.png`)}">` }) + ',{"type":"input_image","image_url":"data:image/png;base64,');
+      appendFileSync(rolloutPath, JSON.stringify({ type: "input_text", text: `${index === 0 ? 'data:image/png;base64,literal \\"quoted\\" 中文\n' : ''}<image name=[Image #${index + 1}] path="${join(uploadRoot, `${id}.png`)}">` }) + ',{"type":"ignored_image","image_url":"data:image/png;base64,');
       const chunk = "A".repeat(128 * 1024);
       for (let i = 0; i < sizeMiB * 8 / imageCount; i++) appendFileSync(rolloutPath, chunk);
       appendFileSync(rolloutPath, '"},' + JSON.stringify({ type: "input_text", text: "</image>" }));
@@ -1000,7 +1585,7 @@ describe("DesktopState", () => {
       ...(index === 3 || separateTurns ? [{ type: "event_msg", payload: { type: "task_started", turn_id: `turn-${index}` } }] : []),
       { type: "response_item", payload: { type: "message", id: `large-${index}`, role: "user", content: [
         { type: "input_text", text: `Prompt ${index}` },
-        { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(3 * 1024 * 1024)}` },
+        { type: "ignored_image", image_url: `data:image/png;base64,${"A".repeat(3 * 1024 * 1024)}` },
       ] } },
     ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
     const state = new DesktopState(databasePath);
@@ -1025,7 +1610,7 @@ describe("DesktopState", () => {
     const secondTurn = boundary === "same-turn" ? "turn-a" : "turn-b";
     const image = (id: string, turnId: string) => ({ type: "response_item", payload: {
       type: "message", id, role: "user",
-      content: [{ type: "input_text", text: id }, { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(3 * 1024 * 1024)}` }],
+      content: [{ type: "input_text", text: id }, { type: "ignored_image", image_url: `data:image/png;base64,${"A".repeat(3 * 1024 * 1024)}` }],
       internal_chat_message_metadata_passthrough: { turn_id: turnId },
     } });
     const assistant = (id: string) => ({ type: "response_item", payload: {
@@ -1073,7 +1658,7 @@ describe("DesktopState", () => {
       // Three 9.75 MiB decoded attachments are within the upload limits.
       for (let image = 0; image < 3; image++) {
         if (image) appendFileSync(rolloutPath, ",");
-        appendFileSync(rolloutPath, '{"type":"input_image","image_url":"data:image/png;base64,');
+        appendFileSync(rolloutPath, '{"type":"ignored_image","image_url":"data:image/png;base64,');
         for (let part = 0; part < 13 * 8; part++) appendFileSync(rolloutPath, chunk);
         appendFileSync(rolloutPath, '"}');
       }
@@ -1118,7 +1703,7 @@ describe("DesktopState", () => {
     writeFileSync(rolloutPath, JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "images" } }) + "\n");
     for (let index = 1; index <= count; index++) appendFileSync(rolloutPath, [
       { type: "response_item", payload: { type: "message", id: `user-${index}`, role: "user", content: [
-        ...Array.from({ length: imageCount }, () => ({ type: "input_image", image_url: `data:image/png;base64,${"A".repeat(imageMiB * 1024 * 1024)}` })),
+        ...Array.from({ length: imageCount }, () => ({ type: "ignored_image", image_url: `data:image/png;base64,${"A".repeat(imageMiB * 1024 * 1024)}` })),
         { type: "input_text", text: `prompt-${index}${"t".repeat(textKiB * 1024)}` },
       ] } },
       { type: "response_item", payload: { type: "message", id: `assistant-${index}`, role: "assistant", content: [
@@ -1154,20 +1739,10 @@ describe("DesktopState", () => {
     appendFileSync(rolloutPath, '"}]}}\n');
     const state = new DesktopState(databasePath);
     try {
-      let beforeCursor: string | undefined;
-      const pages: any[] = [];
-      for (let index = 0; index < 10; index++) {
-        const page = state.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor } }) as any;
-        pages.push(page);
-        if (!page.history.hasMoreBefore) break;
-        if (beforeCursor) expect(Number(page.history.beforeCursor)).toBeLessThan(Number(beforeCursor));
-        beforeCursor = page.history.beforeCursor;
+      for (let retry = 0; retry < 2; retry++) {
+        expect(() => state.request("desktopState/readThread", { threadId: "thread-1", history: {} }))
+          .toThrow(/too large.*cursor was not advanced/);
       }
-      expect(pages.at(-1).history.hasMoreBefore).toBe(false);
-      const turn = pages.flatMap((page) => page.thread.turns).find((turn) => turn.id === "truncated");
-      expect(turn.items[0].text).toBe("Kept prefix");
-      expect(turn.completeFromTurnStart).not.toBe(true);
-      expect(JSON.stringify(pages).length).toBeLessThan(10_000);
     } finally { state.close(); }
   });
 
@@ -1229,15 +1804,13 @@ describe("DesktopState", () => {
     state.close();
   });
 
-  it("does not scan an entire sparse rollout when the current page has no turns", () => {
+  it("bounds an unresolved sparse rollout with an explicit error instead of advancing past an unreadable record", () => {
     const { databasePath, rolloutPath } = fixture();
     truncateSync(rolloutPath, 70 * 1024 * 1024);
     const state = new DesktopState(databasePath);
 
-    const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
-    expect(result.thread.turns).toEqual([]);
-    expect(result.history.hasMoreBefore).toBe(true);
-    expect(Number(result.history.beforeCursor)).toBeGreaterThan(0);
+    expect(() => state.request("desktopState/readThread", { threadId: "thread-1" }))
+      .toThrow(/too large.*cursor was not advanced/);
     state.close();
   });
 });

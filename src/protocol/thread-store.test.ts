@@ -2,6 +2,41 @@ import { describe, expect, it } from "vitest";
 import { initialCodexState, reduceCodexState, type CodexItem, type CodexState } from "./thread-store";
 
 describe("reduceCodexState", () => {
+  it("does not append unknown older turns observed in Desktop DOM after the current turn", () => {
+    const current = reduceCodexState(initialCodexState, { method: "turn/started", params: {
+      threadId: "t", turn: { id: "current" },
+    } });
+    let next = current;
+    for (const turnId of ["older-a", "older-b", "older-c"]) next = reduceCodexState(next, {
+      method: "desktop/visibleAgentMessage", params: {
+        threadId: "t", turnId, itemId: `${turnId}-answer`, text: "An old final from Desktop DOM",
+      },
+    });
+    expect(next).toBe(current);
+    expect(next.threads.t.turnOrder).toEqual(["current"]);
+    expect(next.threads.t.activeTurnId).toBe("current");
+  });
+
+  it("does not create a thread from a Desktop DOM observation alone", () => {
+    const next = reduceCodexState(initialCodexState, { method: "desktop/visibleAgentMessage", params: {
+      threadId: "unloaded", turnId: "old", itemId: "answer", text: "Old DOM reply",
+    } });
+    expect(next).toBe(initialCodexState);
+  });
+
+  it("does not append missing historical items from DOM to a completed partial turn", () => {
+    const completed = reduceCodexState(initialCodexState, { method: "turn/completed", params: {
+      threadId: "t", turn: { id: "old", status: "completed", items: [
+        { id: "final", type: "agentMessage", text: "Canonical final" },
+      ] },
+    } });
+    const next = reduceCodexState(completed, { method: "desktop/visibleAgentMessage", params: {
+      threadId: "t", turnId: "old", itemId: "missing-middle", text: "Historical middle reply",
+    } });
+    expect(next).toBe(completed);
+    expect(next.threads.t.turns.old.itemOrder).toEqual(["final"]);
+  });
+
   it("retains the actual failed turn error instead of reporting an idle successful completion", () => {
     const state = reduceCodexState(initialCodexState, {
       method: "turn/completed", params: { threadId: "failed-task", turn: {

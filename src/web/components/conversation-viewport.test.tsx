@@ -25,6 +25,7 @@ Object.defineProperty(HTMLElement.prototype, "scrollTop", {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   scrollHeight = 1_000;
   clientHeight = 300;
@@ -284,6 +285,42 @@ describe("ConversationViewport", () => {
     fireEvent.scroll(viewport);
     expect(screen.queryByRole("button", { name: `展开原始问题：${question}` })).not.toBeInTheDocument();
   });
+
+  it.each(Array.from({ length: 11 }, (_, index) => 150 + index))(
+    "keeps the pinned question stable across the %ipx flow boundary",
+    (shiftedBottom) => {
+      const question = "原始问题";
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+        if (this.dataset.testid === "timeline-scroll") return { top: 150 } as DOMRect;
+        if (this.matches("[data-user-message='true']")) {
+          const pinned = document.querySelector(".pinned-user-question");
+          const pinnedInFlow = pinned && !pinned.parentElement?.matches(".pinned-user-question-layer");
+          return { bottom: pinnedInFlow ? shiftedBottom : 149 } as DOMRect;
+        }
+        return {} as DOMRect;
+      });
+      render(
+        <ConversationViewport
+          threadId="thread-1"
+          history={{ hasMoreBefore: false, loading: false }}
+          currentQuestion={question}
+          onLoadEarlier={vi.fn()}
+        >
+          <article data-user-message="true">{question}</article>
+          <div>Long final answer</div>
+        </ConversationViewport>,
+      );
+
+      fireEvent.scroll(screen.getByTestId("timeline-scroll"));
+
+      const pinned = screen.getByRole("button", { name: `展开原始问题：${question}` });
+      expect(pinned).toBeVisible();
+      fireEvent.click(pinned);
+      expect(pinned).toHaveAttribute("aria-expanded", "true");
+      fireEvent.pointerDown(document.body);
+      expect(pinned).toHaveAttribute("aria-expanded", "false");
+    },
+  );
 
   it("does not pin the previous turn while the current running turn has no user item yet", () => {
     render(

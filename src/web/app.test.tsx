@@ -12,6 +12,7 @@ function codexState(overrides: Record<string, unknown> = {}) {
     state: { threadOrder: [], threads: {}, stale: false },
     creationOptions: { models: [], permissions: [], loading: false },
     connection: "disconnected",
+    threadsLoading: false,
     desktopStateAvailable: false,
     desktopControlAvailable: false,
     selectedThreadLoading: false,
@@ -58,6 +59,51 @@ describe("App", () => {
     render(<App />);
     expect(screen.getByRole("heading", { name: "Remote" })).toBeVisible();
     expect(document.querySelector(".brand-mark img")).toBeVisible();
+  });
+
+  it("shows loading instead of claiming the initial task list is empty", () => {
+    useCodexMock.mockReturnValue(codexState({ connection: "ready", threadsLoading: true }));
+
+    render(<App />);
+
+    expect(screen.getByText("加载中")).toBeVisible();
+    expect(screen.queryByText("还没有活跃对话")).not.toBeInTheDocument();
+  });
+
+  it("shows the initial task-list failure instead of claiming the list is empty", () => {
+    useCodexMock.mockReturnValue(codexState({
+      connection: "ready",
+      threadsError: "读取对话列表失败",
+    }));
+
+    render(<App />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("读取对话列表失败");
+    expect(screen.queryByText("还没有活跃对话")).not.toBeInTheDocument();
+  });
+
+  it("does not claim an existing conversation is empty while its history loads", () => {
+    const thread = { id: "loading", title: "Existing conversation", status: "idle", turnOrder: [], turns: {} };
+    useCodexMock.mockReturnValue(codexState({
+      connection: "ready", selectedThreadId: thread.id, selectedThread: thread, selectedThreadLoading: true,
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+    }));
+    render(<App />);
+    expect(screen.getByText("正在加载对话…")).toBeVisible();
+    expect(screen.queryByText("可以开始了")).not.toBeInTheDocument();
+    expect(screen.queryByText("已显示最早内容")).not.toBeInTheDocument();
+  });
+
+  it("does not invite a first message after loading existing history fails", () => {
+    const thread = { id: "failed-load", title: "Existing conversation", status: "idle", turnOrder: [], turns: {} };
+    useCodexMock.mockReturnValue(codexState({
+      connection: "ready", selectedThreadId: thread.id, selectedThread: thread, selectedThreadError: "History unavailable",
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+    }));
+    render(<App />);
+    expect(screen.getByRole("alert")).toHaveTextContent("History unavailable");
+    expect(screen.queryByText("可以开始了")).not.toBeInTheDocument();
+    expect(screen.queryByText("已显示最早内容")).not.toBeInTheDocument();
   });
 
   it("does not render a redundant Desktop live connection banner", () => {

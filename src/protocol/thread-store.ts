@@ -1,8 +1,10 @@
 import type { RpcMessage } from "./types";
 import { permissionStateFromProtocol, type PermissionState } from "./permissions";
 import { compatibleUserImages, displayUserInput, sameUserInput } from "./user-message-identity";
-import { appendAssistantText, itemText, messageKind, visibleAssistantText } from "./message-content";
+import { appendAssistantText, itemText, localImagesFromProtocol, messageKind, visibleAssistantText } from "./message-content";
 import { mergeMessageOrder } from "./message-order";
+import { delegatedInputFromProtocol } from "./delegated-input";
+import { MAX_PENDING_TOOL_OUTPUTS, boundedToolText, toolDetailsFromProtocol, type ToolDetails, type PendingToolOutput } from "./tool-content";
 
 export type ThreadStatus = "running" | "idle" | "error" | "unknown";
 export type TurnStatus = "inProgress" | "completed" | "interrupted" | "failed" | "unknown";
@@ -15,13 +17,18 @@ export type CodexTodoList = {
   items: Array<{ step: string; status: TodoStatus }>;
 };
 
-export type CodexItem = {
+export type CodexItem = ToolDetails & {
+  toolOutputFromPending?: boolean;
+  toolOutputTurnId?: string;
   id: string;
   type: string;
   text: string;
   phase?: string;
   status?: string;
   imageIds?: string[];
+  localImages?: Record<string, string>;
+  sourceThreadId?: string;
+  delegatedInputIsReplay?: boolean;
   clientMessageId?: string;
   lifecycle?: "pending" | "queued" | "promoting" | "accepted" | "confirmed" | "failed";
   streamedText?: string;
@@ -60,6 +67,9 @@ export type CodexThread = PermissionState & {
   sectionEnteredAt?: number;
   desktopMirror?: boolean;
   todoList?: CodexTodoList;
+  pendingToolOutputs?: PendingToolOutput[];
+  toolOutputOverflow?: boolean;
+  toolOutputWarning?: string;
 };
 
 export type CodexState = {
@@ -108,7 +118,9 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           items: {
             ...turn.items,
             [itemId]: {
-              ...previous, text, streamedText, textSource: "stream", status: "running",
+              ...previous, text, streamedText,
+              textSource: !isMessageSnapshot && previous.textSource === "visible" && text !== streamedText ? "visible" : "stream",
+              status: "running",
               phase: stringValue(params.phase) ?? previous.phase,
             },
           },
@@ -121,6 +133,14 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     const itemId = stringValue(params.itemId);
     const text = stringValue(params.text);
     if (!itemId || text === undefined) return state;
+    const knownThread = state.threads[threadId];
+    if (!knownThread) return state;
+    const knownTurnId = resolveTurnId(knownThread, params);
+    const knownTurn = knownThread.turns[knownTurnId];
+    // Desktop DOM contains older, unloaded history and has no ordering evidence.
+    // Only an established active turn can receive a new fallback item.
+    if (!knownTurn || (!knownTurn.items[itemId] &&
+      (knownTurn.status !== "inProgress" || knownThread.activeTurnId !== knownTurnId))) return state;
     return updateThread(state, threadId, (thread) => {
       const turnId = resolveTurnId(thread, params);
       return updateTurn(thread, turnId, (turn) => {
@@ -129,6 +149,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           type: "agentMessage",
           text: "",
         };
+        const displayText = visibleAssistantText(previous, text);
         return {
           ...turn,
           itemOrder: appendUnique(turn.itemOrder, itemId),
@@ -137,8 +158,8 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
             [itemId]: {
               ...previous,
               type: "agentMessage",
-              text: visibleAssistantText(previous, text),
-              textSource: previous.textSource ?? "visible",
+              text: displayText,
+              textSource: displayText === previous.text ? previous.textSource ?? "visible" : "visible",
               visibleText: text,
               status: previous.status ?? "running",
             },
@@ -179,13 +200,33 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     if (!itemId) return state;
     return updateThread(state, threadId, (thread) => {
       const turnId = resolveTurnId(thread, params);
-      return updateTurn(thread, turnId, (turn) => {
+      const existing = thread.turns[turnId]?.items[itemId];
+      const discardInferredPrefix = message.method === "item/commandExecution/outputDelta" &&
+        existing?.toolOutputFromPending === true && !existing.toolOutputTurnId;
+      let nextThread = thread;
+      if (discardInferredPrefix && existing.toolOutput !== undefined) {
+        // A delta proves only its new bytes, not the anonymous prefix guessed
+        // from history. Keep that prefix recoverable without mixing it into
+        // this turn's authoritative stream.
+        const pending = (thread.pendingToolOutputs ?? []).filter((output) => output.id !== itemId || output.turnId);
+        pending.push({ id: itemId, toolOutput: existing.toolOutput,
+          toolOutputTruncated: existing.toolOutputTruncated, toolOutputLength: existing.toolOutputLength,
+          toolOutputImageIds: existing.toolOutputImageIds, toolOutputImagesIncomplete: existing.toolOutputImagesIncomplete });
+        const overflow = thread.toolOutputOverflow === true || pending.length > MAX_PENDING_TOOL_OUTPUTS;
+        nextThread = { ...thread, pendingToolOutputs: pending.slice(-MAX_PENDING_TOOL_OUTPUTS), toolOutputOverflow: overflow,
+          toolOutputWarning: overflow
+            ? "部分工具结果超过历史缓存上限；可继续加载较早对话，未恢复的结果请在 Codex Desktop 查看。"
+            : "部分工具结果尚未找到对应历史；请继续加载较早对话以恢复。" };
+      }
+      return updateTurn(nextThread, turnId, (turn) => {
         const previous = turn.items[itemId] ?? {
           id: itemId,
           type: streamedActivity.type,
           text: "",
         };
         const separator = previous.text && streamedActivity.separate ? "\n" : "";
+        const output = message.method === "item/commandExecution/outputDelta"
+          ? boundedToolText((discardInferredPrefix ? "" : previous.toolOutput ?? "") + streamedActivity.text) : undefined;
         return {
           ...turn,
           status: "inProgress",
@@ -195,7 +236,16 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
             [itemId]: {
               ...previous,
               type: streamedActivity.type,
-              text: `${previous.text}${separator}${streamedActivity.text}`,
+              text: streamedActivity.type === "commandExecution"
+                ? boundedToolText(`${previous.text}${separator}${streamedActivity.text}`).text
+                : `${previous.text}${separator}${streamedActivity.text}`,
+              ...(output ? {
+                toolOutput: output.text,
+                toolOutputTruncated: (!discardInferredPrefix && previous.toolOutputTruncated) || output.truncated,
+                toolOutputLength: (discardInferredPrefix ? 0 : previous.toolOutputLength ?? 0) + streamedActivity.text.length,
+                toolOutputFromPending: undefined,
+                ...(discardInferredPrefix ? { toolOutputImageIds: undefined, toolOutputImagesIncomplete: undefined } : {}),
+              } : {}),
               status: "running",
             },
           },
@@ -349,7 +399,8 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
     });
   }
 
-  const item = asRecord(params.item);
+  const rawItem = asRecord(params.item);
+  const item: Record<string, unknown> = delegatedInputFromProtocol(rawItem) ?? rawItem;
   if ((message.method === "item/started" || message.method === "item/completed") && threadId) {
     const itemId = stringValue(item.id);
     if (!itemId) return state;
@@ -391,11 +442,20 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           ...(reconciledMatch?.item.imageIds ?? []),
           ...stringArray(item.imageIds),
         ])];
+        const toolDetails = toolDetailsFromProtocol({ ...item, type: itemType });
         nextItems[itemId] = {
           ...previous,
           id: itemId,
           type: itemType,
           text: resolvedText,
+          sourceThreadId: stringValue(item.sourceThreadId) ?? previous?.sourceThreadId,
+          delegatedInputIsReplay: previous?.delegatedInputIsReplay === false ? false
+            : item.type === "delegatedInput" ? true : previous?.delegatedInputIsReplay,
+          ...toolDetails,
+          ...(toolDetails.toolOutput !== undefined ? { toolOutputImageIds: toolDetails.toolOutputImageIds,
+            toolOutputImagesIncomplete: toolDetails.toolOutputImagesIncomplete } : {}),
+          toolOutputFromPending: toolDetails.toolOutput !== undefined ? undefined : previous?.toolOutputFromPending,
+          localImages: { ...previous?.localImages, ...localImagesFromProtocol(item.localImages) },
           textSource: messageKind(itemType) === "agent" && completed && text ? "completed" : previous?.textSource,
           phase: stringValue(item.phase) ?? previous?.phase,
           clientMessageId: clientMessageId ?? previous?.clientMessageId ?? reconciledMatch?.item.clientMessageId,

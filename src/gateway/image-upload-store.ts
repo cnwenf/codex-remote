@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { chmod, lstat, mkdir, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
@@ -93,6 +93,51 @@ export class ImageUploadStore {
     return image.path;
   }
 
+  referenceForDataUrl(value: string): string {
+    const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]*={0,2})$/.exec(value);
+    if (!match) throw new ImageUploadError("image-data-url-invalid", 400);
+    const encoded = match[2];
+    if (encoded.length > 4 * Math.ceil(MAX_IMAGE_BYTES / 3)) {
+      throw new ImageUploadError("image-too-large", 413);
+    }
+    const buffer = Buffer.from(encoded, "base64");
+    if (buffer.byteLength === 0) throw new ImageUploadError("image-empty", 400);
+    if (buffer.byteLength > MAX_IMAGE_BYTES) throw new ImageUploadError("image-too-large", 413);
+    if (buffer.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) {
+      throw new ImageUploadError("image-data-url-invalid", 400);
+    }
+    const format = formats.find((candidate) => candidate.matches(buffer));
+    if (!format || format.mimeType !== match[1]) throw new ImageUploadError("image-type-invalid", 415);
+    const fingerprint = createHash("sha256").update(buffer).digest("hex");
+    const id = imageIdFromFingerprint(fingerprint);
+    const path = join(this.root, `${id}${format.extension}`);
+    mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    chmodSync(this.root, 0o700);
+    if (!existsSync(path)) {
+      writeFileSync(path, buffer, { flag: "wx", mode: 0o600 });
+    } else if (!readFileSync(path).equals(buffer)) {
+      throw new ImageUploadError("image-store-collision", 500);
+    }
+    chmodSync(path, 0o600);
+    this.images.set(id, {
+      id,
+      name: `image${format.extension}`,
+      mimeType: format.mimeType,
+      size: buffer.byteLength,
+      path,
+    });
+    return id;
+  }
+
+  referenceForStoredId(id: string): string | undefined {
+    if (!imageIdPattern.test(id)) return undefined;
+    for (const format of formats) {
+      const path = join(this.root, `${id}${format.extension}`);
+      if (this.referenceForStoredUploadPath(path) === id) return id;
+    }
+    return undefined;
+  }
+
   referenceForPath(path: string): string | undefined {
     const name = basename(path);
     const extension = formats.find((format) => name.endsWith(format.extension))?.extension;
@@ -112,7 +157,7 @@ export class ImageUploadStore {
         .update(String(info.mtimeMs))
         .update(String(info.size))
         .digest("hex");
-      const importedId = `${fingerprint.slice(0, 8)}-${fingerprint.slice(8, 12)}-8${fingerprint.slice(13, 16)}-a${fingerprint.slice(17, 20)}-${fingerprint.slice(20, 32)}`;
+      const importedId = imageIdFromFingerprint(fingerprint);
       const target = join(this.root, `${importedId}${format.extension}`);
       mkdirSync(this.root, { recursive: true, mode: 0o700 });
       chmodSync(this.root, 0o700);
@@ -169,6 +214,10 @@ export class ImageUploadStore {
     }
     throw new ImageUploadError("image-upload-not-found", 404);
   }
+}
+
+function imageIdFromFingerprint(fingerprint: string) {
+  return `${fingerprint.slice(0, 8)}-${fingerprint.slice(8, 12)}-8${fingerprint.slice(13, 16)}-a${fingerprint.slice(17, 20)}-${fingerprint.slice(20, 32)}`;
 }
 
 export class ImageUploadError extends Error {

@@ -34,10 +34,15 @@ import {
 import { projectMobileStatus } from "./mobile-status";
 import { PairingStore } from "./pairing-store";
 import { ActiveMessageReplay } from "./active-message-replay";
+import { registerAssistantImages } from "./assistant-images";
+import { registerToolOutputImages } from "./tool-output-images";
+import { itemText, messageKind } from "../protocol/message-content";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 4 * 1024;
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+const HISTORY_METADATA_TTL_MS = 5 * 60_000;
+const HISTORY_METADATA_BUDGET_MS = 1_000;
 const INITIALIZE_ID = "gateway-initialize";
 const KNOWN_SERVER_REQUESTS = new Set([
   "item/commandExecution/requestApproval",
@@ -102,6 +107,14 @@ export function createGateway(options: GatewayOptions) {
     updatedAt: number;
   }>();
   const syncedMobileThreads = new Map<string, MobileTask>();
+  // Bounded, metadata-only history lookup: 20 threads × 1000 turns, five minutes.
+  const historicalTurnMetadata = new Map<string, {
+    expiresAt: number;
+    turns: Map<string, { id: string; status: string; error?: TurnError }>;
+    cursor?: string;
+    done: boolean;
+    pending?: Promise<void>;
+  }>();
   const pendingInternalRequests = new Map<string, {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
@@ -652,13 +665,13 @@ export function createGateway(options: GatewayOptions) {
     }
   }
 
-  function requestTransport(method: string, params: unknown) {
+  function requestTransport(method: string, params: unknown, timeoutMs = MOBILE_STATUS_SYNC_TIMEOUT_MS) {
     return new Promise<unknown>((resolveRequest, rejectRequest) => {
       const id = `gateway-internal-${nextInternalRequestId++}`;
       const timeout = setTimeout(() => {
         pendingInternalRequests.delete(id);
         rejectRequest(new Error("gateway-internal-request-timeout"));
-      }, MOBILE_STATUS_SYNC_TIMEOUT_MS);
+      }, timeoutMs);
       timeout.unref();
       pendingInternalRequests.set(id, { resolve: resolveRequest, reject: rejectRequest, timeout });
       try {
@@ -953,13 +966,65 @@ export function createGateway(options: GatewayOptions) {
     });
   }
 
+  async function readHistoricalTurnMetadata(threadId: string, turnIds: string[]) {
+    const now = Date.now();
+    for (const [id, cache] of historicalTurnMetadata) {
+      if (cache.expiresAt <= now) historicalTurnMetadata.delete(id);
+    }
+    if (!historicalTurnMetadata.has(threadId)) {
+      if (historicalTurnMetadata.size >= 20) historicalTurnMetadata.delete(historicalTurnMetadata.keys().next().value!);
+      historicalTurnMetadata.set(threadId, { expiresAt: now + HISTORY_METADATA_TTL_MS, turns: new Map(), done: false });
+    }
+    const cache = historicalTurnMetadata.get(threadId)!;
+    if (!cache.pending && turnIds.some((id) => !cache.turns.has(id)) && options.transport.getSessionInfo?.().readOnly === false) {
+      cache.pending = (async () => {
+        const deadline = Date.now() + HISTORY_METADATA_BUDGET_MS;
+        for (let page = 0; page < 2 && !cache.done && cache.turns.size < 1000 && turnIds.some((id) => !cache.turns.has(id)); page++) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          try {
+            const response = recordValue(await requestTransport("thread/turns/list", {
+              threadId, limit: 100, sortDirection: "desc", itemsView: "notLoaded",
+              ...(cache.cursor ? { cursor: cache.cursor } : {}),
+            }, remaining));
+            if (!Array.isArray(response.data)) break;
+            for (const value of response.data.slice(0, 100)) {
+              const turn = recordValue(value);
+              const id = optionalString(turn.id);
+              const status = optionalString(turn.status);
+              if (id && status && ["completed", "interrupted", "failed", "inProgress"].includes(status) && cache.turns.size < 1000) {
+                cache.turns.set(id, { id, status, error: turnErrorFromProtocol(turn.error) });
+              }
+            }
+            const next = optionalString(response.nextCursor);
+            cache.done = !next || next === cache.cursor;
+            cache.cursor = next;
+          } catch { break; /* Offline, unsupported or budget expired: preserve raw history. */ }
+        }
+      })().finally(() => { cache.pending = undefined; });
+    }
+    await cache.pending;
+    return { data: [...cache.turns.values()], complete: turnIds.every((id) => cache.turns.has(id)) };
+  }
+
   async function handleDesktopStateRequest(socket: WebSocket, request: import("../protocol/types").RpcRequest) {
     try {
       if (!options.desktopState) throw new Error("Desktop state is unavailable");
       let result = await options.desktopState.request(request.method, request.params);
-      let liveTurnOrder: string[] = [];
+      const historicalPage = Boolean(recordValue(recordValue(request.params).history).beforeCursor);
+      if (request.method === "desktopState/readThread" && historicalPage) {
+        const outer = recordValue(result);
+        const thread = recordValue(outer.thread ?? result);
+        const threadId = optionalString(thread.id);
+        const turnIds = Array.isArray(thread.turns) ? thread.turns.flatMap((turn) => {
+          const id = optionalString(recordValue(turn).id);
+          return id ? [id] : [];
+        }) : [];
+        const metadata = threadId ? await readHistoricalTurnMetadata(threadId, turnIds) : { data: [], complete: false };
+        result = { ...recordValue(reconcileDesktopTurnFailures(result, metadata, false)), turnStatusMetadataComplete: metadata.complete };
+      }
       if (request.method === "desktopState/readThread" &&
-        !recordValue(recordValue(request.params).history).beforeCursor &&
+        !historicalPage &&
         options.transport.getSessionInfo?.().readOnly === false) {
         try {
           const turns = await requestTransport("thread/turns/list", {
@@ -968,18 +1033,13 @@ export function createGateway(options: GatewayOptions) {
             sortDirection: "desc",
             itemsView: "notLoaded",
           });
-          const data = recordValue(turns).data;
-          if (Array.isArray(data)) liveTurnOrder = data.flatMap((turn) => {
-            const id = optionalString(recordValue(turn).id);
-            return id ? [id] : [];
-          });
           result = reconcileDesktopTurnFailures(result, turns);
         } catch {
           // Older/offline Desktop versions still provide bounded rollout history.
         }
       }
-      const reconciled = request.method === "desktopState/readThread"
-        ? reconcileDesktopThreadActivity(result, liveThreadActivity, liveTurnOrder)
+      const reconciled = request.method === "desktopState/readThread" && !historicalPage
+        ? reconcileDesktopThreadActivity(result, liveThreadActivity)
         : result;
       sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result: reconciled } });
     } catch (cause) {
@@ -1021,7 +1081,6 @@ export function createGateway(options: GatewayOptions) {
 function reconcileDesktopThreadActivity(
   value: unknown,
   activityByThread: ReadonlyMap<string, { status: "running" | "idle" | "error"; turnId?: string; error?: TurnError }>,
-  liveTurnOrder: string[] = [],
 ) {
   const outer = recordValue(value);
   const thread = recordValue(outer.thread ?? value);
@@ -1030,9 +1089,20 @@ function reconcileDesktopThreadActivity(
   if (!activity?.turnId) return value;
   const turns = Array.isArray(thread.turns) ? thread.turns.map((turn) => ({ ...recordValue(turn) })) : [];
   const turnIndex = turns.findIndex((turn) => optionalString(turn.id) === activity.turnId);
-  if (turnIndex < 0 && liveTurnOrder.indexOf(activity.turnId) > 0) return value;
+  const threadStatus = optionalString(recordValue(thread.status).type) ?? optionalString(thread.status);
+  const unrecordedActiveTurn = activity.status === "running" &&
+    (threadStatus === "active" || threadStatus === "running") &&
+    ["completed", "failed", "interrupted"].includes(String(turns.at(-1)?.status));
+  // Only an active thread whose recorded tail has ended establishes a missing
+  // live turn. Other cached activity cannot order itself after a rollout page.
+  if (turnIndex < 0 && turns.length > 0 && !unrecordedActiveTurn) return value;
+  // A cached start cannot reopen an older QA or an explicitly idle completed
+  // tail. An active partial tail may still need its live running status.
+  if (activity.status === "running" && turnIndex >= 0 &&
+    (turnIndex < turns.length - 1 || (threadStatus === "idle" && turns[turnIndex].status === "completed"))) return value;
   if (turnIndex >= 0 && turnIndex < turns.length - 1 && turns.at(-1)?.status === "failed") return value;
-  const turnStatus = turns[turnIndex]?.status === "failed" ? "failed" : activity.status === "running"
+  const turnStatus = turns[turnIndex]?.status === "failed" || turns[turnIndex]?.status === "interrupted"
+    ? turns[turnIndex].status : activity.status === "running"
     ? "inProgress"
     : activity.status === "error" ? "failed" : "completed";
   if (turnIndex >= 0) turns[turnIndex] = {
@@ -1043,7 +1113,7 @@ function reconcileDesktopThreadActivity(
   const reconciledThread = {
     ...thread,
     status: turnIndex >= 0 && turnIndex < turns.length - 1 ? thread.status
-      : { type: turnStatus === "failed" ? "error" : activity.status === "running" ? "active" : activity.status },
+      : { type: turnStatus === "failed" ? "error" : turnStatus === "interrupted" ? "idle" : activity.status === "running" ? "active" : activity.status },
     turns,
   };
   return Object.hasOwn(outer, "thread")
@@ -1051,32 +1121,67 @@ function reconcileDesktopThreadActivity(
     : reconciledThread;
 }
 
-function reconcileDesktopTurnFailures(value: unknown, liveValue: unknown) {
+function reconcileDesktopTurnFailures(value: unknown, liveValue: unknown, allowEmptyFallback = true) {
   const outer = recordValue(value);
   const thread = recordValue(outer.thread ?? value);
   const data = recordValue(liveValue).data;
   if (!Array.isArray(data)) return value;
-  const failures = data.map(recordValue).filter((turn) => turn.status === "failed" && typeof turn.id === "string");
+  const failures = data.map(recordValue).filter((turn) => (turn.status === "failed" || turn.status === "interrupted") && typeof turn.id === "string");
   if (failures.length === 0) return value;
   const turns = Array.isArray(thread.turns) ? thread.turns.map(recordValue) : [];
+  // Native metadata can be an older window than the rollout. Reconcile by ID;
+  // its first entry does not establish a new turn or its chronological position.
   for (const failed of failures) {
     const index = turns.findIndex((turn) => turn.id === failed.id);
     const error = turnErrorFromProtocol(failed.error);
-    if (index >= 0) turns[index] = { ...turns[index], status: "failed", ...(error ? { error } : {}) };
-    else if (recordValue(data[0]).id === failed.id) turns.push({ id: failed.id, status: "failed", error, items: [] });
+    if (index >= 0) turns[index] = { ...turns[index], status: failed.status, ...(error ? { error } : {}) };
+    else if (allowEmptyFallback && turns.length === 0 && recordValue(data[0]).id === failed.id) {
+      // There is no raw QA to reorder. Keep the only available failure evidence
+      // instead of presenting an empty conversation as a successful run.
+      turns.push({ id: failed.id, status: failed.status, error, items: [] });
+    }
   }
-  const latestFailed = recordValue(data[0]).status === "failed";
-  const reconciled = { ...thread, turns, ...(latestFailed ? { status: { type: "error" } } : {}) };
+  const latest = recordValue(data[0]);
+  const latestMatches = latest.id === turns.at(-1)?.id;
+  const reconciled = { ...thread, turns, ...(latestMatches && (latest.status === "failed" || latest.status === "interrupted")
+    ? { status: { type: latest.status === "failed" ? "error" : "idle" } } : {}) };
   return Object.hasOwn(outer, "thread") ? { ...outer, thread: reconciled } : reconciled;
 }
 
 function enrichDesktopImageMessage(message: RpcMessage, imageStore: ImageUploadStore): RpcMessage {
+  if (!("method" in message) && "result" in message) {
+    const result = recordValue(message.result);
+    const thread = recordValue(result.thread);
+    if (Array.isArray(thread.turns)) return { ...message, result: { ...result, thread: { ...thread,
+      turns: thread.turns.map((value) => {
+        const turn = recordValue(value);
+        const enriched = enrichDesktopImageMessage({ method: "turn/completed", params: { turn } }, imageStore);
+        return "method" in enriched ? recordValue(enriched.params).turn : value;
+      }),
+    } } };
+  }
+  if ("method" in message && message.method === "turn/completed") {
+    const params = recordValue(message.params);
+    const turn = recordValue(params.turn);
+    if (!Array.isArray(turn.items)) return message;
+    return { ...message, params: { ...params, turn: { ...turn, items: turn.items.map((item) => {
+      const enriched = enrichDesktopImageMessage({ method: "item/completed", params: { item } }, imageStore);
+      return "method" in enriched ? recordValue(enriched.params).item : item;
+    }) } } };
+  }
   if (
     !("method" in message) ||
     (message.method !== "item/started" && message.method !== "item/completed")
   ) return message;
   const params = recordValue(message.params);
   const item = recordValue(params.item);
+  const toolItem = registerToolOutputImages(item, imageStore);
+  if (toolItem !== item) return { ...message, params: { ...params, item: toolItem } };
+  if (messageKind(optionalString(item.type) ?? "") === "agent") {
+    const localImages = registerAssistantImages(itemText(item), imageStore);
+    return Object.keys(localImages).length > 0
+      ? { ...message, params: { ...params, item: { ...item, localImages } } } : message;
+  }
   const itemType = optionalString(item.type)?.replace(/[_-]/g, "").toLowerCase();
   if (itemType !== "usermessage") return message;
   const text = optionalString(item.text) ?? (Array.isArray(item.content)

@@ -338,6 +338,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
           <aside className="sidebar">
             <TaskList
               threads={threads}
+              loading={codex.threadsLoading}
+              loadError={codex.threadsError}
               archivedThreads={codex.archivedThreads}
               archivedLoading={codex.archivedThreadsLoading}
               directCwd={codex.defaultCwd}
@@ -428,6 +430,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               ) : null}
               <ConversationViewport
                 threadId={codex.selectedThread.id}
+                initialHistoryPending={Boolean(codex.selectedThreadLoading || codex.selectedThreadError) && codex.selectedThread.turnOrder.length === 0}
                 history={codex.selectedThreadHistory}
                 currentQuestion={currentThreadQuestion(codex.selectedThread)}
                 onLoadEarlier={codex.loadEarlierThreadHistory}
@@ -435,6 +438,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
               >
                 <Timeline
                   thread={codex.selectedThread}
+                  loading={codex.selectedThreadLoading}
+                  loadFailed={Boolean(codex.selectedThreadError)}
                   imageRequest={remote ? { baseUrl: remote.baseUrl, token: remote.token } : undefined}
                   onOpenExternalUrl={remote?.onOpenExternalUrl}
                 />

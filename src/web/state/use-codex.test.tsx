@@ -22,6 +22,23 @@ class FakeBrowserSocket implements BrowserSocket {
   }
 }
 
+function taskListRequests(fake: FakeBrowserSocket, start = 0) {
+  const requests = fake.sent.slice(start).map((value) => JSON.parse(value).payload);
+  return {
+    live: requests.find((request) => request.method === "thread/list"),
+    desktop: requests.find((request) => request.method === "desktopState/listThreads"),
+  };
+}
+
+function runningCommandState(): CodexState {
+  return { stale: false, threadOrder: ["t1"], threads: { t1: {
+    id: "t1", title: "Task", status: "running", activeTurnId: "turn-1", turnOrder: ["turn-1"],
+    turns: { "turn-1": { id: "turn-1", status: "inProgress", itemOrder: ["tool-1"], items: {
+      "tool-1": { id: "tool-1", type: "commandExecution", text: "", status: "running" },
+    } } },
+  } } };
+}
+
 describe("ConversationReconciler", () => {
   it("preserves the assistant message phase from a Desktop snapshot", () => {
     const reconciler = new ConversationReconciler();
@@ -302,41 +319,31 @@ describe("ConversationReconciler", () => {
     expect(reconciled.t1).toEqual([]);
   });
 
-  it("uses an authoritative idle Desktop snapshot to close retained running state", () => {
+  it("uses an explicit same-turn terminal Desktop snapshot to close retained running state", () => {
     const reconciler = new ConversationReconciler();
-    const state: CodexState = {
-      stale: false,
-      threadOrder: ["t1"],
-      threads: {
-        t1: {
-          id: "t1",
-          title: "Task",
-          status: "running",
-          activeTurnId: "turn-1",
-          turnOrder: ["turn-1"],
-          turns: {
-            "turn-1": {
-              id: "turn-1",
-              status: "inProgress",
-              itemOrder: ["tool-1"],
-              items: {
-                "tool-1": { id: "tool-1", type: "commandExecution", text: "", status: "running" },
-              },
-            },
-          },
-        },
-      },
-    };
-
-    const next = reconciler.hydrate(state, {
+    const next = reconciler.hydrate(runningCommandState(), {
       desktopMirror: true,
-      thread: { id: "t1", status: { type: "idle" }, turns: [] },
+      thread: { id: "t1", status: { type: "idle" }, turns: [{
+        id: "turn-1", status: "completed", items: [],
+      }] },
     });
 
     expect(next.threads.t1.status).toBe("idle");
     expect(next.threads.t1.activeTurnId).toBeUndefined();
     expect(next.threads.t1.turns["turn-1"].status).toBe("completed");
     expect(next.threads.t1.turns["turn-1"].items["tool-1"].status).toBe("completed");
+  });
+
+  it("does not let an empty idle Desktop snapshot close retained running state", () => {
+    const next = new ConversationReconciler().hydrate(runningCommandState(), {
+      desktopMirror: true,
+      thread: { id: "t1", status: { type: "idle" }, turns: [] },
+    });
+
+    expect(next.threads.t1.status).toBe("running");
+    expect(next.threads.t1.activeTurnId).toBe("turn-1");
+    expect(next.threads.t1.turns["turn-1"].status).toBe("inProgress");
+    expect(next.threads.t1.turns["turn-1"].items["tool-1"].status).toBe("running");
   });
 
   it("does not let an idle older-history page close the current running turn", () => {
@@ -697,6 +704,251 @@ describe("ConversationReconciler", () => {
 });
 
 describe("useCodex", () => {
+  it("marks only the first task-list request as loading", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    expect(result.current.threadsLoading).toBe(true);
+    let firstRefresh: Promise<void>;
+    act(() => { firstRefresh = result.current.refreshThreads(); });
+    const firstRequests = fake.sent.map((value) => JSON.parse(value).payload);
+    const firstList = firstRequests.find((request) => request.method === "thread/list");
+    const firstDesktopList = firstRequests.find((request) => request.method === "desktopState/listThreads");
+    fake.serverSend({ type: "rpc", payload: { id: firstList.id, result: { data: [] } } });
+    fake.serverSend({ type: "rpc", payload: { id: firstDesktopList.id, result: { data: [] } } });
+    await act(() => firstRefresh);
+    expect(result.current.threadsLoading).toBe(false);
+
+    let backgroundRefresh: Promise<void>;
+    const backgroundStart = fake.sent.length;
+    act(() => { backgroundRefresh = result.current.refreshThreads(); });
+    expect(result.current.threadsLoading).toBe(false);
+    const backgroundRequests = fake.sent.slice(backgroundStart).map((value) => JSON.parse(value).payload);
+    const backgroundList = backgroundRequests.find((request) => request.method === "thread/list");
+    const backgroundDesktopList = backgroundRequests.find((request) => request.method === "desktopState/listThreads");
+    fake.serverSend({ type: "rpc", payload: { id: backgroundList.id, result: { data: [] } } });
+    fake.serverSend({ type: "rpc", payload: { id: backgroundDesktopList.id, result: { data: [] } } });
+    await act(() => backgroundRefresh);
+  });
+
+  it("ignores an older task-list result that finishes after a newer refresh", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let olderRefresh: Promise<void>;
+    act(() => { olderRefresh = result.current.refreshThreads(); });
+    const olderLive = JSON.parse(fake.sent[0]).payload;
+    fake.serverSend({ type: "rpc", payload: { id: olderLive.id, result: { data: [] } } });
+    await waitFor(() => expect(fake.sent.map((value) => JSON.parse(value).payload.method))
+      .toContain("desktopState/listThreads"));
+    const olderDesktop = fake.sent.map((value) => JSON.parse(value).payload)
+      .find((request) => request.method === "desktopState/listThreads");
+
+    let newerRefresh: Promise<void>;
+    act(() => { newerRefresh = result.current.refreshThreads(); });
+    const newerLive = fake.sent.map((value) => JSON.parse(value).payload)
+      .filter((request) => request.method === "thread/list").at(-1);
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: newerLive.id, result: { data: [{ id: "new-task", name: "New task" }] } },
+    });
+    await waitFor(() => expect(fake.sent.map((value) => JSON.parse(value).payload)
+      .filter((request) => request.method === "desktopState/listThreads")).toHaveLength(2));
+    const newerDesktop = fake.sent.map((value) => JSON.parse(value).payload)
+      .filter((request) => request.method === "desktopState/listThreads").at(-1);
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: newerDesktop.id, result: { data: [{ id: "new-task", title: "New task" }] } },
+    });
+    await act(() => newerRefresh);
+
+    fake.serverSend({ type: "rpc", payload: { id: olderDesktop.id, result: { data: [] } } });
+    await act(() => olderRefresh);
+
+    expect(result.current.state.threadOrder).toEqual(["new-task"]);
+    expect(result.current.threadsLoading).toBe(false);
+    expect(result.current.threadsError).toBeUndefined();
+  });
+
+  it("falls back to the Desktop task list when the live list times out", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    act(() => fake.serverSend({ type: "session", state: "reconnecting" }));
+    vi.useFakeTimers();
+    try {
+      let refresh: Promise<void>;
+      act(() => { refresh = result.current.refreshThreads(); });
+      await act(async () => undefined);
+      const requests = fake.sent.map((value) => JSON.parse(value).payload);
+      expect(requests.map((request) => request.method)).toEqual([
+        "thread/list",
+        "desktopState/listThreads",
+      ]);
+      const desktopList = requests.find((request) => request.method === "desktopState/listThreads");
+      fake.serverSend({
+        type: "rpc",
+        payload: { id: desktopList.id, result: { data: [{ id: "desktop-task", title: "Desktop task" }] } },
+      });
+
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      await act(() => refresh);
+      expect(result.current.state.threadOrder).toEqual(["desktop-task"]);
+      expect(result.current.threadsLoading).toBe(false);
+      expect(result.current.threadsError).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports bounded initial list failure and ignores both late timed-out results", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    act(() => fake.serverSend({ type: "session", state: "reconnecting" }));
+    vi.useFakeTimers();
+    try {
+      let timedOutRefresh!: Promise<void>;
+      act(() => { timedOutRefresh = result.current.refreshThreads(); });
+      await act(async () => undefined);
+      const timedOutRequests = fake.sent.map((value) => JSON.parse(value).payload);
+      expect(timedOutRequests).toHaveLength(2);
+      let failure: unknown;
+      const observedFailure = timedOutRefresh.catch((cause) => { failure = cause; });
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      await act(() => observedFailure);
+      expect(failure).toEqual(new Error("读取对话列表失败"));
+      expect(result.current.threadsLoading).toBe(false);
+      expect(result.current.threadsError).toBe("读取对话列表失败");
+
+      let retry: Promise<void>;
+      act(() => { retry = result.current.refreshThreads(); });
+      await act(async () => undefined);
+      const retryRequests = fake.sent.map((value) => JSON.parse(value).payload).slice(2);
+      const liveRetry = retryRequests.find((request) => request.method === "thread/list");
+      const desktopRetry = retryRequests.find((request) => request.method === "desktopState/listThreads");
+      fake.serverSend({
+        type: "rpc",
+        payload: { id: liveRetry.id, result: { data: [{ id: "recovered", name: "Recovered" }] } },
+      });
+      fake.serverSend({
+        type: "rpc",
+        payload: { id: desktopRetry.id, result: { data: [{ id: "recovered", title: "Recovered" }] } },
+      });
+      await act(() => retry);
+      expect(vi.getTimerCount()).toBe(0);
+
+      for (const request of timedOutRequests) {
+        act(() => fake.serverSend({ type: "rpc", payload: { id: request.id, result: { data: [] } } }));
+      }
+      await act(async () => undefined);
+      expect(result.current.state.threadOrder).toEqual(["recovered"]);
+      expect(result.current.threadsError).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("settles the initial failure while a newer task-list refresh remains pending", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let olderRefresh!: Promise<void>;
+    act(() => { olderRefresh = result.current.refreshThreads(); });
+    await act(async () => undefined);
+    const olderRequests = fake.sent.map((value) => JSON.parse(value).payload);
+    let newerRefresh!: Promise<void>;
+    act(() => { newerRefresh = result.current.refreshThreads(); });
+    await act(async () => undefined);
+    const newerRequests = fake.sent.map((value) => JSON.parse(value).payload).slice(2);
+
+    for (const request of olderRequests) {
+      fake.serverSend({ type: "rpc", payload: { id: request.id, error: { code: -1, message: "offline" } } });
+    }
+    let failure: unknown;
+    await act(async () => {
+      try {
+        await olderRefresh;
+      } catch (cause) {
+        failure = cause;
+      }
+    });
+    expect(failure).toEqual(new Error("读取对话列表失败"));
+    expect(result.current.threadsLoading).toBe(false);
+    expect(result.current.threadsError).toBe("读取对话列表失败");
+
+    for (const request of newerRequests) {
+      fake.serverSend({ type: "rpc", payload: { id: request.id, error: { code: -1, message: "offline" } } });
+    }
+    await act(async () => { await newerRefresh.catch(() => undefined); });
+  });
+
+  it("does not let an older success clear a newer task-list failure", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let olderRefresh!: Promise<void>;
+    act(() => { olderRefresh = result.current.refreshThreads(); });
+    const olderRequests = taskListRequests(fake);
+    let newerRefresh!: Promise<void>;
+    act(() => { newerRefresh = result.current.refreshThreads(); });
+    const newerRequests = taskListRequests(fake, 2);
+
+    fake.serverSend({ type: "rpc", payload: { id: newerRequests.live.id, error: { code: -1, message: "offline" } } });
+    fake.serverSend({ type: "rpc", payload: { id: newerRequests.desktop.id, error: { code: -1, message: "offline" } } });
+    await act(async () => { await newerRefresh.catch(() => undefined); });
+
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: olderRequests.live.id, result: { data: [{ id: "old-task", name: "Old task" }] } },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: { id: olderRequests.desktop.id, result: { data: [{ id: "old-task", title: "Old task" }] } },
+    });
+    await act(() => olderRefresh);
+
+    expect(result.current.state.threadOrder).toEqual([]);
+    expect(result.current.threadsError).toBe("读取对话列表失败");
+  });
+
+  it("settles a failed initial task-list request as an explicit error", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+
+    let refresh: Promise<void>;
+    act(() => { refresh = result.current.refreshThreads(); });
+    const requests = fake.sent.map((value) => JSON.parse(value).payload);
+    const liveList = requests.find((request) => request.method === "thread/list");
+    const desktopList = requests.find((request) => request.method === "desktopState/listThreads");
+    fake.serverSend({ type: "rpc", payload: { id: liveList.id, error: { code: -1, message: "offline" } } });
+    fake.serverSend({ type: "rpc", payload: { id: desktopList.id, error: { code: -1, message: "offline" } } });
+    let failure: unknown;
+    await act(async () => {
+      try {
+        await refresh;
+      } catch (cause) {
+        failure = cause;
+      }
+    });
+
+    expect(failure).toEqual(new Error("读取对话列表失败"));
+    expect(result.current.threadsLoading).toBe(false);
+    expect(result.current.threadsError).toBe("读取对话列表失败");
+  });
+
   it("loads and normalizes the task list", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);
@@ -707,7 +959,7 @@ describe("useCodex", () => {
     act(() => {
       refresh = result.current.refreshThreads();
     });
-    const request = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: request, desktop: metadataRequest } = taskListRequests(fake);
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -719,9 +971,6 @@ describe("useCodex", () => {
         },
       },
     });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(metadataRequest.method).toBe("desktopState/listThreads");
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -760,14 +1009,13 @@ describe("useCodex", () => {
 
     async function refreshWithIdleSnapshot() {
       let refresh: Promise<void>;
+      const start = fake.sent.length;
       act(() => { refresh = result.current.refreshThreads(); });
-      const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+      const { live: listRequest, desktop: metadataRequest } = taskListRequests(fake, start);
       fake.serverSend({
         type: "rpc",
         payload: { id: listRequest.id, result: { data: [{ id: "t1", name: "Task", status: { type: "idle" } }] } },
       });
-      await waitFor(() => expect(JSON.parse(fake.sent.at(-1) as string).payload.method).toBe("desktopState/listThreads"));
-      const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
       fake.serverSend({
         type: "rpc",
         payload: { id: metadataRequest.id, result: { data: [{ id: "t1", title: "Task" }] } },
@@ -820,7 +1068,7 @@ describe("useCodex", () => {
 
     let refresh: Promise<void>;
     act(() => { refresh = result.current.refreshThreads(); });
-    const liveList = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: liveList, desktop: desktopList } = taskListRequests(fake);
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -828,9 +1076,6 @@ describe("useCodex", () => {
         result: { data: [{ id: "t1", name: "Task", status: { type: "active" } }] },
       },
     });
-    await waitFor(() => expect(JSON.parse(fake.sent.at(-1) as string).payload.method)
-      .toBe("desktopState/listThreads"));
-    const desktopList = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: { id: desktopList.id, result: { data: [{ id: "t1", title: "Task" }] } },
@@ -982,7 +1227,7 @@ describe("useCodex", () => {
 
     let refresh: Promise<void>;
     act(() => { refresh = result.current.refreshThreads(); });
-    const liveRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: liveRequest, desktop: snapshotRequest } = taskListRequests(fake);
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -990,9 +1235,6 @@ describe("useCodex", () => {
         error: { code: -32001, message: "Desktop bridge is read-only" },
       },
     });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const snapshotRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(snapshotRequest.method).toBe("desktopState/listThreads");
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -1017,10 +1259,8 @@ describe("useCodex", () => {
 
     let firstRefresh: Promise<void>;
     act(() => { firstRefresh = result.current.refreshThreads(); });
-    const firstList = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: firstList, desktop: firstDesktopList } = taskListRequests(fake);
     fake.serverSend({ type: "rpc", payload: { id: firstList.id, result: { data: [{ id: "t1" }] } } });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const firstDesktopList = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: { id: firstDesktopList.id, result: { data: [{ id: "t1", title: "Desktop task" }] } },
@@ -1030,10 +1270,8 @@ describe("useCodex", () => {
 
     let secondRefresh: Promise<void>;
     act(() => { secondRefresh = result.current.refreshThreads(); });
-    const secondList = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: secondList, desktop: secondDesktopList } = taskListRequests(fake, 2);
     fake.serverSend({ type: "rpc", payload: { id: secondList.id, result: { data: [{ id: "t1" }] } } });
-    await waitFor(() => expect(fake.sent).toHaveLength(4));
-    const secondDesktopList = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: { id: secondDesktopList.id, error: { code: -32001, message: "bridge temporarily unavailable" } },
@@ -1078,10 +1316,8 @@ describe("useCodex", () => {
 
     let refresh: Promise<void>;
     act(() => { refresh = result.current.refreshThreads(); });
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: listRequest, desktop: desktopListRequest } = taskListRequests(fake);
     fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const desktopListRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: { id: desktopListRequest.id, result: { data: [{ id: "t1", title: "Large task" }] } },
@@ -1219,10 +1455,8 @@ describe("useCodex", () => {
 
     let refresh: Promise<void>;
     act(() => { refresh = result.current.refreshThreads(); });
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: listRequest, desktop: desktopListRequest } = taskListRequests(fake);
     fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const desktopListRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: { id: desktopListRequest.id, result: { data: [{ id: "t1", title: "Desktop task" }] } },
@@ -1302,10 +1536,8 @@ describe("useCodex", () => {
 
     let refresh: Promise<void>;
     act(() => { refresh = result.current.refreshThreads(); });
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: listRequest, desktop: desktopListRequest } = taskListRequests(fake);
     fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const desktopListRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: { id: desktopListRequest.id, result: { data: [{ id: "t1", title: "Desktop task" }] } },
@@ -1458,15 +1690,14 @@ describe("useCodex", () => {
       type: "rpc",
       payload: { id: startRequest.id, result: { thread: { id: "new-thread", cwd: "/code/rdsai" } } },
     });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    await waitFor(() => expect(fake.sent).toHaveLength(3));
+    const refreshRequests = fake.sent.slice(1).map((value) => JSON.parse(value).payload);
+    const listRequest = refreshRequests.find((request) => request.method === "thread/list");
+    const metadataRequest = refreshRequests.find((request) => request.method === "desktopState/listThreads");
     fake.serverSend({
       type: "rpc",
       payload: { id: listRequest.id, result: { data: [{ id: "new-thread", cwd: "/code/rdsai" }] } },
     });
-    await waitFor(() => expect(fake.sent).toHaveLength(3));
-    const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(metadataRequest.method).toBe("desktopState/listThreads");
     fake.serverSend({
       type: "rpc",
       payload: { id: metadataRequest.id, result: { data: [{ id: "new-thread", cwd: "/code/rdsai" }] } },
@@ -1656,27 +1887,72 @@ describe("useCodex", () => {
     });
   });
 
-  it("does not let an in-flight idle snapshot end a newly started turn", async () => {
+  it("keeps Queue until final when polling sees an older idle snapshot after turn start", async () => {
+    vi.useFakeTimers();
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);
     const { result } = renderHook(() => useCodex(socket));
-    await act(() => result.current.connect("secret", "ws://local/rpc"));
-    let selection: Promise<void>;
-    act(() => { selection = result.current.selectThread("t1"); });
-    const request = JSON.parse(fake.sent.at(-1) as string).payload;
-    act(() => fake.serverSend({ type: "rpc", payload: {
-      method: "turn/started", params: { threadId: "t1", turn: { id: "new-turn" } },
-    } }));
-    fake.serverSend({ type: "rpc", payload: { id: request.id, result: {
-      desktopMirror: true,
-      thread: { id: "t1", status: "idle", turns: [{ id: "old-turn", status: "completed", items: [
-        { id: "old-answer", type: "agentMessage", text: "旧答案" },
-      ] }] },
-    } } });
-    await act(() => selection);
-    expect(result.current.state.threads.t1.activeTurnId).toBe("new-turn");
-    expect(result.current.state.threads.t1.status).toBe("running");
-    expect(result.current.state.threads.t1.turns["old-turn"].items["old-answer"].text).toBe("旧答案");
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      act(() => fake.serverSend({ type: "session", state: "ready", transport: "desktop-live", readOnly: false }));
+      let selection: Promise<void>;
+      act(() => { selection = result.current.selectThread("t1"); });
+      const request = JSON.parse(fake.sent.at(-1) as string).payload;
+      fake.serverSend({ type: "rpc", payload: { id: request.id, result: {
+        desktopMirror: true,
+        thread: { id: "t1", status: "idle", turns: [{ id: "old-turn", status: "completed", items: [
+          { id: "old-answer", type: "agentMessage", text: "旧答案" },
+        ] }] },
+      } } });
+      await act(() => selection);
+
+      act(() => fake.serverSend({ type: "rpc", payload: {
+        method: "turn/started", params: { threadId: "t1", turn: { id: "new-turn" } },
+      } }));
+      const pollStart = fake.sent.length;
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      const poll = fake.sent.slice(pollStart).map((raw) => JSON.parse(raw).payload)
+        .find((sent) => sent.method === "desktopState/readThread");
+      expect(poll).toBeTruthy();
+      act(() => fake.serverSend({ type: "rpc", payload: { id: poll.id, result: {
+        desktopMirror: true,
+        thread: { id: "t1", status: "idle", turns: [{ id: "old-turn", status: "completed", items: [
+          { id: "old-answer", type: "agentMessage", text: "旧答案" },
+        ] }] },
+      } } }));
+      await act(async () => {});
+      expect(result.current.state.threads.t1).toMatchObject({ status: "running", activeTurnId: "new-turn" });
+
+      let queued: Promise<void>;
+      act(() => { queued = result.current.sendInstruction("Queue next"); });
+      const queueRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+      expect(queueRequest.method).toBe("desktop/queue/add");
+      act(() => fake.serverSend({ type: "rpc", payload: { id: queueRequest.id, result: {
+        message: { id: "queued-1", text: "Queue next" },
+      } } }));
+      await act(() => queued);
+
+      for (const item of [
+        { id: "commentary", type: "agentMessage", text: "处理中", phase: "commentary" },
+        { id: "final", type: "agentMessage", text: "完成", phase: "final_answer" },
+      ]) act(() => fake.serverSend({ type: "rpc", payload: {
+        method: "item/completed", params: { threadId: "t1", turnId: "new-turn", item },
+      } }));
+      act(() => fake.serverSend({ type: "rpc", payload: {
+        method: "turn/completed", params: { threadId: "t1", turn: { id: "new-turn", status: "completed" } },
+      } }));
+      expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined });
+      expect(result.current.state.threads.t1.turns["new-turn"].items.final.phase).toBe("final_answer");
+
+      let sent: Promise<void>;
+      act(() => { sent = result.current.sendInstruction("Send next"); });
+      const turnRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+      expect(turnRequest.method).toBe("turn/start");
+      act(() => fake.serverSend({ type: "rpc", payload: { id: turnRequest.id, result: {} } }));
+      await act(() => sent);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("prefers a completed resume snapshot over a partial live item with the same id", async () => {
@@ -1977,10 +2253,8 @@ describe("useCodex", () => {
 
     let refresh: Promise<void>;
     act(() => { refresh = result.current.refreshThreads(); });
-    const liveList = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: liveList, desktop: desktopList } = taskListRequests(fake);
     fake.serverSend({ type: "rpc", payload: { id: liveList.id, result: { data: [] } } });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const desktopList = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: { id: desktopList.id, result: { data: [{ id: "t1", title: "Live task" }] } },
@@ -2087,14 +2361,11 @@ describe("useCodex", () => {
     expect(archiveRequest).toMatchObject({ method: "thread/archive", params: { threadId: "t1" } });
     fake.serverSend({ type: "rpc", payload: { id: archiveRequest.id, result: {} } });
 
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(listRequest.method).toBe("thread/list");
-    fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
-
     await waitFor(() => expect(fake.sent).toHaveLength(3));
-    const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(metadataRequest.method).toBe("desktopState/listThreads");
+    const refreshRequests = fake.sent.slice(1).map((value) => JSON.parse(value).payload);
+    const listRequest = refreshRequests.find((request) => request.method === "thread/list");
+    const metadataRequest = refreshRequests.find((request) => request.method === "desktopState/listThreads");
+    fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
     fake.serverSend({ type: "rpc", payload: { id: metadataRequest.id, result: { data: [] } } });
     await act(() => archiving);
   });
@@ -2194,8 +2465,10 @@ describe("useCodex", () => {
       params: { threadId: "t1", sectionId: "pinned-section" },
     });
     fake.serverSend({ type: "rpc", payload: { id: moveRequest.id, result: {} } });
-    await waitFor(() => expect(fake.sent).toHaveLength(3));
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    await waitFor(() => expect(fake.sent).toHaveLength(4));
+    const refreshRequests = fake.sent.slice(2).map((value) => JSON.parse(value).payload);
+    const listRequest = refreshRequests.find((request) => request.method === "thread/list");
+    const metadataRequest = refreshRequests.find((request) => request.method === "desktopState/listThreads");
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -2209,9 +2482,6 @@ describe("useCodex", () => {
         },
       },
     });
-    await waitFor(() => expect(fake.sent).toHaveLength(4));
-    const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(metadataRequest.method).toBe("desktopState/listThreads");
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -2243,13 +2513,11 @@ describe("useCodex", () => {
 
     let refresh: Promise<void>;
     act(() => { refresh = result.current.refreshThreads(); });
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
+    const { live: listRequest, desktop: metadataRequest } = taskListRequests(fake);
     fake.serverSend({
       type: "rpc",
       payload: { id: listRequest.id, result: { data: [{ id: "old-pin" }, { id: "new-pin" }] } },
     });
-    await waitFor(() => expect(fake.sent).toHaveLength(2));
-    const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -2273,14 +2541,14 @@ describe("useCodex", () => {
     });
     fake.serverSend({ type: "rpc", payload: { id: pinRequest.id, result: { pinned: true } } });
 
-    await waitFor(() => expect(fake.sent).toHaveLength(4));
-    const refreshedList = JSON.parse(fake.sent.at(-1) as string).payload;
+    await waitFor(() => expect(fake.sent).toHaveLength(5));
+    const refreshRequests = fake.sent.slice(3).map((value) => JSON.parse(value).payload);
+    const refreshedList = refreshRequests.find((request) => request.method === "thread/list");
+    const refreshedMetadata = refreshRequests.find((request) => request.method === "desktopState/listThreads");
     fake.serverSend({
       type: "rpc",
       payload: { id: refreshedList.id, result: { data: [{ id: "new-pin" }, { id: "old-pin" }] } },
     });
-    await waitFor(() => expect(fake.sent).toHaveLength(5));
-    const refreshedMetadata = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({
       type: "rpc",
       payload: {
@@ -2317,12 +2585,11 @@ describe("useCodex", () => {
     await waitFor(() => expect(fake.sent).toHaveLength(2));
     const moveRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     fake.serverSend({ type: "rpc", payload: { id: moveRequest.id, result: {} } });
-    await waitFor(() => expect(fake.sent).toHaveLength(3));
-    const listRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
     await waitFor(() => expect(fake.sent).toHaveLength(4));
-    const metadataRequest = JSON.parse(fake.sent.at(-1) as string).payload;
-    expect(metadataRequest.method).toBe("desktopState/listThreads");
+    const refreshRequests = fake.sent.slice(2).map((value) => JSON.parse(value).payload);
+    const listRequest = refreshRequests.find((request) => request.method === "thread/list");
+    const metadataRequest = refreshRequests.find((request) => request.method === "desktopState/listThreads");
+    fake.serverSend({ type: "rpc", payload: { id: listRequest.id, result: { data: [] } } });
     fake.serverSend({ type: "rpc", payload: { id: metadataRequest.id, result: { data: [] } } });
     await act(() => pinning);
 

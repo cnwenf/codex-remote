@@ -14,6 +14,79 @@ function snapshot(items: Array<{ id: string; text: string; type: string }>, stat
 }
 
 describe("message pipeline invariants", () => {
+  it("keeps raw text newer than the snapshot even when the DOM is further ahead", () => {
+    const streamed = reduceCodexState(initialCodexState, { method: "item/agentMessage/delta", params: {
+      threadId: "t", turnId: "turn", itemId: "answer", delta: "Hello world",
+    } });
+    const visible = reduceCodexState(streamed, { method: "desktop/visibleAgentMessage", params: {
+      threadId: "t", turnId: "turn", itemId: "answer", text: "Hello world from Desktop",
+    } });
+    const refreshed = new ConversationReconciler().hydrate(visible, snapshot([
+      { id: "answer", type: "agentMessage", text: "Hello" },
+    ]));
+    expect(refreshed.threads.t.turns.turn.items.answer).toMatchObject({ text: "Hello world", textSource: "stream" });
+  });
+
+  it("does not roll back newer raw Markdown when a shorter snapshot follows the DOM fallback", () => {
+    const started = reduceCodexState(initialCodexState, { method: "turn/started", params: { threadId: "t", turn: { id: "turn" } } });
+    const visible = reduceCodexState(started, { method: "desktop/visibleAgentMessage", params: {
+      threadId: "t", turnId: "turn", itemId: "answer", text: "Changed repos:\nrepo state",
+    } });
+    const markdown = "Changed repos:\n\n| repo | state |\n| --- | --- |\n| xa | done |";
+    const streamed = reduceCodexState(visible, { method: "item/agentMessage/delta", params: {
+      threadId: "t", turnId: "turn", itemId: "answer", delta: markdown,
+    } });
+    const refreshed = new ConversationReconciler().hydrate(streamed, snapshot([
+      { id: "answer", type: "agentMessage", text: "Changed repos:" },
+    ]));
+    expect(refreshed.threads.t.turns.turn.items.answer).toMatchObject({ text: markdown, textSource: "stream" });
+  });
+
+  it.each(["no delta", "delta after DOM", "delta before DOM"])("replaces a visible fallback with canonical Markdown before the turn finishes (%s)", (order) => {
+    let started = reduceCodexState(initialCodexState, { method: "turn/started", params: { threadId: "t", turn: { id: "turn" } } });
+    if (order === "delta before DOM") started = reduceCodexState(started, { method: "item/agentMessage/delta", params: {
+      threadId: "t", turnId: "turn", itemId: "answer", delta: "Changed repos:",
+    } });
+    let visible = reduceCodexState(started, { method: "desktop/visibleAgentMessage", params: {
+      threadId: "t", turnId: "turn", itemId: "answer", text: "Changed repos:\nrepo state\nxa done",
+    } });
+    if (order === "delta after DOM") visible = reduceCodexState(visible, { method: "item/agentMessage/delta", params: {
+      threadId: "t", turnId: "turn", itemId: "answer", delta: "Changed repos:\n\n",
+    } });
+    const markdown = "Changed repos:\n\n| repo | state |\n| --- | --- |\n| xa | done |";
+    const canonical = new ConversationReconciler().hydrate(visible, snapshot([
+      { id: "answer", type: "agentMessage", text: markdown },
+    ]));
+    expect(canonical.threads.t.turns.turn.items.answer).toMatchObject({ text: markdown, textSource: "snapshot" });
+    render(<Timeline thread={canonical.threads.t} />);
+    expect(screen.getByRole("table")).toBeVisible();
+  });
+
+  it("loads older canonical history at its page position after ignoring an unknown DOM final", () => {
+    const reconciler = new ConversationReconciler();
+    const current = reconciler.hydrate(initialCodexState, { desktopMirror: true, thread: {
+      id: "t", status: "running", turns: [{ id: "current", status: "inProgress", items: [
+        { id: "current-answer", type: "agentMessage", text: "Current answer" },
+      ] }],
+    } });
+    const observed = reduceCodexState(current, { method: "desktop/visibleAgentMessage", params: {
+      threadId: "t", turnId: "older", itemId: "old-final", text: "Changed repos:\nrepo state\nxa done",
+    } });
+    expect(observed.threads.t.turnOrder).toEqual(["current"]);
+    const loaded = reconciler.hydrate(observed, { desktopMirror: true, thread: {
+      id: "t", status: "idle", turns: [{ id: "older", status: "completed", items: [
+        { id: "old-question", type: "userMessage", text: "Which repos changed?" },
+        { id: "old-final", type: "agentMessage", text: "| repo | state |\n| --- | --- |\n| xa | done |" },
+      ] }],
+    } }, "prepend");
+    expect(loaded.threads.t.turnOrder).toEqual(["older", "current"]);
+    expect(loaded.threads.t.turns.older.itemOrder).toEqual(["old-question", "old-final"]);
+    expect(loaded.threads.t.activeTurnId).toBe("current");
+    render(<Timeline thread={loaded.threads.t} />);
+    expect(screen.getByRole("table")).toBeVisible();
+    expect(screen.getByText("Current answer")).toBeVisible();
+  });
+
   it("repairs a missed prefix from a completed item while its turn still runs tools", () => {
     const live = reduceCodexState(initialCodexState, { method: "item/agentMessage/delta", params: {
       threadId: "t", turnId: "turn", itemId: "a", delta: "world",
@@ -38,7 +111,8 @@ describe("message pipeline invariants", () => {
   });
   it.each([["**Hello**"], ["**He", "llo**"], ["**", "H", "e", "l", "l", "o", "**"]])(
     "switches fragmented Desktop plain text to Markdown without concatenating sources: %j", (...chunks) => {
-    let state = reduceCodexState(initialCodexState, { method: "desktop/visibleAgentMessage", params: {
+    const started = reduceCodexState(initialCodexState, { method: "turn/started", params: { threadId: "t", turn: { id: "turn" } } });
+    let state = reduceCodexState(started, { method: "desktop/visibleAgentMessage", params: {
       threadId: "t", turnId: "turn", itemId: "a", text: "Hello",
     } });
     for (const delta of chunks) state = reduceCodexState(state, { method: "item/agentMessage/delta", params: {
@@ -73,7 +147,8 @@ describe("message pipeline invariants", () => {
     expect(next.threads.t.turns.turn.items.a.text).toBe("hello world");
   });
   it("consumes fragmented deltas already covered by the Desktop observation", () => {
-    let state = reduceCodexState(initialCodexState, { method: "desktop/visibleAgentMessage", params: {
+    const started = reduceCodexState(initialCodexState, { method: "turn/started", params: { threadId: "t", turn: { id: "turn" } } });
+    let state = reduceCodexState(started, { method: "desktop/visibleAgentMessage", params: {
       threadId: "t", turnId: "turn", itemId: "a", text: "hello world",
     } });
     for (const delta of [" wor", "ld"]) state = reduceCodexState(state, {

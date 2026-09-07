@@ -75,6 +75,28 @@ test("keeps the browser signed in after a reload", async ({ page }) => {
   await expect(page.getByLabel("Access token")).toHaveCount(0);
 });
 
+test("keeps nested tool disclosure readable and inside the conversation viewport", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  const group = page.locator(".activity-group").filter({ has: page.locator(".tool-details") }).first();
+  await group.locator(":scope > summary").click();
+  const disclosure = group.locator(".tool-details summary").first();
+  await expect(disclosure).toBeVisible();
+  const box = await disclosure.boundingBox();
+  expect(box!.height).toBeLessThanOrEqual(60);
+  expect(box!.width).toBeGreaterThan(120);
+  await disclosure.click();
+  const details = group.locator(".tool-details").first();
+  await expect(details.locator("pre")).toHaveCount(2);
+  const viewport = await page.getByTestId("timeline-scroll").boundingBox();
+  const content = await details.boundingBox();
+  expect(content!.x).toBeGreaterThanOrEqual(viewport!.x);
+  expect(content!.x + content!.width).toBeLessThanOrEqual(viewport!.x + viewport!.width + 1);
+});
+
 test("controller opens a task, streams output, denies approval, and reviews diff", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");

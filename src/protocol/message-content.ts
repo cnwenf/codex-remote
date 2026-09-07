@@ -1,9 +1,16 @@
 import type { CodexItem } from "./thread-store";
 
+export function localImagesFromProtocol(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).filter(([, id]) => typeof id === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)));
+}
+
 /** Normalize protocol spelling at the boundary, not with substring guesses in views. */
-export function messageKind(type: string): "user" | "agent" | "activity" | "plan" {
+export function messageKind(type: string): "user" | "agent" | "delegated" | "activity" | "plan" {
   switch (type.replace(/[_-]/g, "").toLowerCase()) {
     case "usermessage": return "user";
+    case "delegatedinput": return "delegated";
     case "agentmessage":
     case "assistantmessage": return "agent";
     case "todolist": return "plan";
@@ -63,7 +70,7 @@ export function mergeMessageItem(snapshot: CodexItem | undefined, live: CodexIte
   const useSnapshot = snapshotComplete
     ? live.textSource !== "completed" || !live.text.startsWith(snapshot.text)
     : live.textSource !== "completed" && (
-      !live.text || snapshot.text.startsWith(live.text) ||
+      live.textSource === "visible" || !live.text || snapshot.text.startsWith(live.text) ||
       (!live.text.startsWith(snapshot.text) && terminal)
     );
   // An item may finish before the turn's tools do. Adopt its canonical body
@@ -71,11 +78,32 @@ export function mergeMessageItem(snapshot: CodexItem | undefined, live: CodexIte
   if (snapshot.text && useSnapshot) {
     text = snapshot.text;
     textSource = snapshot.textSource;
+    if (!snapshotComplete && live.textSource === "visible" && live.streamedText?.startsWith(text)) {
+      text = live.streamedText;
+      textSource = "stream";
+    }
   }
   const imageIds = [...new Set([...(snapshot.imageIds ?? []), ...(live.imageIds ?? [])])];
+  const toolOutputSource = snapshot.toolOutput !== undefined &&
+    (live.toolOutput === undefined || live.toolOutputFromPending === true || (snapshot.status === "completed" && live.status !== "completed") ||
+      (snapshot.toolOutput === live.toolOutput && live.toolOutputImageIds === undefined && snapshot.toolOutputImageIds !== undefined) ||
+      (live.status !== "completed" && snapshot.toolOutput.length > live.toolOutput.length)) ? snapshot : live;
   return {
     ...snapshot, ...live, text, textSource,
+    localImages: { ...snapshot.localImages, ...live.localImages },
+    ...(toolOutputSource.toolOutput !== undefined ? {
+      toolOutput: toolOutputSource.toolOutput,
+      toolOutputTruncated: toolOutputSource.toolOutputTruncated,
+      toolOutputLength: toolOutputSource.toolOutputLength,
+      toolOutputImageIds: toolOutputSource.toolOutputImageIds,
+      toolOutputImagesIncomplete: toolOutputSource.toolOutputImagesIncomplete,
+      toolOutputFromPending: toolOutputSource.toolOutputFromPending,
+      toolOutputTurnId: toolOutputSource.toolOutputTurnId,
+    } : {}),
     phase: live.phase ?? snapshot.phase,
+    sourceThreadId: live.sourceThreadId ?? snapshot.sourceThreadId,
+    delegatedInputIsReplay: live.delegatedInputIsReplay === false || snapshot.delegatedInputIsReplay === false
+      ? false : live.delegatedInputIsReplay ?? snapshot.delegatedInputIsReplay,
     ...(imageIds.length > 0 ? { imageIds } : {}),
     status: terminal ? snapshot.status ?? "completed" : live.status ?? snapshot.status,
   };

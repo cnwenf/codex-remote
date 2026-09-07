@@ -1,23 +1,39 @@
-import { useEffect, useState } from "react";
-import Markdown from "react-markdown";
+import { createContext, useContext, useEffect, useState, type ComponentPropsWithoutRef } from "react";
+import { createPortal } from "react-dom";
+import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-store";
 import { messageKind } from "../../protocol/message-content";
+import { isToolActivity, MAX_TOOL_OUTPUT_IMAGES } from "../../protocol/tool-content";
+import { remarkAssistantPresentation } from "./assistant-presentation";
 
 type ImageRequest = { baseUrl: string; token: string };
 type ImagePreview = { source: string; alt: string };
+type MarkdownImageContextValue = {
+  assistant?: boolean;
+  localImages?: Record<string, string>;
+  imageRequest?: ImageRequest;
+  onPreviewImage?: (preview: ImagePreview) => void;
+  onOpenExternalUrl?: (url: string) => void;
+};
+
+const MarkdownImageContext = createContext<MarkdownImageContextValue>({});
 
 export function Timeline({
   thread,
+  loading = false,
+  loadFailed = false,
   imageRequest,
   onOpenExternalUrl,
 }: {
   thread?: CodexThread;
+  loading?: boolean;
+  loadFailed?: boolean;
   imageRequest?: ImageRequest;
   onOpenExternalUrl?: (url: string) => void;
 }) {
   const [imagePreview, setImagePreview] = useState<ImagePreview>();
-  useEffect(() => setImagePreview(undefined), [thread?.id]);
+  useEffect(() => setImagePreview(undefined), [thread?.id, imageRequest?.baseUrl, imageRequest?.token]);
 
   if (!thread) {
     return (
@@ -30,6 +46,9 @@ export function Timeline({
   }
 
   if (thread.turnOrder.length === 0) {
+    if (loadFailed) return null;
+    if (loading) return <div className="empty-thread" role="status">正在加载对话…</div>;
+    if (thread.toolOutputWarning) return <p className="history-tool-warning" role="status">{thread.toolOutputWarning}</p>;
     return (
       <div className="empty-thread">
         <span aria-hidden="true">↗</span>
@@ -46,6 +65,7 @@ export function Timeline({
 
   return (
     <>
+      {thread.toolOutputWarning ? <p className="history-tool-warning" role="status">{thread.toolOutputWarning}</p> : null}
       <ol className="timeline" aria-label="对话内容">
         {thread.turnOrder.map((turnId) => {
           const turn = thread.turns[turnId];
@@ -104,7 +124,7 @@ function TurnView({
                 <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
               </summary>
               <ol className="activity-list">
-                {segment.items.map((item) => <ActivityItem key={item.id} item={item} />)}
+                {segment.items.map((item) => <ActivityItem key={item.id} item={item} imageRequest={imageRequest} onPreviewImage={onPreviewImage} />)}
               </ol>
             </details>
           );
@@ -127,6 +147,8 @@ function TurnView({
           {turn.error?.additionalDetails ? <p className="inline-error">{turn.error.additionalDetails}</p> : null}
         </article>
       ) : null}
+
+      {turn.status === "interrupted" ? <p className="turn-stopped">本轮已停止</p> : null}
 
       {showTyping ? (
         <TypingIndicator />
@@ -151,12 +173,18 @@ function MessageSegment({
   onPreviewImage,
   onOpenExternalUrl,
 }: {
-  segment: Extract<TurnSegment, { kind: "user" | "agent" }>;
+  segment: Extract<TurnSegment, { kind: "user" | "agent" | "delegated" }>;
   imageRequest?: ImageRequest;
   onPreviewImage: (preview: ImagePreview) => void;
   onOpenExternalUrl?: (url: string) => void;
 }) {
   const item = segment.item;
+  if (segment.kind === "delegated") return (
+    <article className="message message-delegated" data-delegated-input="true">
+      <span className="message-author" title={item.sourceThreadId}>来自任务 {item.sourceThreadId?.slice(0, 8) ?? "未知来源"}</span>
+      <div className="delegated-input-text">{item.text}</div>
+    </article>
+  );
   if (segment.kind === "user") {
     return (
       <article className="message message-user" data-user-message="true">
@@ -181,7 +209,8 @@ function MessageSegment({
   return (
     <article className="message message-agent">
       <span className="message-author">Codex</span>
-      <MarkdownContent text={item.text || "等待输出…"} onOpenExternalUrl={onOpenExternalUrl} />
+      <MarkdownContent text={item.text || "等待输出…"} assistant onOpenExternalUrl={onOpenExternalUrl}
+        localImages={item.localImages} imageRequest={imageRequest} onPreviewImage={onPreviewImage} />
     </article>
   );
 }
@@ -199,7 +228,9 @@ function AuthenticatedImage({
 }) {
   const fallback = `/api/images/${encodeURIComponent(imageId)}`;
   const [source, setSource] = useState(request ? undefined : fallback);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
+    setFailed(false);
     if (!request) { setSource(fallback); return; }
     setSource(undefined);
     let disposed = false;
@@ -213,21 +244,26 @@ function AuthenticatedImage({
       if (disposed) return;
       objectUrl = URL.createObjectURL(blob);
       setSource(objectUrl);
-    }).catch(() => undefined);
+    }).catch(() => { if (!disposed) setFailed(true); });
     return () => {
       disposed = true;
       if (objectUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(objectUrl);
     };
   }, [fallback, imageId, request?.baseUrl, request?.token]);
+  if (failed) return <span className="image-error">图片加载失败：{alt}</span>;
   return source ? (
     <button
       type="button"
       className="message-image-link"
       aria-label={`预览${alt}`}
       onPointerDown={(event) => event.stopPropagation()}
-      onClick={() => onPreview({ source, alt })}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onPreview({ source, alt });
+      }}
     >
-      <img src={source} alt={alt} loading="lazy" />
+      <img src={source} alt={alt} loading="lazy" onError={() => setFailed(true)} />
     </button>
   ) : <span className="image-loading">正在加载图片…</span>;
 }
@@ -240,7 +276,7 @@ function ImagePreviewDialog({ preview, onClose }: { preview: ImagePreview; onClo
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [onClose]);
-  return (
+  return createPortal(
     <div
       className="image-preview-backdrop"
       role="dialog"
@@ -259,15 +295,16 @@ function ImagePreviewDialog({ preview, onClose }: { preview: ImagePreview; onClo
         </button>
         <img src={preview.source} alt={`${preview.alt} 预览`} />
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 type TurnSegment =
-  | { kind: "user" | "agent"; item: CodexItem }
+  | { kind: "user" | "agent" | "delegated"; item: CodexItem }
   | { kind: "activity"; key: string; items: CodexItem[] };
 
-type MessageTurnSegment = Extract<TurnSegment, { kind: "user" | "agent" }>;
+type MessageTurnSegment = Extract<TurnSegment, { kind: "user" | "agent" | "delegated" }>;
 
 
 function segmentItems(items: CodexItem[]): TurnSegment[] {
@@ -275,8 +312,8 @@ function segmentItems(items: CodexItem[]): TurnSegment[] {
   for (const item of items) {
     const kind = messageKind(item.type);
     if (kind === "plan") continue;
-    if (kind === "user") {
-      segments.push({ kind: "user", item });
+    if (kind === "user" || kind === "delegated") {
+      segments.push({ kind, item });
       continue;
     }
     if (kind === "agent") {
@@ -344,36 +381,50 @@ export function TodoListDock({
   );
 }
 
-function MarkdownContent({ text, onOpenExternalUrl }: { text: string; onOpenExternalUrl?: (url: string) => void }) {
+function MarkdownContent({ text, assistant, onOpenExternalUrl, localImages, imageRequest, onPreviewImage }: {
+  text: string;
+  assistant?: boolean;
+  onOpenExternalUrl?: (url: string) => void;
+  localImages?: Record<string, string>;
+  imageRequest?: ImageRequest;
+  onPreviewImage?: (preview: ImagePreview) => void;
+}) {
   return (
     <div className="markdown-body">
-      <Markdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ children, href, ...props }) => {
-            const external = isSafeExternalUrl(href);
-            if (!external) return <span data-invalid-link="true">{children}</span>;
-            return (
-              <a
-                {...props}
-                href={href}
-                target="_blank"
-                rel="noreferrer noopener"
-                onClick={onOpenExternalUrl ? (event) => {
-                  event.preventDefault();
-                  onOpenExternalUrl(href as string);
-                } : undefined}
-              >
-                {children}
-              </a>
-            );
-          },
-        }}
-      >
-        {text}
-      </Markdown>
+      <MarkdownImageContext.Provider value={{ assistant, localImages, imageRequest, onPreviewImage, onOpenExternalUrl }}>
+        <Markdown
+          remarkPlugins={assistant ? [remarkGfm, remarkAssistantPresentation] : [remarkGfm]}
+          urlTransform={(url, key, node) => node.tagName === "img" ? url : defaultUrlTransform(url)}
+          components={{
+            img: MarkdownImage,
+            a: MarkdownLink,
+          }}
+        >
+          {text}
+        </Markdown>
+      </MarkdownImageContext.Provider>
     </div>
   );
+}
+
+function MarkdownLink({ children, href, ...props }: ComponentPropsWithoutRef<"a">) {
+  const { onOpenExternalUrl } = useContext(MarkdownImageContext);
+  if (!isSafeExternalUrl(href)) return <span data-invalid-link="true">{children}</span>;
+  return <a {...props} href={href} target="_blank" rel="noreferrer noopener"
+    onClick={onOpenExternalUrl ? (event) => {
+      event.preventDefault();
+      onOpenExternalUrl(href);
+    } : undefined}>{children}</a>;
+}
+
+function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
+  const { assistant, localImages, imageRequest, onPreviewImage } = useContext(MarkdownImageContext);
+  const source = typeof src === "string" ? src : "";
+  const imageId = localImages && Object.hasOwn(localImages, source) ? localImages[source] : undefined;
+  if (assistant && imageId && onPreviewImage) return <AuthenticatedImage imageId={imageId}
+    request={imageRequest} alt={alt || "Codex 生成的图片"} onPreview={onPreviewImage} />;
+  if (source.startsWith("https://") && isSafeExternalUrl(source)) return <img src={source} alt={alt} loading="lazy" referrerPolicy="no-referrer" />;
+  return <span className="image-error">本机图片不可用：{alt || "图片"}</span>;
 }
 
 function isSafeExternalUrl(value?: string): value is string {
@@ -386,14 +437,37 @@ function isSafeExternalUrl(value?: string): value is string {
   }
 }
 
-function ActivityItem({ item }: { item: CodexItem }) {
+function ActivityItem({ item, imageRequest, onPreviewImage }: {
+  item: CodexItem;
+  imageRequest?: ImageRequest;
+  onPreviewImage: (preview: ImagePreview) => void;
+}) {
+  const running = item.status === "running" || item.status === "inProgress";
+  const imageView = item.type.replace(/[_-]/g, "").toLowerCase() === "imageview";
+  const description = imageView
+    ? running ? "正在查看图片" : item.status === "completed" ? "已查看图片" : item.status === "failed" ? "查看图片失败" : "查看图片"
+    : item.text || (running ? "等待结果…" : "未收到结果正文");
   return (
     <li>
       <span className="activity-icon" aria-hidden="true">{iconForType(item.type)}</span>
-      <span className="activity-copy">
-        <strong>{labelForType(item.type)}</strong>
-        <span>{item.text || "等待结果…"}</span>
-      </span>
+      <div className="activity-copy">
+        <strong>{imageView ? "查看图片" : labelForType(item.type)}</strong>
+        <span>{description}</span>
+        {isToolActivity(item.type) ? <details className="tool-details">
+          <summary>查看输入与结果</summary>
+          <strong>输入</strong>
+          <pre>{item.toolInput ?? "未收到输入正文"}</pre>
+          {item.toolInputTruncated ? <p>已截断：显示前 {item.toolInput?.length ?? 0} 个字符{item.toolInputLength !== undefined ? `，原文 ${item.toolInputLength} 个字符` : ""}</p> : null}
+          <strong>结果</strong>
+          <pre>{item.toolOutput === "" ? "结果正文为空" : item.toolOutput ?? (running ? "等待结果…" : "未收到结果正文")}</pre>
+          {item.toolOutputImageIds?.length ? <div className="message-images">
+            {item.toolOutputImageIds.map((imageId, index) => <AuthenticatedImage key={imageId} imageId={imageId}
+              request={imageRequest} alt={`工具返回图片 ${index + 1}`} onPreview={onPreviewImage} />)}
+          </div> : null}
+          {item.toolOutputImagesIncomplete ? <p>部分工具图片不可用或超出限制（每项最多显示 {MAX_TOOL_OUTPUT_IMAGES} 张）。</p> : null}
+          {item.toolOutputTruncated ? <p>已截断：显示前 {item.toolOutput?.length ?? 0} 个字符{item.toolOutputLength !== undefined ? `，原文 ${item.toolOutputLength} 个字符` : ""}</p> : null}
+        </details> : null}
+      </div>
       {item.status ? <span className="activity-status">{statusLabel(item.status)}</span> : null}
     </li>
   );
