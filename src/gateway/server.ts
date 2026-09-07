@@ -9,6 +9,7 @@ import WebSocket, { WebSocketServer, type RawData } from "ws";
 import type { MobileTask } from "../mobile/types";
 import { RpcRouter } from "../protocol/rpc-router";
 import { displayUserInput } from "../protocol/user-message-identity";
+import { turnErrorFromProtocol, type TurnError } from "../protocol/thread-store";
 import {
   isRpcRequest,
   isRpcResponse,
@@ -96,6 +97,7 @@ export function createGateway(options: GatewayOptions) {
   const liveThreadActivity = new Map<string, {
     status: "running" | "idle" | "error";
     turnId?: string;
+    error?: TurnError;
     source: "event" | "sync";
     updatedAt: number;
   }>();
@@ -563,10 +565,12 @@ export function createGateway(options: GatewayOptions) {
       const completedTurnId = optionalString(turn.id) ?? optionalString(params.turnId);
       const active = liveThreadActivity.get(threadId);
       if (!active?.turnId || !completedTurnId || active.turnId === completedTurnId) {
-        const completedStatus = optionalString(turn.status) === "failed" ? "error" : "idle";
+        const repeatsFailedTurn = active?.status === "error" && (completedTurnId ?? active.turnId) === active.turnId;
+        const completedStatus = optionalString(turn.status) === "failed" || repeatsFailedTurn ? "error" : "idle";
         liveThreadActivity.set(threadId, {
           status: completedStatus,
           turnId: completedTurnId ?? active?.turnId,
+          error: turnErrorFromProtocol(turn.error) ?? (repeatsFailedTurn ? active.error : undefined),
           source: "event",
           updatedAt: Date.now(),
         });
@@ -591,10 +595,12 @@ export function createGateway(options: GatewayOptions) {
       liveThreadActivity.set(threadId, {
         status: "error",
         turnId: liveThreadActivity.get(threadId)?.turnId,
+        error: liveThreadActivity.get(threadId)?.error,
         source: "event",
         updatedAt: Date.now(),
       });
     } else if (status === "idle" || status === "completed" || status === "notLoaded") {
+      if (liveThreadActivity.get(threadId)?.status === "error") return;
       liveThreadActivity.set(threadId, {
         status: "idle",
         turnId: liveThreadActivity.get(threadId)?.turnId,
@@ -613,6 +619,7 @@ export function createGateway(options: GatewayOptions) {
       for (const thread of projected) {
         if (thread.status === "unknown") continue;
         const current = liveThreadActivity.get(thread.id);
+        if (current?.status === "error" && thread.status === "idle") continue;
         const staleRunningListAfterTerminalEvent =
           current?.source === "event" &&
           current.status !== "running" &&
@@ -626,7 +633,8 @@ export function createGateway(options: GatewayOptions) {
         ) continue;
         liveThreadActivity.set(thread.id, {
           status: thread.status,
-          turnId: thread.status === "running" ? current?.turnId : undefined,
+          turnId: thread.status === "running" || thread.status === current?.status ? current?.turnId : undefined,
+          error: thread.status === "error" ? current?.error : undefined,
           source: "sync",
           updatedAt: now,
         });
@@ -948,9 +956,30 @@ export function createGateway(options: GatewayOptions) {
   async function handleDesktopStateRequest(socket: WebSocket, request: import("../protocol/types").RpcRequest) {
     try {
       if (!options.desktopState) throw new Error("Desktop state is unavailable");
-      const result = await options.desktopState.request(request.method, request.params);
+      let result = await options.desktopState.request(request.method, request.params);
+      let liveTurnOrder: string[] = [];
+      if (request.method === "desktopState/readThread" &&
+        !recordValue(recordValue(request.params).history).beforeCursor &&
+        options.transport.getSessionInfo?.().readOnly === false) {
+        try {
+          const turns = await requestTransport("thread/turns/list", {
+            threadId: recordValue(request.params).threadId,
+            limit: 8,
+            sortDirection: "desc",
+            itemsView: "notLoaded",
+          });
+          const data = recordValue(turns).data;
+          if (Array.isArray(data)) liveTurnOrder = data.flatMap((turn) => {
+            const id = optionalString(recordValue(turn).id);
+            return id ? [id] : [];
+          });
+          result = reconcileDesktopTurnFailures(result, turns);
+        } catch {
+          // Older/offline Desktop versions still provide bounded rollout history.
+        }
+      }
       const reconciled = request.method === "desktopState/readThread"
-        ? reconcileDesktopThreadActivity(result, liveThreadActivity)
+        ? reconcileDesktopThreadActivity(result, liveThreadActivity, liveTurnOrder)
         : result;
       sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result: reconciled } });
     } catch (cause) {
@@ -991,7 +1020,8 @@ export function createGateway(options: GatewayOptions) {
 
 function reconcileDesktopThreadActivity(
   value: unknown,
-  activityByThread: ReadonlyMap<string, { status: "running" | "idle" | "error"; turnId?: string }>,
+  activityByThread: ReadonlyMap<string, { status: "running" | "idle" | "error"; turnId?: string; error?: TurnError }>,
+  liveTurnOrder: string[] = [],
 ) {
   const outer = recordValue(value);
   const thread = recordValue(outer.thread ?? value);
@@ -1000,19 +1030,44 @@ function reconcileDesktopThreadActivity(
   if (!activity?.turnId) return value;
   const turns = Array.isArray(thread.turns) ? thread.turns.map((turn) => ({ ...recordValue(turn) })) : [];
   const turnIndex = turns.findIndex((turn) => optionalString(turn.id) === activity.turnId);
-  const turnStatus = activity.status === "running"
+  if (turnIndex < 0 && liveTurnOrder.indexOf(activity.turnId) > 0) return value;
+  if (turnIndex >= 0 && turnIndex < turns.length - 1 && turns.at(-1)?.status === "failed") return value;
+  const turnStatus = turns[turnIndex]?.status === "failed" ? "failed" : activity.status === "running"
     ? "inProgress"
     : activity.status === "error" ? "failed" : "completed";
-  if (turnIndex >= 0) turns[turnIndex] = { ...turns[turnIndex], status: turnStatus };
-  else turns.push({ id: activity.turnId, status: turnStatus, items: [] });
+  if (turnIndex >= 0) turns[turnIndex] = {
+    ...turns[turnIndex], status: turnStatus,
+    ...(activity.error ? { error: activity.error } : {}),
+  };
+  else turns.push({ id: activity.turnId, status: turnStatus, error: activity.error, items: [] });
   const reconciledThread = {
     ...thread,
-    status: { type: activity.status === "running" ? "active" : activity.status },
+    status: turnIndex >= 0 && turnIndex < turns.length - 1 ? thread.status
+      : { type: turnStatus === "failed" ? "error" : activity.status === "running" ? "active" : activity.status },
     turns,
   };
   return Object.hasOwn(outer, "thread")
     ? { ...outer, thread: reconciledThread }
     : reconciledThread;
+}
+
+function reconcileDesktopTurnFailures(value: unknown, liveValue: unknown) {
+  const outer = recordValue(value);
+  const thread = recordValue(outer.thread ?? value);
+  const data = recordValue(liveValue).data;
+  if (!Array.isArray(data)) return value;
+  const failures = data.map(recordValue).filter((turn) => turn.status === "failed" && typeof turn.id === "string");
+  if (failures.length === 0) return value;
+  const turns = Array.isArray(thread.turns) ? thread.turns.map(recordValue) : [];
+  for (const failed of failures) {
+    const index = turns.findIndex((turn) => turn.id === failed.id);
+    const error = turnErrorFromProtocol(failed.error);
+    if (index >= 0) turns[index] = { ...turns[index], status: "failed", ...(error ? { error } : {}) };
+    else if (recordValue(data[0]).id === failed.id) turns.push({ id: failed.id, status: "failed", error, items: [] });
+  }
+  const latestFailed = recordValue(data[0]).status === "failed";
+  const reconciled = { ...thread, turns, ...(latestFailed ? { status: { type: "error" } } : {}) };
+  return Object.hasOwn(outer, "thread") ? { ...outer, thread: reconciled } : reconciled;
 }
 
 function enrichDesktopImageMessage(message: RpcMessage, imageStore: ImageUploadStore): RpcMessage {

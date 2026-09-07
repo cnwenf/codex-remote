@@ -10,7 +10,16 @@ import java.util.UUID;
 final class NativeImageUploadStaging {
     private final File directory;
     private final long maximumBytes;
-    private final Map<String, File> pending = new HashMap<>();
+    private final Map<String, Upload> uploads = new HashMap<>();
+    private boolean closed;
+
+    private static final class Upload {
+        final File file;
+        boolean claimed;
+        Runnable cancel;
+
+        Upload(File file) { this.file = file; }
+    }
 
     NativeImageUploadStaging(File directory, long maximumBytes) {
         this.directory = directory;
@@ -18,19 +27,21 @@ final class NativeImageUploadStaging {
     }
 
     synchronized String start() throws IOException {
+        if (closed) throw new IllegalStateException("image-upload-staging-closed");
         if (!directory.exists() && !directory.mkdirs()) {
             throw new IOException("image-upload-directory-unavailable");
         }
         String id = UUID.randomUUID().toString();
         File file = new File(directory, "image-upload-" + id + ".part");
         if (!file.createNewFile()) throw new IOException("image-upload-file-unavailable");
-        pending.put(id, file);
+        uploads.put(id, new Upload(file));
         return id;
     }
 
     synchronized void append(String id, byte[] bytes) throws IOException {
-        File file = pending.get(id);
-        if (file == null) throw new IllegalStateException("image-upload-not-found");
+        Upload upload = uploads.get(id);
+        if (upload == null || upload.claimed) throw new IllegalStateException("image-upload-not-found");
+        File file = upload.file;
         if (file.length() + bytes.length > maximumBytes) {
             throw new IllegalArgumentException("image-upload-too-large");
         }
@@ -40,18 +51,48 @@ final class NativeImageUploadStaging {
     }
 
     synchronized File claim(String id) {
-        File file = pending.remove(id);
-        if (file == null) throw new IllegalStateException("image-upload-not-found");
-        return file;
+        Upload upload = uploads.get(id);
+        if (upload == null || upload.claimed) throw new IllegalStateException("image-upload-not-found");
+        upload.claimed = true;
+        return upload.file;
     }
 
-    synchronized void cancel(String id) {
-        File file = pending.remove(id);
-        if (file != null) file.delete();
+    synchronized boolean isActive(String id) {
+        return uploads.containsKey(id);
     }
 
-    synchronized void cancelAll() {
-        for (File file : pending.values()) file.delete();
-        pending.clear();
+    void onCancel(String id, Runnable cancel) {
+        synchronized (this) {
+            Upload upload = uploads.get(id);
+            if (upload != null) {
+                upload.cancel = cancel;
+                return;
+            }
+        }
+        // Cancellation may win while the network worker is starting.
+        cancel.run();
+    }
+
+    synchronized void complete(String id) {
+        Upload upload = uploads.remove(id);
+        if (upload != null) upload.file.delete();
+    }
+
+    void cancel(String id) {
+        Upload upload;
+        synchronized (this) { upload = uploads.remove(id); }
+        if (upload == null) return;
+        upload.file.delete();
+        // Do not hold the staging lock while disconnecting network I/O.
+        if (upload.cancel != null) upload.cancel.run();
+    }
+
+    void cancelAll() {
+        String[] ids;
+        synchronized (this) {
+            closed = true;
+            ids = uploads.keySet().toArray(new String[0]);
+        }
+        for (String id : ids) cancel(id);
     }
 }

@@ -1,10 +1,11 @@
 import { App as CapacitorApp } from "@capacitor/app";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { LocalNotifications } from "@capacitor/local-notifications";
+import { Preferences } from "@capacitor/preferences";
 import { useEffect, useMemo, useRef, useState } from "react";
 import packageInfo from "../../package.json";
 import { App, type NativeRemoteSession } from "../web/app";
-import { uploadedImageFromResponse } from "../web/api/socket";
+import { uploadNativeImage } from "./native-image-upload";
 import { CapacitorConnectionPersistence } from "./capacitor-persistence";
 import { ConnectionForm } from "./connection-form";
 import { ConnectionList } from "./connection-list";
@@ -31,9 +32,9 @@ import { mobileCopy } from "./mobile-copy";
 
 type MobileView = "connections" | "form" | "remote" | "settings";
 const CONNECTION_STATUS_TIMEOUT_MS = 8_000;
-const IMAGE_UPLOAD_CHUNK_BYTES = 256 * 1024;
-const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
 const CONNECTION_STATUS_REFRESH_MS = 15_000;
+const NOTIFICATION_PERMISSION_REQUESTED_KEY = "codex-remote.notification-permission-requested.v1";
+let notificationPermissionInitialization: Promise<void> | undefined;
 
 type ConnectionStatusCheck = {
   controller: AbortController;
@@ -460,9 +461,24 @@ export function MobileShell({
 }
 
 async function ensureNotificationPermission() {
+  if (notificationPermissionInitialization) return notificationPermissionInitialization;
+  const initialization = initializeNotificationPermission();
+  notificationPermissionInitialization = initialization;
+  try {
+    await initialization;
+  } finally {
+    if (notificationPermissionInitialization === initialization) notificationPermissionInitialization = undefined;
+  }
+}
+
+async function initializeNotificationPermission() {
   try {
     const current = await LocalNotifications.checkPermissions();
-    if (current.display !== "granted") await LocalNotifications.requestPermissions();
+    if (current.display !== "prompt") return;
+    const requested = await Preferences.get({ key: NOTIFICATION_PERMISSION_REQUESTED_KEY });
+    if (requested.value === "true") return;
+    await Preferences.set({ key: NOTIFICATION_PERMISSION_REQUESTED_KEY, value: "true" });
+    await LocalNotifications.requestPermissions();
   } catch {
     // The remote remains usable when notifications are unavailable or denied.
   }
@@ -496,64 +512,6 @@ async function verifyRemote(baseUrl: string, token: string, signal?: AbortSignal
   });
   if (response.status === 401) throw new Error("remote-auth-failed");
   if (!response.ok) throw new Error("remote-unreachable");
-}
-
-async function uploadNativeImage(baseUrl: string, token: string, file: File) {
-  let uploadId: string | undefined;
-  let timedOut = false;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => {
-      timedOut = true;
-      reject(new Error("图片上传超时，请检查连接后重试"));
-    }, IMAGE_UPLOAD_TIMEOUT_MS);
-  });
-  const upload = (async () => {
-    const started = await CodexRemoteNative.startImageUpload();
-    uploadId = started.uploadId;
-    for (let offset = 0; offset < file.size; offset += IMAGE_UPLOAD_CHUNK_BYTES) {
-      const data = await blobAsBase64(file.slice(offset, offset + IMAGE_UPLOAD_CHUNK_BYTES));
-      if (timedOut) throw new Error("图片上传超时，请检查连接后重试");
-      await CodexRemoteNative.appendImageUpload({ uploadId, data });
-    }
-    if (timedOut) throw new Error("图片上传超时，请检查连接后重试");
-    const response = await CodexRemoteNative.finishImageUpload({
-      uploadId,
-      url: `${normalizeRemoteUrl(baseUrl)}/api/images`,
-      token,
-      fileName: encodeURIComponent(file.name),
-      mimeType: file.type,
-    });
-    return uploadedImageFromResponse(response.status, response.data);
-  })();
-  try {
-    return await Promise.race([upload, timeoutPromise]);
-  } catch (cause) {
-    if (uploadId) await CodexRemoteNative.cancelImageUpload({ uploadId }).catch(() => undefined);
-    throw cause;
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-}
-
-function blobAsBase64(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => {
-      if (typeof reader.result !== "string") {
-        reject(new Error("图片读取失败"));
-        return;
-      }
-      const separator = reader.result.indexOf(",");
-      if (separator < 0) {
-        reject(new Error("图片读取失败"));
-        return;
-      }
-      resolve(reader.result.slice(separator + 1));
-    });
-    reader.addEventListener("error", () => reject(new Error("图片读取失败")));
-    reader.readAsDataURL(blob);
-  });
 }
 
 function messageForError(cause: unknown, language: MobileSettings["language"] = "zh-CN") {

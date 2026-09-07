@@ -49,6 +49,31 @@ test.describe("native mobile settings preview", () => {
     await expect(page.getByRole("heading", { name: "设置" })).toBeVisible();
   });
 
+  test("keeps connection inputs readable without iPhone focus zoom", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "chrome-mobile", "touch input sizing");
+    await page.getByLabel("新建连接", { exact: true }).click();
+    for (const input of await page.locator(".mobile-connection-form input").all()) {
+      await input.focus();
+      expect(await input.evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(16);
+      const bounds = await input.boundingBox();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    }
+  });
+
+  test("keeps connection save reachable with a short keyboard viewport", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 360 });
+    await page.getByLabel("新建连接", { exact: true }).click();
+    const editor = page.locator(".mobile-connection-editor");
+    expect(await editor.evaluate((element) => ({
+      bounded: element.clientHeight <= window.innerHeight,
+      scrollable: element.scrollHeight > element.clientHeight && /auto|scroll/.test(getComputedStyle(element).overflowY),
+    }))).toEqual({ bounded: true, scrollable: true });
+    const save = page.getByRole("button", { name: "保存并连接" });
+    await save.scrollIntoViewIfNeeded();
+    await expect(save).toBeInViewport();
+  });
+
   test("keeps software update reachable inside the settings scroll area", async ({ page }) => {
     await page.getByRole("button", { name: "设置" }).click();
 

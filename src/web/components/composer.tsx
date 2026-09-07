@@ -30,7 +30,7 @@ type ComposerProps = {
   model?: string;
   reasoningEffort?: string;
   permission?: string;
-  onSettingsChange?: (settings: ComposerSettings) => void;
+  onSettingsChange?: (settings: ComposerSettings) => Promise<void> | void;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
   language?: MobileLanguage;
@@ -153,6 +153,17 @@ export function Composer({
     }
   }
 
+  async function updateSettings(settings: ComposerSettings) {
+    setError(undefined);
+    const requestedDraftKey = draftKey;
+    try {
+      await onSettingsChange?.(settings);
+    } catch (cause) {
+      if (activeDraftKey.current !== requestedDraftKey) return;
+      setError(cause instanceof Error ? cause.message : "更新对话设置失败");
+    }
+  }
+
   const selectedModel = models.find((option) => option.id === model);
   const selectedPermission = permissions.find((option) => option.id === permission);
   const reasoningEfforts = selectedModel?.reasoningEfforts ?? (
@@ -241,7 +252,7 @@ export function Composer({
                     key={option.id}
                     onClick={() => {
                       setPermissionOpen(false);
-                      onSettingsChange?.({ model, reasoningEffort, permission: option.id });
+                      void updateSettings({ model, reasoningEffort, permission: option.id });
                     }}
                   >
                     <span className="permission-option-copy">
@@ -265,7 +276,7 @@ export function Composer({
                 const nextEffort = nextModel?.reasoningEfforts.includes(reasoningEffort ?? "")
                   ? reasoningEffort
                   : nextModel?.defaultReasoningEffort;
-                onSettingsChange?.({ model: event.target.value, reasoningEffort: nextEffort, permission });
+                void updateSettings({ model: event.target.value, reasoningEffort: nextEffort, permission });
               }}
             >
               {model && !models.some((option) => option.id === model) ? <option value={model}>{model}</option> : null}
@@ -278,7 +289,7 @@ export function Composer({
               aria-label="思考强度"
               value={reasoningEffort ?? ""}
               disabled={settingsDisabled}
-              onChange={(event) => onSettingsChange?.({ model, reasoningEffort: event.target.value, permission })}
+              onChange={(event) => void updateSettings({ model, reasoningEffort: event.target.value, permission })}
             >
               {reasoningEfforts.map((effort) => <option key={effort} value={effort}>{reasoningLabel(effort)}</option>)}
             </select>

@@ -74,6 +74,22 @@ test.describe("native mobile remote header", () => {
     expect(after).toBeGreaterThan(before.scrollLeft);
   });
 
+  test("preserves the active connection pill beside a long conversation title", async ({ page }) => {
+    await page.locator(".topbar-native").evaluate((header) => {
+      header.classList.add("topbar-native-thread");
+      header.querySelector(".brand-lockup")!.innerHTML = `
+        <button class="mobile-thread-back">‹</button>
+        <h1>Native Android acceptance with a very long conversation title</h1>
+        <span class="mobile-thread-status">空闲</span>`;
+    });
+    const switcher = page.getByRole("navigation", { name: "连接" });
+    const pill = switcher.getByRole("button");
+    const bounds = await switcher.boundingBox();
+    const pillBounds = await pill.boundingBox();
+    expect(pillBounds!.width).toBeLessThanOrEqual(bounds!.width);
+    expect(pillBounds!.x + pillBounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  });
+
   test("keeps a long pending steer message and its final state inside the mobile viewport", async ({ page }) => {
     await page.setContent(`
       <meta name="viewport" content="width=device-width, initial-scale=1" />

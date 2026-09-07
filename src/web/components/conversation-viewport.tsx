@@ -28,6 +28,7 @@ export function ConversationViewport({
   const contentRef = useRef<HTMLDivElement>(null);
   const mountedThreadId = useRef<string | undefined>(undefined);
   const followLatest = useRef(true);
+  const lastScrollTop = useRef(0);
   const prependAnchor = useRef<ScrollAnchor | undefined>(undefined);
   const pinnedQuestionRef = useRef<HTMLButtonElement>(null);
   const [pinnedQuestion, setPinnedQuestion] = useState<string>();
@@ -38,7 +39,7 @@ export function ConversationViewport({
     const content = contentRef.current;
     if (!viewport || !content || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      if (followLatest.current && !prependAnchor.current) viewport.scrollTop = viewport.scrollHeight;
+      if (followLatest.current && !prependAnchor.current) scrollToLatest(viewport);
     });
     // Images and native details resize after React's layout effect. Composer
     // expansion also changes the available viewport without a new message.
@@ -54,7 +55,7 @@ export function ConversationViewport({
       mountedThreadId.current = threadId;
       followLatest.current = true;
       prependAnchor.current = undefined;
-      viewport.scrollTop = viewport.scrollHeight;
+      scrollToLatest(viewport);
       setPinnedQuestion(undefined);
       setQuestionExpanded(false);
       requestEarlierIfNeeded(viewport, true);
@@ -66,6 +67,7 @@ export function ConversationViewport({
       const addedHeight = viewport.scrollHeight - anchor.scrollHeight;
       if (addedHeight !== 0) {
         viewport.scrollTop = anchor.scrollTop + addedHeight;
+        lastScrollTop.current = viewport.scrollTop;
         prependAnchor.current = undefined;
         restoredAnchor = true;
       } else if (!history.loading) {
@@ -73,7 +75,7 @@ export function ConversationViewport({
       }
       if (prependAnchor.current) return;
     }
-    if (followLatest.current && !restoredAnchor) viewport.scrollTop = viewport.scrollHeight;
+    if (followLatest.current && !restoredAnchor) scrollToLatest(viewport);
     syncPinnedQuestion(viewport);
     requestEarlierIfNeeded(viewport, true);
   });
@@ -114,10 +116,19 @@ export function ConversationViewport({
     });
   }
 
+  function scrollToLatest(viewport: HTMLDivElement) {
+    viewport.scrollTop = viewport.scrollHeight;
+    lastScrollTop.current = viewport.scrollTop;
+  }
+
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const viewport = event.currentTarget;
     const distanceFromBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
-    followLatest.current = distanceFromBottom <= BOTTOM_FOLLOW_THRESHOLD;
+    // Image layout/scroll anchoring can dispatch scroll before ResizeObserver.
+    // A growing bottom gap alone does not mean the reader scrolled upward.
+    if (distanceFromBottom <= BOTTOM_FOLLOW_THRESHOLD) followLatest.current = true;
+    else if (viewport.scrollTop < lastScrollTop.current) followLatest.current = false;
+    lastScrollTop.current = viewport.scrollTop;
     syncPinnedQuestion(viewport);
     if (viewport.scrollTop <= TOP_LOAD_THRESHOLD) requestEarlierIfNeeded(viewport);
   }

@@ -6,6 +6,14 @@ Object.defineProperty(aaaPoisonedExport, Symbol.toPrimitive, {
   },
 });
 
+// Desktop exports the RPC client class before its factory. Both mention
+// getRemoteMain, but only the factory can be called without `new`.
+export class bbbRemoteMainClient {
+  getRemoteMain() {
+    return {};
+  }
+}
+
 export function zzzCreateRemoteMain() {
   const getRemoteMain = () => ({
     services: Promise.resolve({

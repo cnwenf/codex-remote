@@ -1,5 +1,5 @@
-import { todoItems, type CodexState, type CodexThread, type CodexTurn, type ThreadStatus, type TurnStatus } from "../../protocol/thread-store";
-import { sameUserInput } from "../../protocol/user-message-identity";
+import { todoItems, turnErrorFromProtocol, type CodexState, type CodexThread, type CodexTurn, type ThreadStatus, type TurnStatus } from "../../protocol/thread-store";
+import { compatibleUserImages, sameUserInput } from "../../protocol/user-message-identity";
 import { itemText, mergeMessageItem, messageKind } from "../../protocol/message-content";
 import { mergeMessageOrder } from "../../protocol/message-order";
 import { permissionStateFromProtocol } from "../../protocol/permissions";
@@ -119,13 +119,14 @@ export function hydrateThread(
     const existingTerminal = existing ? isTerminalTurnStatus(existing.status) : false;
     hydratedTurns[turnId] = {
       id: turnId,
-      status: existingTerminal
+      status: existing?.status === "failed" || snapshotStatus === "failed" ? "failed" : existingTerminal
         ? existing.status
         : snapshotTerminal
         ? snapshotStatus
         : existing?.status === "inProgress"
           ? existing.status
           : snapshotStatus,
+      error: turnErrorFromProtocol(turnRecord.error) ?? existing?.error,
       itemOrder: mergeMessageOrder(
         (existing?.itemOrder ?? []).filter((id) => retainedExistingOrder.includes(id)),
         snapshotItemOrder,
@@ -173,6 +174,11 @@ export function hydrateThread(
   }
   const reconciledStatus = activeTurnId
     ? "running"
+    : deduplicatedTurns[turnOrder.at(-1) ?? ""]?.status === "failed"
+      ? "error"
+    : snapshotStatus === "error" && snapshotTurnOrder.at(-1) !== turnOrder.at(-1) &&
+        isTerminalTurnStatus(deduplicatedTurns[turnOrder.at(-1) ?? ""]?.status)
+      ? "idle"
     : current.status === "idle" && snapshotStatus === "running" &&
         snapshotTurnOrder.length > 0 &&
         !snapshotTurnOrder.some((turnId) => deduplicatedTurns[turnId]?.status === "inProgress")
@@ -234,9 +240,7 @@ export function sameUserMessage(
   if (
     left.clientMessageId &&
     right.clientMessageId &&
-    left.clientMessageId !== right.clientMessageId &&
-    left.lifecycle !== "pending" &&
-    right.lifecycle !== "pending"
+    left.clientMessageId !== right.clientMessageId
   ) return false;
   if (!isUserMessage(left) || !isUserMessage(right) || !sameUserInput(
     left.text,
@@ -246,12 +250,7 @@ export function sameUserMessage(
   )) {
     return false;
   }
-  const leftImages = left.imageIds ?? [];
-  const rightImages = right.imageIds ?? [];
-  return leftImages.length === 0 || rightImages.length === 0 || (
-    leftImages.length === rightImages.length &&
-    leftImages.every((value, index) => value === rightImages[index])
-  );
+  return compatibleUserImages(left.imageIds, right.imageIds);
 }
 
 function dedupeOptimisticUserMessages(
@@ -295,12 +294,18 @@ function dedupeOptimisticUserMessages(
   }
   for (const candidate of optimistic) {
     if (matches.has(keyOf(candidate))) continue;
-    const match = authoritative.find((value) =>
+    const candidates = authoritative.filter((value) =>
       snapshotFallbackItemKeys.has(keyOf(value)) &&
       !usedAuthoritative.has(keyOf(value)) &&
       sameUserMessage(value.item, candidate.item)
     );
-    if (!match) continue;
+    if (candidates.length !== 1) continue;
+    const match = candidates[0];
+    // The snapshot must identify one pending send, not merely share its text.
+    const pendingMatches = optimistic.filter((value) =>
+      !matches.has(keyOf(value)) && sameUserMessage(match.item, value.item)
+    );
+    if (pendingMatches.length !== 1) continue;
     matches.set(keyOf(candidate), match);
     usedAuthoritative.add(keyOf(match));
   }

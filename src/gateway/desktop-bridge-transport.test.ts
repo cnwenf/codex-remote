@@ -74,6 +74,22 @@ function createStartedTransport(overrides: {
 }
 
 describe("DesktopBridgeTransport", () => {
+  it("reads bounded turn summaries and preserves Desktop failure details", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    try {
+      const params = { threadId: "t", limit: 8, sortDirection: "desc", itemsView: "notLoaded" };
+      transport.send({ id: "failure-read", method: "thread/turns/list", params });
+      await vi.waitFor(() => expect(client.sent).toHaveLength(1));
+      const request = asTestRecord(asTestRecord(client.sent[0]).request);
+      expect(request).toMatchObject({ method: "thread/turns/list", params });
+      const result = { data: [{ id: "turn", status: "failed", error: { message: '{"detail":"Bad Request"}' }, items: [] }], nextCursor: null };
+      client.onMessage?.({ type: "mcp-response", hostId: "local", message: { id: request.id, result } });
+      expect(messages).toContainEqual({ id: "failure-read", result });
+    } finally {
+      await transport.stop();
+    }
+  });
+
   it("starts read-only and reconnects when Desktop CDP is initially unavailable", async () => {
     const client = new FakeBridgeClient();
     client.startFailures = 1;

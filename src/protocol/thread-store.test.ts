@@ -1,7 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { initialCodexState, reduceCodexState } from "./thread-store";
+import { initialCodexState, reduceCodexState, type CodexItem, type CodexState } from "./thread-store";
 
 describe("reduceCodexState", () => {
+  it("retains the actual failed turn error instead of reporting an idle successful completion", () => {
+    const state = reduceCodexState(initialCodexState, {
+      method: "turn/completed", params: { threadId: "failed-task", turn: {
+        id: "failed-turn", status: "failed", error: { message: '{"detail":"Bad Request"}', additionalDetails: null },
+        items: [{ id: "question", type: "userMessage", content: [{ type: "text", text: "Reply CHECK-OK. No tools." }] }],
+      } },
+    });
+    expect(state.threads["failed-task"]).toMatchObject({ status: "error", activeTurnId: undefined });
+    expect(state.threads["failed-task"].turns["failed-turn"]).toMatchObject({
+      status: "failed", error: { message: '{"detail":"Bad Request"}', additionalDetails: null },
+      itemOrder: ["question"],
+    });
+    const replay = reduceCodexState(state, {
+      method: "turn/completed", params: { threadId: "failed-task", turn: { id: "failed-turn", status: "completed" } },
+    });
+    expect(replay.threads["failed-task"]).toMatchObject({ status: "error" });
+    expect(replay.threads["failed-task"].turns["failed-turn"]).toMatchObject({ status: "failed", error: { message: '{"detail":"Bad Request"}' } });
+    const idleStatus = reduceCodexState(replay, { method: "thread/status/changed", params: {
+      threadId: "failed-task", status: { type: "idle" },
+    } });
+    expect(idleStatus.threads["failed-task"].status).toBe("error");
+  });
+
+  it("upgrades an inferred completed turn to failed while preserving an assistant response", () => {
+    const completed = reduceCodexState(initialCodexState, {
+      method: "turn/completed", params: { threadId: "t", turn: { id: "turn", status: "completed", items: [
+        { id: "answer", type: "agentMessage", text: "Partial result" },
+      ] } },
+    });
+    const failed = reduceCodexState(completed, {
+      method: "turn/completed", params: { threadId: "t", turn: {
+        id: "turn", status: "failed", error: { message: "Bad Request" },
+      } },
+    });
+    expect(failed.threads.t.turns.turn).toMatchObject({ status: "failed", error: { message: "Bad Request" } });
+    expect(failed.threads.t.turns.turn.items.answer.text).toBe("Partial result");
+  });
+
+  it("does not turn a newer successful task into an error when an older failure arrives late", () => {
+    let state = initialCodexState;
+    for (const id of ["older", "newer"]) {
+      state = reduceCodexState(state, { method: "turn/completed", params: { threadId: "t", turn: { id, status: "completed" } } });
+    }
+    const failed = reduceCodexState(state, { method: "turn/completed", params: { threadId: "t", turn: {
+      id: "older", status: "failed", error: { message: "Old failure" },
+    } } });
+    expect(failed.threads.t.status).toBe("idle");
+    expect(failed.threads.t.turns.older).toMatchObject({ status: "failed", error: { message: "Old failure" } });
+  });
+
   it("keeps a longer retained raw prefix when reconnect replays an older snapshot", () => {
     const state = reduceCodexState(initialCodexState, {
       method: "item/agentMessage/delta",
@@ -361,7 +411,7 @@ describe("reduceCodexState", () => {
     });
   });
 
-  it("collapses duplicate authoritative confirmations before an assistant reply", () => {
+  it("keeps live and persisted user messages without a shared identity", () => {
     const first = reduceCodexState(initialCodexState, {
       method: "item/started",
       params: {
@@ -388,12 +438,122 @@ describe("reduceCodexState", () => {
       },
     });
 
-    expect(duplicated.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
+    expect(duplicated.threads.t1.turns["turn-1"].itemOrder).toEqual(["desktop-live-user"]);
     expect(duplicated.threads.t1.turns["turn-2"].itemOrder).toEqual(["desktop-persisted-user"]);
     expect(duplicated.threads.t1.turns["turn-2"].items["desktop-persisted-user"]).toMatchObject({
       text: "继续完成这个任务",
-      imageIds: ["uploaded-image"],
     });
+    expect(duplicated.threads.t1.turns["turn-2"].items["desktop-persisted-user"].imageIds).toBeUndefined();
+  });
+
+  it.each([
+    ["same turn", "turn-1", "继续", undefined, undefined],
+    ["different turns", "turn-2", "继续", undefined, undefined],
+    ["different images", "turn-1", "看看", ["image-a"], ["image-b"]],
+    ["image-only messages", "turn-2", "", ["image-a"], ["image-b"]],
+  ] as const)("keeps consecutive confirmed messages with %s and replays each item independently", (_label, secondTurn, text, firstImages, secondImages) => {
+    const first = { id: "user-a", type: "userMessage", text, imageIds: firstImages };
+    const second = { id: "user-b", type: "userMessage", text, imageIds: secondImages };
+    let state = reduceCodexState(initialCodexState, {
+      method: "item/started", params: { threadId: "t1", turnId: "turn-1", item: first },
+    });
+    state = reduceCodexState(state, {
+      method: "item/completed", params: { threadId: "t1", turnId: "turn-1", item: {
+        id: "tool", type: "commandExecution", text: "done",
+      } },
+    });
+    state = reduceCodexState(state, {
+      method: "item/started", params: { threadId: "t1", turnId: secondTurn, item: second },
+    });
+    for (const [turnId, item] of [["turn-1", first], [secondTurn, second]] as const) {
+      state = reduceCodexState(state, {
+        method: "item/completed", params: { threadId: "t1", turnId, item },
+      });
+    }
+    expect(state.threads.t1.turns["turn-1"].items["user-a"]).toMatchObject({ text, status: "completed" });
+    expect(state.threads.t1.turns[secondTurn].items["user-b"]).toMatchObject({ text, status: "completed" });
+    expect(state.threads.t1.turns["turn-1"].items["user-a"].imageIds).toEqual(firstImages);
+    expect(state.threads.t1.turns[secondTurn].items["user-b"].imageIds).toEqual(secondImages);
+    expect(state.threads.t1.turnOrder.flatMap((id) => state.threads.t1.turns[id].itemOrder))
+      .toEqual(["user-a", "tool", "user-b"]);
+  });
+
+  it.each(["pending", "confirmed"] as const)("preserves a %s message's position when its shared client identity is confirmed late", (lifecycle) => {
+    let state = pendingMessages([
+      { id: "live-a", type: "userMessage", clientMessageId: "client-a", text: "first", lifecycle },
+      { id: "tool", type: "commandExecution", text: "done" },
+      { id: "live-b", type: "userMessage", clientMessageId: "client-b", text: "second", lifecycle: "confirmed" },
+    ]);
+    state = reduceCodexState(state, {
+      method: "item/completed", params: { threadId: "t1", turnId: "turn-1", item: {
+        id: "persisted-a", type: "userMessage", clientMessageId: "client-a", text: "first",
+      } },
+    });
+    expect(state.threads.t1.turns["turn-1"].itemOrder).toEqual(["persisted-a", "tool", "live-b"]);
+    expect(state.threads.t1.turns["turn-1"].items["live-a"]).toBeUndefined();
+  });
+
+  function pendingMessages(items: CodexItem[]): CodexState {
+    return {
+      ...initialCodexState,
+      threadOrder: ["t1"],
+      threads: { t1: {
+        id: "t1", title: "Task", status: "running", turnOrder: ["turn-1"],
+        turns: { "turn-1": {
+          id: "turn-1", status: "inProgress", itemOrder: items.map((item) => item.id),
+          items: Object.fromEntries(items.map((item) => [item.id, item])),
+        } },
+      } },
+    };
+  }
+
+  it.each(["看看", ""])("matches out-of-order optimistic image confirmations for text %j", (text) => {
+    let state = pendingMessages([
+      { id: "web-steer-a", type: "userMessage", text, imageIds: ["image-a"], lifecycle: "pending" },
+      { id: "web-steer-b", type: "userMessage", text, imageIds: ["image-b"], lifecycle: "pending" },
+    ]);
+    const confirmB = {
+      method: "item/started", params: { threadId: "t1", turnId: "turn-2", item: {
+        id: "confirmed-b", type: "userMessage", text, imageIds: ["image-b"],
+      } },
+    };
+    state = reduceCodexState(state, confirmB);
+    expect(state.threads.t1.turns["turn-1"].itemOrder).toEqual(["web-steer-a"]);
+    expect(state.threads.t1.turns["turn-2"].items["confirmed-b"].imageIds).toEqual(["image-b"]);
+    state = reduceCodexState(state, confirmB);
+    expect(state.threads.t1.turns["turn-1"].itemOrder).toEqual(["web-steer-a"]);
+    state = reduceCodexState(state, {
+      method: "item/started", params: { threadId: "t1", turnId: "turn-2", item: {
+        id: "confirmed-a", type: "userMessage", text, imageIds: ["image-a"],
+      } },
+    });
+    expect(state.threads.t1.turns["turn-1"].itemOrder).toEqual([]);
+    expect(state.threads.t1.turns["turn-2"].items["confirmed-a"].imageIds).toEqual(["image-a"]);
+  });
+
+  it("preserves ambiguous optimistic candidates when confirmation has no client identity", () => {
+    const state = pendingMessages([
+      { id: "web-steer-a", type: "userMessage", text: "继续", clientMessageId: "a", lifecycle: "pending" },
+      { id: "web-steer-b", type: "userMessage", text: "继续", clientMessageId: "b", lifecycle: "pending" },
+    ]);
+    const confirmed = reduceCodexState(state, {
+      method: "item/started", params: { threadId: "t1", turnId: "turn-2", item: {
+        id: "confirmed", type: "userMessage", text: "继续",
+      } },
+    });
+    expect(confirmed.threads.t1.turns["turn-1"].itemOrder).toEqual(["web-steer-a", "web-steer-b"]);
+  });
+
+  it("does not consume an optimistic message with a conflicting client identity", () => {
+    const state = pendingMessages([
+      { id: "web-steer-a", type: "userMessage", text: "继续", clientMessageId: "a", lifecycle: "pending" },
+    ]);
+    const confirmed = reduceCodexState(state, {
+      method: "item/started", params: { threadId: "t1", turnId: "turn-2", item: {
+        id: "confirmed-b", clientMessageId: "b", type: "userMessage", text: "继续",
+      } },
+    });
+    expect(confirmed.threads.t1.turns["turn-1"].itemOrder).toEqual(["web-steer-a"]);
   });
 
   it("keeps equal user messages when an assistant reply separates them", () => {

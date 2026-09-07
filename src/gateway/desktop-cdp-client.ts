@@ -868,8 +868,8 @@ function visibleThreadSettingsHelperExpression(): string {
 
 function ownerHelperExpression(): string {
   return `(() => {
-    if (window.__codexRemoteRequestThreadOwnerVersion !== 5) {
-      window.__codexRemoteRequestThreadOwnerVersion = 5;
+    if (window.__codexRemoteRequestThreadOwnerVersion !== 6) {
+      window.__codexRemoteRequestThreadOwnerVersion = 6;
       let coordinationPromise;
       const getCoordination = async () => {
         if (coordinationPromise) return coordinationPromise;
@@ -884,7 +884,10 @@ function ownerHelperExpression(): string {
           const createRemoteMain = Object.values(loaded).find((value) => {
             if (typeof value !== 'function') return false;
             try {
-              return String(value).includes('getRemoteMain');
+              const source = String(value);
+              // The exported RPC client class also defines getRemoteMain.
+              // Only its factory accepts a MessagePort without construction.
+              return !/^\\s*class\\b/.test(source) && source.includes('getRemoteMain');
             } catch {
               // Desktop can export callable proxies whose primitive/string
               // conversion intentionally throws. They are not RPC factories.

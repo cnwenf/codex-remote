@@ -130,7 +130,7 @@ describe("DesktopCdpClient", () => {
     await client.stop();
   });
 
-  it("skips callable Desktop exports whose string conversion throws", async () => {
+  it("skips Desktop class exports and callables whose string conversion throws when finding the RPC factory", async () => {
     server = new FakeCdpServer();
     const endpoint = await server.start();
     const client = new DesktopCdpClient({ endpoint });

@@ -18,6 +18,13 @@ export function sameUserInput(
   return normalizeAttachedUserInput(leftText) === normalizeAttachedUserInput(rightText);
 }
 
+// Missing attachment metadata is unknown; known, different images cannot confirm each other.
+export function compatibleUserImages(left: readonly string[] | undefined, right: readonly string[] | undefined) {
+  return !left?.length || !right?.length || (
+    left.length === right.length && left.every((imageId, index) => imageId === right[index])
+  );
+}
+
 export function displayUserInput(value: string) {
   const marker = requestMarkerPattern.exec(value);
   const request = marker ? value.slice((marker.index ?? 0) + marker[0].length) : value;

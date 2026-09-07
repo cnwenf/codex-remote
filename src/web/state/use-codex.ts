@@ -160,7 +160,7 @@ export class ConversationReconciler {
     const exactIndex = confirmed.clientMessageId
       ? messages.findIndex((item) => item.id === confirmed.clientMessageId)
       : -1;
-    const fallbackMatches = exactIndex < 0
+    const fallbackMatches = !confirmed.clientMessageId
       ? messages.flatMap((item, index) =>
         item.lifecycle === "promoting" && sameUserInput(item.text, confirmed.text) ? [index] : []
       )
@@ -886,16 +886,24 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         },
       };
     });
-    void socket.request("thread/settings/update", params).catch((cause) => {
-      setError(cause instanceof Error ? cause.message : "更新对话设置失败");
+    return socket.request("thread/settings/update", params).then(() => undefined).catch((cause) => {
       setState((current) => {
         const thread = current.threads[selectedThreadId];
         if (!thread || !previous || !threadMatchesSettings(thread, settings)) return current;
         return {
           ...current,
-          threads: { ...current.threads, [selectedThreadId]: previous },
+          threads: {
+            ...current.threads,
+            [selectedThreadId]: {
+              ...thread,
+              ...(settings.model !== undefined ? { model: previous.model } : {}),
+              ...(settings.reasoningEffort !== undefined ? { reasoningEffort: previous.reasoningEffort } : {}),
+              ...(settings.permission !== undefined ? permissionStateFromProtocol({}, previous) : {}),
+            },
+          },
         };
       });
+      throw cause;
     });
   }, [selectedThreadId, socket]);
 

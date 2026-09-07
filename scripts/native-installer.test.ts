@@ -13,6 +13,19 @@ const gatewayLauncher = readFileSync(join(root, "scripts/launch-bundled-gateway.
 const macosUpdater = readFileSync(join(root, "scripts/perform-macos-update.sh"), "utf8");
 
 describe("native installer contract", () => {
+  it("lets the CSS viewport own iOS safe-area insets without native focus offsets", async () => {
+    const { default: config } = await import("../capacitor.config");
+    expect(config.ios?.contentInset).toBe("never");
+    expect(config.ios?.scrollEnabled).toBe(false);
+    expect(config.plugins?.Keyboard?.resize).toBe("native");
+    expect(config.android?.includePlugins).toEqual([
+      "@capacitor/app", "@capacitor/local-notifications", "@capacitor/preferences",
+    ]);
+    expect(JSON.parse(readFileSync(join(root, "package.json"), "utf8")).dependencies).toHaveProperty("@capacitor/keyboard");
+    expect(readFileSync(join(root, "index.html"), "utf8")).toContain("viewport-fit=cover");
+    expect(readFileSync(join(root, "src/web/styles.css"), "utf8")).toContain("env(safe-area-inset-top)");
+  });
+
   it("keeps Android and iOS package versions aligned with the release version", () => {
     const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version as string;
     const androidBuild = readFileSync(join(root, "android/app/build.gradle"), "utf8");
@@ -20,6 +33,48 @@ describe("native installer contract", () => {
 
     expect(androidBuild).toContain(`versionName "${packageVersion}"`);
     expect(iosProject).toContain(`MARKETING_VERSION = ${packageVersion};`);
+  });
+
+  it("builds the iOS simulator app with local signing enabled for Keychain access", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "codex-remote-ios-simulator-build."));
+    const fakeBin = join(fixture, "bin");
+    const derivedData = join(fixture, "derived-data");
+    const capturedArgs = join(fixture, "xcodebuild-args");
+    const fakeXcodebuild = join(fakeBin, "xcodebuild");
+    const fakeDitto = join(fakeBin, "ditto");
+    const fixtureScript = join(fixture, "scripts/build-ios-simulator.sh");
+
+    try {
+      execFileSync("/bin/mkdir", ["-p", fakeBin, join(fixture, "scripts")]);
+      writeFileSync(fixtureScript, readFileSync(join(root, "scripts/build-ios-simulator.sh"), "utf8"));
+      writeFileSync(fakeXcodebuild, `#!/bin/sh
+printf '%s\\n' "$@" > "$CODEX_REMOTE_TEST_XCODEBUILD_ARGS"
+mkdir -p "$CODEX_REMOTE_DERIVED_DATA/Build/Products/Release-iphonesimulator/App.app"
+touch "$CODEX_REMOTE_DERIVED_DATA/Build/Products/Release-iphonesimulator/App.app/App"
+`);
+      writeFileSync(fakeDitto, `#!/bin/sh
+for target do :; done
+touch "$target"
+`);
+      chmodSync(fixtureScript, 0o755);
+      chmodSync(fakeXcodebuild, 0o755);
+      chmodSync(fakeDitto, 0o755);
+
+      execFileSync("/bin/zsh", [fixtureScript], {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          CODEX_REMOTE_DERIVED_DATA: derivedData,
+          CODEX_REMOTE_TEST_XCODEBUILD_ARGS: capturedArgs,
+        },
+      });
+
+      const args = readFileSync(capturedArgs, "utf8").split("\n");
+      expect(args).toContain("iphonesimulator");
+      expect(args).not.toContain("CODE_SIGNING_ALLOWED=NO");
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   it("uses an interactive tty and stable checksum-verified release assets", () => {

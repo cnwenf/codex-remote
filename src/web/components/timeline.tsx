@@ -120,6 +120,14 @@ function TurnView({
         );
       })}
 
+      {turn.status === "failed" ? (
+        <article className="message message-agent" role="alert">
+          <span className="message-author">本轮执行失败</span>
+          <p className="inline-error">{turn.error?.message || "未收到错误详情。"}</p>
+          {turn.error?.additionalDetails ? <p className="inline-error">{turn.error.additionalDetails}</p> : null}
+        </article>
+      ) : null}
+
       {showTyping ? (
         <TypingIndicator />
       ) : null}

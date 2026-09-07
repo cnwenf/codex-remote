@@ -13,6 +13,10 @@ const MAX_HISTORY_TURNS = 8;
 const DEFAULT_HISTORY_BYTES = 2 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
 const MAX_HISTORY_SCAN_BYTES = 8 * 1024 * 1024;
+// Four supported 10 MiB attachments occupy about 54 MiB as base64.
+const MAX_HISTORY_RECORD_BYTES = 64 * 1024 * 1024;
+// Includes boundary searches, prefixes, and streaming image projection reads.
+const MAX_HISTORY_PAGE_READ_BYTES = 4 * MAX_HISTORY_RECORD_BYTES;
 const MAX_ITEM_TEXT = 4_000;
 const MAX_TITLE_TEXT = 80;
 const STATUS_TAIL_BYTES = 512 * 1024;
@@ -550,11 +554,11 @@ function turnBoundaries(buffer: Buffer, baseOffset: number) {
       continue;
     }
     const payload = asRecord(entry.payload);
-    const id = entry.type === "turn_context"
+    // Context records can repeat inside a turn after compaction/resume.
+    // Only the task-start event is a trustworthy prefix boundary.
+    const id = entry.type === "event_msg" && stringValue(payload.type) === "task_started"
       ? stringValue(payload.turn_id)
-      : entry.type === "event_msg" && stringValue(payload.type) === "task_started"
-        ? stringValue(payload.turn_id)
-        : undefined;
+      : undefined;
     if (id && !seen.has(id)) {
       seen.add(id);
       boundaries.push({ id, offset: baseOffset + lineStart });
@@ -572,33 +576,140 @@ function readConversationPage(
   imageStore: ImageUploadStore,
 ) {
   let cursor = before;
+  let pendingRaw = "";
+  let recoveryCount = 0;
+  let remainingReadBytes = MAX_HISTORY_PAGE_READ_BYTES;
+  const tooLarge = () => new Error("History page is too large to resolve its turn context safely; cursor was not advanced. Open this history in Codex Desktop.");
+  const readRange = (start: number, length: number) => {
+    if (length > remainingReadBytes) throw tooLarge();
+    remainingReadBytes -= length;
+    return readBufferRange(path, start, length);
+  };
   const scanFloor = Math.max(0, before - MAX_HISTORY_SCAN_BYTES);
-  while (cursor > scanFloor) {
-    const rangeStart = Math.max(scanFloor, cursor - maxBytes);
-    const buffer = readBufferRange(path, rangeStart, cursor - rangeStart);
+  while (cursor > 0 && (pendingRaw || cursor > scanFloor)) {
+    // The record limit applies to each record, not the entire pending page:
+    // multiple supported image records can share an older turn context.
+    const recordFloor = Math.max(0, cursor - MAX_HISTORY_RECORD_BYTES);
+    const rangeStart = Math.max(pendingRaw ? recordFloor : scanFloor, cursor - maxBytes);
+    const buffer = readRange(rangeStart, cursor - rangeStart);
     let alignedStart = rangeStart;
     let relativeStart = 0;
     if (rangeStart > 0) {
       const newline = buffer.indexOf(10);
       if (newline < 0) {
-        cursor = rangeStart;
-        continue;
+        relativeStart = buffer.length;
+        alignedStart = cursor;
+      } else {
+        relativeStart = newline + 1;
+        alignedStart += relativeStart;
       }
-      relativeStart = newline + 1;
-      alignedStart += relativeStart;
     }
     const aligned = buffer.subarray(relativeStart);
     const boundaries = turnBoundaries(aligned, alignedStart);
     const selectedBoundary = boundaries.length >= limitTurns
       ? boundaries[boundaries.length - limitTurns]
       : boundaries[0];
-    const pageStart = selectedBoundary?.offset ?? alignedStart;
+    const pageStart = rangeStart === 0 && boundaries.length <= limitTurns
+      ? 0
+      : selectedBoundary?.offset ?? alignedStart;
     const pageRelativeStart = Math.max(0, pageStart - rangeStart);
-    const turns = parseRollout(buffer.subarray(pageRelativeStart).toString("utf8"), imageStore);
-    if (turns.length > 0 || pageStart === 0) return { start: pageStart, turns };
+    const parsed = parseRollout(buffer.subarray(pageRelativeStart).toString("utf8") + pendingRaw, imageStore);
+    if ((parsed.turns.length > 0 && !parsed.hasUnassignedItems) || pageStart === 0) {
+      return { start: pageStart, turns: parsed.turns };
+    }
+    // The next older page can end immediately after a single image record.
+    // Keep its original byte offsets, but never materialize its base64 body.
+    if (rangeStart > 0) {
+      // ponytail: bound context recovery to eight records and 256 MiB total
+      // I/O; a resumable context cursor is needed to support larger fragments.
+      if (++recoveryCount > MAX_HISTORY_TURNS) throw tooLarge();
+      const recordEnd = relativeStart > 0 ? alignedStart : cursor;
+      let position = rangeStart;
+      let recordStart: number | undefined;
+      while (position > recordFloor) {
+        const start = Math.max(recordFloor, position - maxBytes);
+        const preceding = readRange(start, position - start);
+        const newline = preceding.lastIndexOf(10);
+        if (newline >= 0) { recordStart = start + newline + 1; break; }
+        position = start;
+      }
+      if (recordStart === undefined && position === 0) recordStart = 0;
+      if (recordStart !== undefined) {
+        const prefixStart = Math.max(0, recordStart - maxBytes);
+        const prefix = readRange(prefixStart, recordStart - prefixStart);
+        const prefixNewline = prefix.indexOf(10);
+        const prefixOffset = prefixStart > 0 ? (prefixNewline < 0 ? prefix.length : prefixNewline + 1) : 0;
+        const prefixBoundaries = turnBoundaries(prefix.subarray(prefixOffset), prefixStart + prefixOffset);
+        const boundary = prefixBoundaries.length >= limitTurns
+          ? prefixBoundaries[prefixBoundaries.length - limitTurns]
+          : prefixBoundaries[0];
+        const start = prefixStart === 0 && prefixBoundaries.length <= limitTurns
+          ? 0 : boundary?.offset ?? prefixStart + prefixOffset;
+        const projected = projectHistoryRecord(readRange, recordStart, recordEnd);
+        const raw = prefix.subarray(start - prefixStart).toString("utf8") +
+          (projected ?? "invalid-oversized-record\n") + aligned.toString("utf8") + pendingRaw;
+        const recovered = parseRollout(raw, imageStore);
+        if ((recovered.turns.length > 0 && !recovered.hasUnassignedItems) || start === 0) {
+          return { start, turns: recovered.turns };
+        }
+        // Anonymous messages may precede an image with its own turn id. Keep
+        // the bounded projection until older context identifies the prefix.
+        if (Buffer.byteLength(raw) > MAX_HISTORY_BYTES) throw tooLarge();
+        pendingRaw = raw;
+        cursor = start;
+        continue;
+      }
+      if (pendingRaw || parsed.hasUnassignedItems) throw tooLarge();
+      return { start: recordFloor, turns: [] as ParsedTurn[] };
+    }
     cursor = pageStart < cursor ? pageStart : rangeStart;
   }
-  return { start: scanFloor, turns: [] as ParsedTurn[] };
+  if (pendingRaw) throw tooLarge();
+  return { start: Math.min(cursor, scanFloor), turns: [] as ParsedTurn[] };
+}
+
+function projectHistoryRecord(readRange: (start: number, length: number) => Buffer, start: number, end: number): string | undefined {
+  const output = Buffer.allocUnsafe(MAX_HISTORY_BYTES);
+  let length = 0;
+  let inString = false;
+  let escaped = false;
+  let stringStart = 0;
+  let imageUrl = false;
+  let omit = false;
+  let lastString = "";
+  let lastToken = 0;
+  for (let position = start; position < end; position += 64 * 1024) {
+    const chunk = readRange(position, Math.min(64 * 1024, end - position));
+    for (const byte of chunk) {
+      if (!omit) {
+        if (length >= output.length) return undefined;
+        output[length++] = byte;
+      }
+      if (inString) {
+        if (escaped) { escaped = false; continue; }
+        if (byte === 92) { escaped = true; continue; }
+        if (byte === 34) {
+          if (omit) output[length++] = byte;
+          lastString = length - stringStart < 128
+            ? output.subarray(stringStart, length - 1).toString("utf8") : "";
+          lastToken = 34;
+          inString = false;
+          omit = false;
+        } else if (imageUrl && !omit && length - stringStart === 11 &&
+          output.subarray(stringStart, length).toString("ascii") === "data:image/") {
+          length = stringStart;
+          omit = true;
+        }
+      } else if (byte === 34) {
+        inString = true;
+        stringStart = length;
+        imageUrl = lastToken === 58 && lastString === "image_url";
+      } else if (byte > 32) {
+        lastToken = byte;
+      }
+    }
+  }
+  return output.subarray(0, length).toString("utf8");
 }
 
 function threadSnapshot(
@@ -777,12 +888,13 @@ function isInjectedContextTitle(value: string) {
     normalized.startsWith("<environment_context>");
 }
 
-function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
+function parseRollout(raw: string, imageStore: ImageUploadStore) {
   const turns = new Map<string, ParsedTurn>();
   const order: string[] = [];
   let currentTurnId: string | undefined;
   let pendingUserImageIds: string[] = [];
   let unassignedItems: ParsedItem[] = [];
+  let unassignedContextTurnId: string | undefined;
   const ensureTurn = (id: string) => {
     let turn = turns.get(id);
     if (!turn) {
@@ -803,6 +915,16 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
       status: item.status ?? previous.status,
     };
   };
+  const recoverUnassignedItems = (turn: ParsedTurn, explicitTurnId: string | undefined) => {
+    if (unassignedItems.length === 0 ||
+      (unassignedContextTurnId && unassignedContextTurnId !== explicitTurnId)) return;
+    // A bounded prefix predates the items parsed after its context record.
+    const items = [...unassignedItems, ...turn.items];
+    turn.items = [];
+    for (const item of items) upsertItem(turn, item);
+    unassignedItems = [];
+    unassignedContextTurnId = undefined;
+  };
 
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
@@ -810,13 +932,22 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     try {
       entry = asRecord(JSON.parse(line));
     } catch {
+      if (currentTurnId) {
+        const turn = turns.get(currentTurnId);
+        if (turn) turn.completeFromTurnStart = false;
+      }
       continue;
     }
     const payload = asRecord(entry.payload);
     if (entry.type === "turn_context") {
-      unassignedItems = [];
-      currentTurnId = stringValue(payload.turn_id) ?? currentTurnId;
-      if (currentTurnId) ensureTurn(currentTurnId).completeFromTurnStart = true;
+      const contextTurnId = stringValue(payload.turn_id);
+      if (unassignedItems.length > 0 && contextTurnId) {
+        if (unassignedContextTurnId && unassignedContextTurnId !== contextTurnId) unassignedItems = [];
+        // Context is only a candidate; a matching completion must confirm it.
+        unassignedContextTurnId = unassignedItems.length > 0 ? contextTurnId : undefined;
+      }
+      currentTurnId = contextTurnId ?? currentTurnId;
+      if (currentTurnId) ensureTurn(currentTurnId);
       continue;
     }
     if (entry.type === "event_msg") {
@@ -826,8 +957,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
         // The bounded tail may not contain turn_context/task_started. Desktop
         // completion records carry their own turn and item identities.
         currentTurnId = turnId;
-        for (const item of unassignedItems) upsertItem(ensureTurn(turnId), item);
-        unassignedItems = [];
+        recoverUnassignedItems(ensureTurn(turnId), stringValue(payload.turn_id));
         const value = asRecord(payload.item);
         const id = stringValue(value.id);
         if (id && messageKind(stringValue(value.type) ?? "") === "agent") {
@@ -860,6 +990,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
       }
       if (eventType === "task_started" && turnId) {
         unassignedItems = [];
+        unassignedContextTurnId = undefined;
         currentTurnId = turnId;
         const turn = ensureTurn(turnId);
         turn.status = "inProgress";
@@ -867,8 +998,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
         turn.startedAt = timestampValue(payload.started_at);
       } else if ((eventType === "task_complete" || eventType === "turn_aborted") && turnId) {
         const turn = ensureTurn(turnId);
-        for (const item of unassignedItems) upsertItem(turn, item);
-        unassignedItems = [];
+        recoverUnassignedItems(turn, stringValue(payload.turn_id));
         turn.status = eventType === "task_complete" ? "completed" : "interrupted";
         turn.completedAt = timestampValue(payload.completed_at);
         turn.durationMs = numberValue(payload.duration_ms);
@@ -900,7 +1030,10 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     const turn = ensureTurn(itemTurnId);
     upsertItem(turn, item);
   }
-  return order.map((id) => turns.get(id) as ParsedTurn).filter((turn) => turn.items.length > 0);
+  return {
+    turns: order.map((id) => turns.get(id) as ParsedTurn).filter((turn) => turn.items.length > 0),
+    hasUnassignedItems: unassignedItems.length > 0,
+  };
 }
 
 function rolloutPlan(value: unknown) {

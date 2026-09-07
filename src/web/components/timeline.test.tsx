@@ -1,10 +1,41 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { CodexThread } from "../../protocol/thread-store";
+import { initialCodexState, reduceCodexState, type CodexThread } from "../../protocol/thread-store";
+import { hydrateThread } from "../state/conversation-history";
 import { Timeline, TodoListDock } from "./timeline";
 
 describe("Timeline", () => {
+  it("shows the real failed turn error after refresh alongside any assistant output", () => {
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", status: { type: "systemError" }, turns: [
+      { id: "turn", status: "failed", error: { message: '{"detail":"Bad Request"}', additionalDetails: null }, items: [
+        { id: "question", type: "userMessage", text: "Reply CHECK-OK. No tools." },
+        { id: "answer", type: "agentMessage", text: "Partial result" },
+      ] },
+    ] } });
+    render(<Timeline thread={state.threads.t} />);
+    expect(screen.getByRole("alert")).toHaveTextContent('{"detail":"Bad Request"}');
+    expect(screen.getByText("Partial result")).toBeVisible();
+    expect(screen.queryByLabelText("Codex 仍在输出")).not.toBeInTheDocument();
+  });
+
+  it("shows a failed turn without inventing an error when details are unavailable", () => {
+    const state = reduceCodexState(initialCodexState, { method: "turn/completed", params: {
+      threadId: "t", turn: { id: "turn", status: "failed", items: [] },
+    } });
+    render(<Timeline thread={state.threads.t} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("未收到错误详情");
+  });
+
+  it.each(["completed", "interrupted"])("does not report a valid %s turn with no final answer as failed", (status) => {
+    const state = reduceCodexState(initialCodexState, { method: "turn/completed", params: {
+      threadId: "t", turn: { id: "turn", status, items: [{ id: "user", type: "userMessage", text: "No response needed" }] },
+    } });
+    render(<Timeline thread={state.threads.t} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("No response needed")).toBeVisible();
+  });
+
   it("renders the latest Desktop todo list with pending running and completed states", async () => {
     const thread: CodexThread = {
       id: "todo",

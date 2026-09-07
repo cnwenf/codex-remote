@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   findMobileUpdate: vi.fn(),
@@ -9,6 +9,12 @@ const mocks = vi.hoisted(() => ({
   capacitorHttpRequest: vi.fn(),
   imageUploadFailed: vi.fn(),
   imageBody: "image",
+  notificationPermission: "granted",
+  notificationPermissionRequested: new Map<string, string>(),
+  checkNotificationPermissions: vi.fn(),
+  requestNotificationPermissions: vi.fn(),
+  preferencesGet: vi.fn(),
+  preferencesSet: vi.fn(),
   capacitorListeners: new Map<string, (...args: unknown[]) => void>(),
   nativePlugin: {
     addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
@@ -66,6 +72,15 @@ vi.mock("@capacitor/app", () => ({
 vi.mock("@capacitor/local-notifications", () => ({
   LocalNotifications: {
     addListener: vi.fn(async () => ({ remove: vi.fn(async () => undefined) })),
+    checkPermissions: mocks.checkNotificationPermissions,
+    requestPermissions: mocks.requestNotificationPermissions,
+  },
+}));
+
+vi.mock("@capacitor/preferences", () => ({
+  Preferences: {
+    get: mocks.preferencesGet,
+    set: mocks.preferencesSet,
   },
 }));
 
@@ -77,15 +92,84 @@ vi.mock("./app-update", async (importOriginal) => ({
 import { MobileShell } from "./mobile-shell";
 
 describe("MobileShell updates", () => {
+  beforeEach(() => {
+    mocks.nativePlugin.getLaunchTarget.mockResolvedValue({});
+    mocks.checkNotificationPermissions.mockImplementation(async () => ({ display: mocks.notificationPermission }));
+    mocks.requestNotificationPermissions.mockResolvedValue({ display: "denied" });
+    mocks.preferencesGet.mockImplementation(async ({ key }: { key: string }) => ({
+      value: mocks.notificationPermissionRequested.get(key) ?? null,
+    }));
+    mocks.preferencesSet.mockImplementation(async ({ key, value }: { key: string; value: string }) => {
+      mocks.notificationPermissionRequested.set(key, value);
+    });
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.clearAllMocks();
     mocks.isNativePlatform.mockReturnValue(false);
     mocks.imageBody = "image";
+    mocks.notificationPermission = "granted";
+    mocks.notificationPermissionRequested.clear();
     mocks.capacitorListeners.clear();
     window.history.replaceState(null, "");
   });
+  it.each(["denied", "prompt-with-rationale"])(
+    "does not repeat the notification prompt after Android reports %s",
+    async (permission) => {
+      mocks.notificationPermission = permission;
+      const { connection, store, settingsStore } = notificationConnectionFixture();
+
+      render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+      await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+
+      expect(await screen.findByTestId("active-connection")).toHaveTextContent(connection.id);
+      expect(mocks.requestNotificationPermissions).not.toHaveBeenCalled();
+    },
+  );
+
+  it("records the first notification prompt and does not ask again after a cold reopen", async () => {
+    mocks.notificationPermission = "prompt";
+    const { connection, store, settingsStore } = notificationConnectionFixture();
+
+    const firstLaunch = render(
+      <MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+    expect(await screen.findByTestId("active-connection")).toHaveTextContent(connection.id);
+    firstLaunch.unmount();
+
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    await userEvent.click(await screen.findByRole("button", { name: /Office Mac/ }));
+    expect(await screen.findByTestId("active-connection")).toHaveTextContent(connection.id);
+
+    expect(mocks.preferencesSet).toHaveBeenCalledWith(expect.objectContaining({ value: "true" }));
+    expect(mocks.requestNotificationPermissions).toHaveBeenCalledOnce();
+  });
+
+  it("coalesces overlapping notification permission initialization", async () => {
+    mocks.notificationPermission = "prompt";
+    mocks.nativePlugin.getLaunchTarget.mockResolvedValue({ connectionId: "mac-1", threadId: "thread-1" });
+    const permissionRequest = deferred<{ display: string }>();
+    mocks.requestNotificationPermissions.mockReturnValue(permissionRequest.promise);
+    const { store, settingsStore } = notificationConnectionFixture();
+
+    const firstLaunch = render(
+      <MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />,
+    );
+    const secondLaunch = render(
+      <MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />,
+    );
+    await waitFor(() => expect(mocks.requestNotificationPermissions).toHaveBeenCalled());
+    permissionRequest.resolve({ display: "denied" });
+    await waitFor(() => expect(mocks.nativePlugin.startMonitoring).toHaveBeenCalledTimes(2));
+
+    expect(mocks.requestNotificationPermissions).toHaveBeenCalledOnce();
+    firstLaunch.unmount();
+    secondLaunch.unmount();
+  });
+
   it("checks for a new native app version automatically on launch", async () => {
     mocks.findMobileUpdate.mockResolvedValue({
       state: "available",
@@ -297,6 +381,7 @@ describe("MobileShell updates", () => {
     mocks.isNativePlatform.mockReturnValue(true);
     mocks.capacitorHttpGet.mockResolvedValue({ status: 200, data: {}, headers: {}, url: "" });
     mocks.nativePlugin.appendImageUpload.mockImplementation(() => new Promise(() => undefined));
+    mocks.nativePlugin.cancelImageUpload.mockImplementationOnce(() => new Promise(() => undefined));
     const connection = { id: "mac-1", name: "Office Mac", baseUrl: "https://remote.example.test", lastUsedAt: 1, pairingStatus: "ready" as const };
     const store = {
       list: vi.fn(async () => [connection]),
@@ -316,7 +401,7 @@ describe("MobileShell updates", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     expect(mocks.imageUploadFailed).toHaveBeenCalledWith(expect.objectContaining({
-      message: "图片上传超时，请检查连接后重试",
+      message: expect.stringContaining("图片上传超时"),
     }));
     expect(mocks.nativePlugin.cancelImageUpload).toHaveBeenCalledWith({ uploadId: "native-upload-1" });
   });
@@ -511,4 +596,25 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+function notificationConnectionFixture() {
+  const connection = {
+    id: "mac-1",
+    name: "Office Mac",
+    baseUrl: "http://127.0.0.1:4318",
+    lastUsedAt: 1,
+    pairingStatus: "ready" as const,
+  };
+  return {
+    connection,
+    store: {
+      list: vi.fn(async () => [connection]),
+      credentials: vi.fn(async () => ({ connection, token: "test-token" })),
+      select: vi.fn(async () => undefined),
+    },
+    settingsStore: {
+      read: vi.fn(async () => ({ theme: "system", language: "zh-CN", messageSendMode: "queue" })),
+    },
+  };
 }

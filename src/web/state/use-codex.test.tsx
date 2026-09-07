@@ -234,6 +234,28 @@ describe("ConversationReconciler", () => {
     expect(reconciled.t1).toEqual([expect.objectContaining({ id: "client-1" })]);
   });
 
+  it("does not let a replayed queue confirmation remove another identical promoted message", () => {
+    const reconciler = new ConversationReconciler();
+    const current = {
+      t1: [
+        { id: "client-1", text: "continue", lifecycle: "promoting" as const },
+        { id: "client-2", text: "continue", lifecycle: "promoting" as const },
+      ],
+    };
+    const reconciled = reconciler.confirmQueuedFromSnapshot(current, {
+      thread: {
+        id: "t1",
+        turns: [{
+          id: "turn-1",
+          items: ["live-2", "persisted-2"].map((id) => ({
+            id, type: "userMessage", clientMessageId: "client-2", text: "continue",
+          })),
+        }],
+      },
+    });
+    expect(reconciled.t1).toEqual([expect.objectContaining({ id: "client-1" })]);
+  });
+
   it("confirms a promoted message when Desktop wraps the user text in an attachment envelope", () => {
     const reconciler = new ConversationReconciler();
     const current = {
@@ -405,7 +427,7 @@ describe("ConversationReconciler", () => {
         turns: [{
           id: "turn-1",
           status: "inProgress",
-          items: [{ id: "desktop-user", type: "user_message", text: "继续", clientMessageId: "desktop-id" }],
+          items: [{ id: "desktop-user", type: "user_message", text: "继续", clientMessageId: "web-steer-1" }],
         }],
       },
     });
@@ -1486,11 +1508,12 @@ describe("useCodex", () => {
     });
     await act(() => selection);
 
-    act(() => result.current.updateSelectedThreadSettings({
+    let saving: Promise<void> | undefined;
+    act(() => { saving = result.current.updateSelectedThreadSettings({
       model: "gpt-next",
       reasoningEffort: "high",
       permission: "full-access",
-    }));
+    }); });
     const settingsRequest = JSON.parse(fake.sent.at(-1) as string).payload;
     expect(settingsRequest).toMatchObject({
       method: "thread/settings/update",
@@ -1504,6 +1527,7 @@ describe("useCodex", () => {
       },
     });
     fake.serverSend({ type: "rpc", payload: { id: settingsRequest.id, result: {} } });
+    await act(() => saving);
     act(() => { void result.current.sendInstruction("Use these settings"); });
 
     const turnRequest = JSON.parse(fake.sent.at(-1) as string).payload;
@@ -1518,6 +1542,42 @@ describe("useCodex", () => {
         approvalsReviewer: "user",
       },
     });
+  });
+
+  it("reports a settings rejection without discarding messages received while saving", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const resume = JSON.parse(fake.sent.at(-1) as string).payload;
+    fake.serverSend({ type: "rpc", payload: { id: resume.id, result: {
+      thread: { id: "t1", status: { type: "idle" }, turns: [] },
+      approvalPolicy: "on-request",
+      activePermissionProfile: { id: ":workspace" },
+    } } });
+    await act(() => selection);
+
+    let save: unknown;
+    act(() => { save = result.current.updateSelectedThreadSettings({ permission: "full-access" }); });
+    const update = JSON.parse(fake.sent.at(-1) as string).payload;
+    act(() => fake.serverSend({ type: "rpc", payload: {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "Keep this live text" },
+    } }));
+    await act(async () => {
+      const rejected = expect(save).rejects.toThrow("Settings unavailable");
+      fake.serverSend({ type: "rpc", payload: {
+        id: update.id,
+        error: { code: -32003, message: "Settings unavailable" },
+      } });
+      await rejected;
+    });
+
+    expect(result.current.selectedThread?.permission).toBe("auto");
+    expect(result.current.selectedThread?.turns["turn-1"].items["agent-1"].text)
+      .toBe("Keep this live text");
   });
 
   it("reduces streamed notifications into state", async () => {
@@ -2539,7 +2599,7 @@ describe("optimistic steer reconciliation", () => {
     });
   });
 
-  it("replaces a local optimistic message when Desktop confirms it with a different client id", () => {
+  it("keeps a local optimistic message when Desktop reports another client id", () => {
     const reconciler = new ConversationReconciler();
     const staged = reconciler.stageUserMessage({
       stale: false,
@@ -2572,8 +2632,11 @@ describe("optimistic steer reconciliation", () => {
     const userItems = Object.values(confirmed.threads.t1.turns["turn-1"].items)
       .filter((item) => item.type.toLocaleLowerCase().includes("user"));
 
-    expect(userItems).toHaveLength(1);
-    expect(userItems[0].id).toBe("desktop-user-message");
+    expect(userItems).toHaveLength(2);
+    expect(userItems.find((item) => item.id === "web-steer-local")).toMatchObject({
+      lifecycle: "pending", clientMessageId: "web-steer-local",
+    });
+    expect(userItems.find((item) => item.id === "desktop-user-message")?.clientMessageId).toBe("desktop-generated-id");
   });
 
   it("removes a new optimistic message when Desktop reuses its authoritative item id", () => {

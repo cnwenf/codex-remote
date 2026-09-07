@@ -15,7 +15,6 @@ xcodebuild \
   -configuration Release \
   -sdk iphonesimulator \
   -derivedDataPath "$derived_data" \
-  CODE_SIGNING_ALLOWED=NO \
   build 2>&1 | tee "$build_log"
 build_status=$pipestatus[1]
 set -e

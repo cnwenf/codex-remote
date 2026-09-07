@@ -26,6 +26,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -34,6 +35,9 @@ import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @CapacitorPlugin(name = "CodexRemoteNative")
@@ -44,6 +48,7 @@ public class CodexRemoteNativePlugin extends Plugin {
     private EncryptedSecretStore secrets;
     private final ExecutorService updateExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService imageUploadExecutor = Executors.newCachedThreadPool();
+    private final ScheduledExecutorService imageUploadTimeouts = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean updateInProgress = new AtomicBoolean(false);
     private File pendingUpdateFile;
     private NativeImageUploadStaging imageUploadStaging;
@@ -60,7 +65,8 @@ public class CodexRemoteNativePlugin extends Plugin {
     @Override
     protected void handleOnDestroy() {
         if (imageUploadStaging != null) imageUploadStaging.cancelAll();
-        imageUploadExecutor.shutdownNow();
+        imageUploadTimeouts.shutdownNow();
+        imageUploadExecutor.shutdown();
         super.handleOnDestroy();
     }
 
@@ -233,15 +239,19 @@ public class CodexRemoteNativePlugin extends Plugin {
         try {
             imageUploadExecutor.execute(() -> {
                 try {
-                    call.resolve(uploadImage(staged, url, token, fileName, mimeType));
+                    call.resolve(uploadImage(uploadId, staged, url, token, fileName, mimeType));
+                } catch (InterruptedIOException error) {
+                    call.reject("图片上传超时（网络传输），请检查连接后重试");
                 } catch (Exception error) {
-                    call.reject("图片上传失败，请检查连接后重试");
+                    call.reject(imageUploadStaging.isActive(uploadId)
+                        ? "图片上传失败，请检查连接后重试"
+                        : "图片上传超时（网络传输），请检查连接后重试");
                 } finally {
-                    staged.delete();
+                    imageUploadStaging.complete(uploadId);
                 }
             });
         } catch (Exception error) {
-            staged.delete();
+            imageUploadStaging.complete(uploadId);
             call.reject("图片上传失败，请重试");
         }
     }
@@ -404,9 +414,15 @@ public class CodexRemoteNativePlugin extends Plugin {
         }
     }
 
-    private JSObject uploadImage(File source, String value, String token, String fileName, String mimeType) throws Exception {
+    private JSObject uploadImage(String uploadId, File source, String value, String token, String fileName, String mimeType) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(value).openConnection();
+        ScheduledFuture<?> deadline = null;
         try {
+            imageUploadStaging.onCancel(uploadId, () -> NativeImageUploadSupport.disconnectAsync(connection, imageUploadExecutor));
+            // connect/read timeouts do not bound a stalled socket write. This also
+            // runs when the WebView is suspended and its JavaScript timer is paused.
+            deadline = imageUploadTimeouts.schedule(() -> imageUploadStaging.cancel(uploadId), 60, TimeUnit.SECONDS);
+            requireActiveImageUpload(uploadId);
             connection.setConnectTimeout(15_000);
             connection.setReadTimeout(30_000);
             connection.setInstanceFollowRedirects(false);
@@ -422,12 +438,16 @@ public class CodexRemoteNativePlugin extends Plugin {
                  OutputStream output = connection.getOutputStream()) {
                 byte[] buffer = new byte[32 * 1024];
                 int read;
-                while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+                while ((read = input.read(buffer)) != -1) {
+                    requireActiveImageUpload(uploadId);
+                    output.write(buffer, 0, read);
+                }
                 output.flush();
             }
             int status = connection.getResponseCode();
             InputStream responseStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
             String body = readBoundedText(responseStream, MAX_IMAGE_RESPONSE_BYTES);
+            requireActiveImageUpload(uploadId);
             Object data = body;
             try {
                 if (!body.isEmpty()) data = new JSObject(body);
@@ -439,8 +459,13 @@ public class CodexRemoteNativePlugin extends Plugin {
             result.put("data", data);
             return result;
         } finally {
+            if (deadline != null) deadline.cancel(false);
             connection.disconnect();
         }
+    }
+
+    private void requireActiveImageUpload(String uploadId) throws InterruptedIOException {
+        if (!imageUploadStaging.isActive(uploadId)) throw new InterruptedIOException("image-upload-cancelled");
     }
 
     private static String readBoundedText(InputStream input, int maximumBytes) throws Exception {

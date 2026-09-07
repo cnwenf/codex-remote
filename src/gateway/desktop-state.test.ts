@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { DesktopState } from "./desktop-state";
+import { initialCodexState } from "../protocol/thread-store";
+import { hydrateThread } from "../web/state/conversation-history";
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "codex-desktop-state-"));
@@ -823,6 +825,97 @@ describe("DesktopState", () => {
     state.close();
   });
 
+  it.each([true, false])("preserves repeated user messages across a large turn with a mid-turn context record (explicit metadata: %s)", (withMetadata) => {
+    const { databasePath, rolloutPath } = fixture();
+    const message = (id: string, role: string, text: string) => ({
+      type: "response_item",
+      payload: {
+        type: "message", id, role,
+        content: [{ type: role === "user" ? "input_text" : "output_text", text }],
+        ...(withMetadata ? { internal_chat_message_metadata_passthrough: { turn_id: "turn-long" } } : {}),
+      },
+    });
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "turn-long" } },
+      message("user-first", "user", "继续"),
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const known = hydrateThread(initialCodexState, desktop.request("desktopState/readThread", { threadId: "thread-1" }));
+      appendFileSync(rolloutPath, [
+        { type: "diagnostic", payload: { text: "x".repeat(96 * 1024) } },
+        message("agent-middle", "assistant", "工具执行后的中间回复"),
+        message("user-middle", "user", "补充要求"),
+        { type: "turn_context", payload: { turn_id: "turn-long" } },
+        message("user-second", "user", "继续"),
+        message("agent-final", "assistant", "最终回复"),
+        { type: "event_msg", payload: { type: "task_complete", turn_id: "turn-long" } },
+      ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+      const latest = desktop.request("desktopState/readThread", {
+        threadId: "thread-1", history: { limitTurns: 8, maxBytes: 64 * 1024 },
+      }) as any;
+      expect(latest.thread.turns[0].completeFromTurnStart).not.toBe(true);
+      expect(latest.thread.turns[0].items.map((item: any) => item.id)).toEqual([
+        "agent-middle", "user-middle", "user-second", "agent-final",
+      ]);
+      const recovered = hydrateThread(known, latest, "append");
+      const turn = recovered.threads["thread-1"].turns["turn-long"];
+      expect(turn.itemOrder).toEqual(["user-first", "agent-middle", "user-middle", "user-second", "agent-final"]);
+
+      const earlier = desktop.request("desktopState/readThread", {
+        threadId: "thread-1",
+        history: { beforeCursor: latest.history.beforeCursor, limitTurns: 8, maxBytes: 64 * 1024 },
+      }) as any;
+      expect(earlier.thread.turns[0].completeFromTurnStart).toBe(true);
+      const all = hydrateThread(recovered, earlier, "prepend");
+      expect(all.threads["thread-1"].turns["turn-long"].itemOrder).toEqual(turn.itemOrder);
+      expect(earlier.history).toEqual({ hasMoreBefore: false });
+    } finally { desktop.close(); }
+  });
+
+  it.each(["task_started", "different_context"])("does not carry an anonymous history prefix across %s", (boundary) => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "response_item", payload: {
+        type: "message", id: "unassigned-user", role: "user",
+        content: [{ type: "input_text", text: "旧轮消息" }],
+      } },
+      { type: "turn_context", payload: { turn_id: boundary === "task_started" ? "next" : "previous" } },
+      boundary === "task_started"
+        ? { type: "event_msg", payload: { type: "task_started", turn_id: "next" } }
+        : { type: "turn_context", payload: { turn_id: "next" } },
+      { type: "response_item", payload: {
+        type: "message", id: "next-user", role: "user",
+        content: [{ type: "input_text", text: "新轮消息" }],
+      } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "next" } },
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const result = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(result.thread.turns).toEqual([expect.objectContaining({
+        id: "next", items: [expect.objectContaining({ id: "next-user" })],
+      })]);
+    } finally { desktop.close(); }
+  });
+
+  it("does not certify a context-only history fragment as a complete turn", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, [
+      { type: "turn_context", payload: { turn_id: "turn-1" } },
+      { type: "response_item", payload: {
+        type: "message", id: "user-fragment", role: "user",
+        content: [{ type: "input_text", text: "继续" }],
+      } },
+    ].map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const result = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(result.thread.turns[0].items[0].id).toBe("user-fragment");
+      expect(result.thread.turns[0].completeFromTurnStart).not.toBe(true);
+    } finally { desktop.close(); }
+  });
+
   it("skips oversized non-conversation records while loading the previous page", () => {
     const { databasePath, rolloutPath } = fixture();
     writeFileSync(
@@ -850,6 +943,232 @@ describe("DesktopState", () => {
     expect(older.thread.turns.map((turn: any) => turn.id)).toEqual(["turn-1"]);
     expect(older.history).toEqual({ hasMoreBefore: false });
     state.close();
+  });
+
+  it.each([3, 14, 56])("pages a %i MiB image record without losing the user or adjacent turns", (sizeMiB) => {
+    const { databasePath, rolloutPath } = fixture();
+    const uploadRoot = join(dirname(databasePath), "codex-remote", "uploads");
+    mkdirSync(uploadRoot, { recursive: true });
+    const imageCount = sizeMiB === 56 ? 4 : 1;
+    const imageIds = Array.from({ length: imageCount }, (_, i) => `d6465fe8-f5f2-46af-809f-268f937a8d6${i}`);
+    for (const id of imageIds) writeFileSync(join(uploadRoot, `${id}.png`), Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64",
+    ));
+    appendFileSync(rolloutPath, JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "turn-images" } }) + "\n");
+    appendFileSync(rolloutPath, '{"type":"response_item","payload":{"type":"message","id":"large-user","role":"user","content":[');
+    for (const [index, id] of imageIds.entries()) {
+      if (index) appendFileSync(rolloutPath, ",");
+      appendFileSync(rolloutPath, JSON.stringify({ type: "input_text", text: `${index === 0 ? 'data:image/png;base64,literal \\"quoted\\" 中文\n' : ''}<image name=[Image #${index + 1}] path="${join(uploadRoot, `${id}.png`)}">` }) + ',{"type":"input_image","image_url":"data:image/png;base64,');
+      const chunk = "A".repeat(128 * 1024);
+      for (let i = 0; i < sizeMiB * 8 / imageCount; i++) appendFileSync(rolloutPath, chunk);
+      appendFileSync(rolloutPath, '"},' + JSON.stringify({ type: "input_text", text: "</image>" }));
+    }
+    appendFileSync(rolloutPath, '],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-images"}}}\n');
+    appendFileSync(rolloutPath, [
+      { type: "response_item", payload: { type: "message", id: "image-reply", role: "assistant", content: [{ type: "output_text", text: "Recognized images" }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "turn-images" } },
+      ...completedTurn(2),
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      const pages: any[] = [];
+      let beforeCursor: string | undefined;
+      for (let count = 0; count < 10; count++) {
+        const page = state.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor } }) as any;
+        pages.push(page);
+        if (!page.history.hasMoreBefore) break;
+        const next = page.history.beforeCursor;
+        if (beforeCursor !== undefined) expect(Number(next)).toBeLessThan(Number(beforeCursor));
+        beforeCursor = next;
+      }
+      expect(pages.at(-1).history.hasMoreBefore).toBe(false);
+      const turns = pages.flatMap((page) => page.thread.turns);
+      const images = turns.filter((turn) => turn.id === "turn-images").flatMap((turn) => turn.items);
+      expect(images.find((item) => item.id === "large-user")).toMatchObject({
+        text: 'data:image/png;base64,literal \\"quoted\\" 中文', imageIds,
+      });
+      expect(images.filter((item) => item.id === "large-user")).toHaveLength(1);
+      expect(turns.some((turn) => turn.id === "turn-1")).toBe(true);
+      expect(turns.some((turn) => turn.id === "turn-2")).toBe(true);
+      expect(JSON.stringify(pages).length).toBeLessThan(30_000);
+    } finally { state.close(); }
+  });
+
+  it.each([true, false])("preserves adjacent large image records without per-message metadata (separate turns: %s)", (separateTurns) => {
+    const { databasePath, rolloutPath } = fixture();
+    for (const index of [3, 4]) appendFileSync(rolloutPath, [
+      ...(index === 3 || separateTurns ? [{ type: "event_msg", payload: { type: "task_started", turn_id: `turn-${index}` } }] : []),
+      { type: "response_item", payload: { type: "message", id: `large-${index}`, role: "user", content: [
+        { type: "input_text", text: `Prompt ${index}` },
+        { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(3 * 1024 * 1024)}` },
+      ] } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      let beforeCursor: string | undefined;
+      const turns: any[] = [];
+      for (let index = 0; index < 5; index++) {
+        const page = state.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor } }) as any;
+        turns.unshift(...page.thread.turns);
+        if (!page.history.hasMoreBefore) break;
+        if (beforeCursor) expect(Number(page.history.beforeCursor)).toBeLessThan(Number(beforeCursor));
+        beforeCursor = page.history.beforeCursor;
+      }
+      expect(turns.map((turn) => turn.id)).toEqual(separateTurns ? ["turn-1", "turn-3", "turn-4"] : ["turn-1", "turn-3"]);
+      expect(turns.slice(1).flatMap((turn) => turn.items.map((item: any) => item.text))).toEqual(["Prompt 3", "Prompt 4"]);
+      expect(turns.every((turn) => turn.completeFromTurnStart === true)).toBe(true);
+    } finally { state.close(); }
+  });
+
+  it.each(["same-turn", "turn_context", "task_started"])("preserves anonymous assistant text between image records across %s", (boundary) => {
+    const { databasePath, rolloutPath } = fixture();
+    const secondTurn = boundary === "same-turn" ? "turn-a" : "turn-b";
+    const image = (id: string, turnId: string) => ({ type: "response_item", payload: {
+      type: "message", id, role: "user",
+      content: [{ type: "input_text", text: id }, { type: "input_image", image_url: `data:image/png;base64,${"A".repeat(3 * 1024 * 1024)}` }],
+      internal_chat_message_metadata_passthrough: { turn_id: turnId },
+    } });
+    const assistant = (id: string) => ({ type: "response_item", payload: {
+      type: "message", id, role: "assistant", content: [{ type: "output_text", text: id }],
+    } });
+    writeFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "turn-a" } },
+      image("user-first", "turn-a"),
+      assistant("assistant-middle"),
+      ...(boundary === "same-turn" ? [] : [boundary === "turn_context"
+        ? { type: "turn_context", payload: { turn_id: secondTurn } }
+        : { type: "event_msg", payload: { type: "task_started", turn_id: secondTurn } }]),
+      image("user-steer", secondTurn),
+      assistant("assistant-final"),
+      { type: "event_msg", payload: { type: "task_complete", turn_id: secondTurn } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      let beforeCursor: string | undefined;
+      const pages: any[] = [];
+      for (let index = 0; index < 10; index++) {
+        const page = state.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor } }) as any;
+        pages.unshift(page);
+        if (!page.history.hasMoreBefore) break;
+        if (beforeCursor) expect(Number(page.history.beforeCursor)).toBeLessThan(Number(beforeCursor));
+        beforeCursor = page.history.beforeCursor;
+      }
+      expect(pages[0].history.hasMoreBefore).toBe(false);
+      const items = pages.flatMap((page) => page.thread.turns.flatMap((turn: any) => turn.items.map((item: any) => ({ id: item.id, turnId: turn.id }))));
+      expect(items).toEqual([
+        { id: "user-first", turnId: "turn-a" },
+        { id: "assistant-middle", turnId: "turn-a" },
+        { id: "user-steer", turnId: secondTurn },
+        { id: "assistant-final", turnId: secondTurn },
+      ]);
+    } finally { state.close(); }
+  });
+
+  it.each([true, false])("pages consecutive legal image records beyond 64 MiB exactly once (user metadata: %s)", (withMetadata) => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "images" } }) + "\n");
+    const chunk = "A".repeat(128 * 1024);
+    for (const index of [1, 2]) {
+      appendFileSync(rolloutPath, `{"type":"response_item","payload":{"type":"message","id":"user-${index}","role":"user","content":[`);
+      // Three 9.75 MiB decoded attachments are within the upload limits.
+      for (let image = 0; image < 3; image++) {
+        if (image) appendFileSync(rolloutPath, ",");
+        appendFileSync(rolloutPath, '{"type":"input_image","image_url":"data:image/png;base64,');
+        for (let part = 0; part < 13 * 8; part++) appendFileSync(rolloutPath, chunk);
+        appendFileSync(rolloutPath, '"}');
+      }
+      appendFileSync(rolloutPath, `,{"type":"input_text","text":"prompt-${index}"}]${withMetadata ? ',"internal_chat_message_metadata_passthrough":{"turn_id":"images"}' : ''}}}\n`);
+      appendFileSync(rolloutPath, JSON.stringify({ type: "response_item", payload: {
+        type: "message", id: `assistant-${index}`, role: "assistant",
+        content: [{ type: "output_text", text: `answer-${index}` }],
+      } }) + "\n");
+    }
+    appendFileSync(rolloutPath, JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "images" } }) + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      let beforeCursor: string | undefined;
+      const pages: any[] = [];
+      for (let index = 0; index < 10; index++) {
+        const page = state.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor } }) as any;
+        pages.unshift(page);
+        if (!page.history.hasMoreBefore) break;
+        if (beforeCursor) expect(Number(page.history.beforeCursor)).toBeLessThan(Number(beforeCursor));
+        beforeCursor = page.history.beforeCursor;
+      }
+      expect(pages[0].history.hasMoreBefore).toBe(false);
+      const items = pages.flatMap((page) => page.thread.turns.flatMap((turn: any) =>
+        turn.items.map((item: any) => ({ id: item.id, text: item.text, turnId: turn.id }))));
+      expect(items).toEqual([
+        { id: "user-1", text: "prompt-1", turnId: "images" },
+        { id: "assistant-1", text: "answer-1", turnId: "images" },
+        { id: "user-2", text: "prompt-2", turnId: "images" },
+        { id: "assistant-2", text: "answer-2", turnId: "images" },
+      ]);
+      expect(pages[0].thread.turns[0].completeFromTurnStart).toBe(true);
+      expect(JSON.stringify(pages).length).toBeLessThan(10_000);
+    } finally { state.close(); }
+  });
+
+  it.each([
+    { budget: "record count", count: 9, imageCount: 1, imageMiB: 3, textKiB: 0 },
+    { budget: "pending projection", count: 7, imageCount: 1, imageMiB: 3, textKiB: 350 },
+    { budget: "total reads", count: 4, imageCount: 3, imageMiB: 13, textKiB: 0 },
+  ])("reports an oversized unresolved history page without consuming its cursor ($budget)", ({ count, imageCount, imageMiB, textKiB }) => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: "images" } }) + "\n");
+    for (let index = 1; index <= count; index++) appendFileSync(rolloutPath, [
+      { type: "response_item", payload: { type: "message", id: `user-${index}`, role: "user", content: [
+        ...Array.from({ length: imageCount }, () => ({ type: "input_image", image_url: `data:image/png;base64,${"A".repeat(imageMiB * 1024 * 1024)}` })),
+        { type: "input_text", text: `prompt-${index}${"t".repeat(textKiB * 1024)}` },
+      ] } },
+      { type: "response_item", payload: { type: "message", id: `assistant-${index}`, role: "assistant", content: [
+        { type: "output_text", text: `answer-${index}` },
+      ] } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    appendFileSync(rolloutPath, JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "images" } }) + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      const latest = state.request("desktopState/readThread", { threadId: "thread-1", history: {} }) as any;
+      expect(latest.thread.turns[0].items.map((item: any) => item.id)).toEqual([`assistant-${count}`]);
+      const beforeCursor = latest.history.beforeCursor;
+      for (let retry = 0; retry < 2; retry++) {
+        expect(() => state.request("desktopState/readThread", {
+          threadId: "thread-1", history: { beforeCursor },
+        })).toThrow(/History page is too large.*cursor was not advanced/);
+      }
+      const again = state.request("desktopState/readThread", { threadId: "thread-1", history: {} }) as any;
+      expect(again.history.beforeCursor).toBe(beforeCursor);
+      expect(again.thread.turns).toEqual(latest.thread.turns);
+    } finally { state.close(); }
+  });
+
+  it.each([3, 70])("bounds a %i MiB unprojectable record and does not certify a truncated turn", (sizeMiB) => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "truncated" } },
+      { type: "response_item", payload: { type: "message", id: "before-overflow", role: "user", content: [{ type: "input_text", text: "Kept prefix" }] } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    appendFileSync(rolloutPath, '{"type":"response_item","payload":{"type":"message","id":"oversized-text","role":"user","content":[{"type":"input_text","text":"');
+    const chunk = "A".repeat(128 * 1024);
+    for (let index = 0; index < sizeMiB * 8; index++) appendFileSync(rolloutPath, chunk);
+    appendFileSync(rolloutPath, '"}]}}\n');
+    const state = new DesktopState(databasePath);
+    try {
+      let beforeCursor: string | undefined;
+      const pages: any[] = [];
+      for (let index = 0; index < 10; index++) {
+        const page = state.request("desktopState/readThread", { threadId: "thread-1", history: { beforeCursor } }) as any;
+        pages.push(page);
+        if (!page.history.hasMoreBefore) break;
+        if (beforeCursor) expect(Number(page.history.beforeCursor)).toBeLessThan(Number(beforeCursor));
+        beforeCursor = page.history.beforeCursor;
+      }
+      expect(pages.at(-1).history.hasMoreBefore).toBe(false);
+      const turn = pages.flatMap((page) => page.thread.turns).find((turn) => turn.id === "truncated");
+      expect(turn.items[0].text).toBe("Kept prefix");
+      expect(turn.completeFromTurnStart).not.toBe(true);
+      expect(JSON.stringify(pages).length).toBeLessThan(10_000);
+    } finally { state.close(); }
   });
 
   it("tracks Desktop running status from appended rollout events", () => {

@@ -1,11 +1,12 @@
 import type { RpcMessage } from "./types";
 import { permissionStateFromProtocol, type PermissionState } from "./permissions";
-import { displayUserInput, sameUserInput } from "./user-message-identity";
+import { compatibleUserImages, displayUserInput, sameUserInput } from "./user-message-identity";
 import { appendAssistantText, itemText, messageKind, visibleAssistantText } from "./message-content";
 import { mergeMessageOrder } from "./message-order";
 
 export type ThreadStatus = "running" | "idle" | "error" | "unknown";
 export type TurnStatus = "inProgress" | "completed" | "interrupted" | "failed" | "unknown";
+export type TurnError = { message: string; additionalDetails?: string | null };
 export type TodoStatus = "pending" | "inProgress" | "completed";
 
 export type CodexTodoList = {
@@ -31,6 +32,7 @@ export type CodexItem = {
 export type CodexTurn = {
   id: string;
   status: TurnStatus;
+  error?: TurnError;
   itemOrder: string[];
   items: Record<string, CodexItem>;
   startedAt?: number;
@@ -236,7 +238,9 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
       const status = normalizeStatus(params.status);
       return {
         ...thread,
-        status: thread.activeTurnId && status !== "running" ? "running" : status,
+        status: thread.activeTurnId && status !== "running" ? "running"
+          : status === "idle" && thread.turns[thread.turnOrder.at(-1) ?? ""]?.status === "failed"
+            ? "error" : status,
       };
     });
   }
@@ -291,6 +295,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
         ? updateTurn(thread, completedTurnId, (turn) => ({
             ...turn,
             status: normalizeTurnStatus(turnValue.status, "completed"),
+            error: turnErrorFromProtocol(turnValue.error) ?? turn.error,
             itemOrder: mergeMessageOrder(turn.itemOrder,
               (Array.isArray(turnValue.items) ? turnValue.items : []).flatMap((item) => {
                 const id = stringValue(asRecord(item).id);
@@ -301,10 +306,14 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
             durationMs: numberValue(turnValue.durationMs) ?? turn.durationMs,
           }))
         : thread;
-      const completesActiveTurn = !thread.activeTurnId || completedTurnId === thread.activeTurnId;
+      const completesActiveTurn = thread.activeTurnId
+        ? completedTurnId === thread.activeTurnId
+        : !completedTurnId || completedTurnId === next.turnOrder.at(-1);
       return {
         ...next,
-        status: completesActiveTurn ? "idle" : next.status,
+        status: completesActiveTurn
+          ? completedTurnId && next.turns[completedTurnId]?.status === "failed" ? "error" : "idle"
+          : next.status,
         activeTurnId: completesActiveTurn ? undefined : next.activeTurnId,
         todoList: completedTurnId && next.todoList &&
             (!next.todoList.turnId || next.todoList.turnId === completedTurnId)
@@ -351,18 +360,21 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
       const text = isUserMessageType(itemType) ? displayUserInput(rawText) : rawText;
       const clientMessageId = messageIdentity(item);
       const optimisticMatch = isUserMessageType(itemType)
-        ? findMatchingOptimisticUserMessage(thread, text, turnId, itemId, clientMessageId)
+        ? findMatchingOptimisticUserMessage(thread, text, turnId, itemId, stringArray(item.imageIds), clientMessageId)
         : undefined;
       const confirmedDuplicate = isUserMessageType(itemType) && !optimisticMatch
-        ? findRecentConfirmedUserMessage(
+        ? findConfirmedUserMessage(
           thread,
-          text,
           itemId,
-          stringArray(item.imageIds).length > 0,
           clientMessageId,
         )
         : undefined;
       const reconciledMatch = optimisticMatch ?? confirmedDuplicate;
+      const reconciledOrder = reconciledMatch?.turnId === turnId
+        ? [...new Set(thread.turns[turnId].itemOrder.map((id) =>
+          id === reconciledMatch.item.id ? itemId : id
+        ))]
+        : undefined;
       const withoutOptimistic = reconciledMatch
         ? removeItemFromTurn(thread, reconciledMatch.turnId, reconciledMatch.item.id)
         : thread;
@@ -396,7 +408,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
         return {
           ...turn,
           status: message.method === "item/completed" ? turn.status : "inProgress",
-          itemOrder: appendUnique(turn.itemOrder, itemId),
+          itemOrder: reconciledOrder ?? appendUnique(turn.itemOrder, itemId),
           items: nextItems,
         };
       }, "inProgress", message.method === "item/started");
@@ -438,10 +450,11 @@ function updateTurn(
     (incomingIndex < 0 || activeIndex < 0 || incomingIndex >= activeIndex);
   const updated = update(current);
   if (updated === current) return thread;
-  const normalized = terminal || isTerminalTurnStatus(updated.status)
+  const normalized: CodexTurn = terminal || isTerminalTurnStatus(updated.status)
     ? {
         ...updated,
-        status: terminal ? current.status : updated.status,
+        status: current.status === "failed" || updated.status === "failed"
+          ? "failed" : terminal ? current.status : updated.status,
         items: Object.fromEntries(Object.entries(updated.items).map(([itemId, item]) => [
           itemId,
           item.status === "running" || item.status === "inProgress"
@@ -484,6 +497,7 @@ function findMatchingOptimisticUserMessage(
   text: string,
   authoritativeTurnId: string,
   authoritativeId: string,
+  imageIds: string[],
   clientMessageId?: string,
 ) {
   const candidates: Array<{ turnId: string; item: CodexItem }> = [];
@@ -493,13 +507,7 @@ function findMatchingOptimisticUserMessage(
     for (const itemId of turn?.itemOrder ?? []) {
       const candidate = turn.items[itemId];
       if (Boolean(candidate) && isOptimisticMessage(candidate, itemId) &&
-        isUserMessageType(candidate?.type) &&
-        sameUserInput(
-          candidate?.text ?? "",
-          text,
-          Boolean(candidate?.imageIds?.length),
-          /<image\b/i.test(text),
-        )) {
+        isUserMessageType(candidate?.type)) {
         candidates.push({ turnId, item: candidate });
       }
       if (candidate && !isOptimisticMessage(candidate, itemId) && isUserMessageType(candidate.type)) {
@@ -519,16 +527,21 @@ function findMatchingOptimisticUserMessage(
     representedById.item.text,
     text,
     Boolean(representedById.item.imageIds?.length),
-    /<image\b/i.test(text),
+    imageIds.length > 0,
   )) return undefined;
-  const fallback = candidates[0];
-  if (!fallback) return undefined;
+  const fallbackCandidates = candidates.filter(({ item }) =>
+    !(clientMessageId && item.clientMessageId && clientMessageId !== item.clientMessageId) &&
+    sameUserInput(item.text, text, Boolean(item.imageIds?.length), imageIds.length > 0) &&
+    compatibleUserImages(item.imageIds, imageIds)
+  );
+  if (fallbackCandidates.length !== 1) return undefined;
+  const fallback = fallbackCandidates[0];
   if (!clientMessageId && !representedById && confirmed.some(({ item }) => sameUserInput(
     item.text,
     text,
     Boolean(item.imageIds?.length),
-    /<image\b/i.test(text),
-  ))) {
+    imageIds.length > 0,
+  ) && compatibleUserImages(item.imageIds, imageIds))) {
     const authoritativeTurnIndex = thread.turnOrder.indexOf(authoritativeTurnId);
     const pendingTurnIndex = thread.turnOrder.indexOf(fallback.turnId);
     if (authoritativeTurnIndex >= 0 && pendingTurnIndex > authoritativeTurnIndex) return undefined;
@@ -536,29 +549,20 @@ function findMatchingOptimisticUserMessage(
   return fallback;
 }
 
-function findRecentConfirmedUserMessage(
+function findConfirmedUserMessage(
   thread: CodexThread,
-  text: string,
   authoritativeId: string,
-  incomingHasImages: boolean,
   clientMessageId?: string,
 ) {
+  if (!clientMessageId) return undefined;
   if (thread.turnOrder.some((turnId) => thread.turns[turnId]?.items[authoritativeId])) return undefined;
   for (const turnId of [...thread.turnOrder].reverse()) {
     const turn = thread.turns[turnId];
     for (const itemId of [...(turn?.itemOrder ?? [])].reverse()) {
       const candidate = turn.items[itemId];
       if (!candidate) continue;
-      if (isUserMessageType(candidate.type)) {
-        if (!identitiesMatch(candidate, clientMessageId)) return undefined;
-        return sameUserInput(
-          candidate.text,
-          text,
-          Boolean(candidate.imageIds?.length),
-          incomingHasImages,
-        ) ? { turnId, item: candidate } : undefined;
-      }
-      if (candidate.type.toLocaleLowerCase().includes("agentmessage")) return undefined;
+      if (isUserMessageType(candidate.type) && !isOptimisticMessage(candidate, itemId) &&
+        candidate.clientMessageId === clientMessageId) return { turnId, item: candidate };
     }
   }
   return undefined;
@@ -573,15 +577,21 @@ function isOptimisticMessage(item: CodexItem | undefined, itemId: string) {
   );
 }
 
-function identitiesMatch(item: CodexItem | undefined, clientMessageId?: string) {
-  if (!clientMessageId) return !item?.clientMessageId;
-  return item?.clientMessageId === clientMessageId;
-}
-
 function messageIdentity(item: Record<string, unknown>) {
   return stringValue(item.clientMessageId) ??
     stringValue(item.clientUserMessageId) ??
     stringValue(item.client_message_id);
+}
+
+export function turnErrorFromProtocol(value: unknown): TurnError | undefined {
+  const record = asRecord(value);
+  const message = stringValue(record.message);
+  if (!message) return undefined;
+  return {
+    message,
+    ...(record.additionalDetails === null || typeof record.additionalDetails === "string"
+      ? { additionalDetails: record.additionalDetails } : {}),
+  };
 }
 
 

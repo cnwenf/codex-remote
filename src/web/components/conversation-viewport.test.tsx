@@ -5,6 +5,7 @@ import { ConversationViewport, currentThreadQuestion } from "./conversation-view
 
 let scrollHeight = 1_000;
 let clientHeight = 300;
+const scrollPositions = new WeakMap<HTMLElement, number>();
 
 Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
   configurable: true,
@@ -14,6 +15,14 @@ Object.defineProperty(HTMLElement.prototype, "clientHeight", {
   configurable: true,
   get: () => clientHeight,
 });
+// Browsers clamp writes to the available scroll range; jsdom does not.
+Object.defineProperty(HTMLElement.prototype, "scrollTop", {
+  configurable: true,
+  get() { return scrollPositions.get(this) ?? 0; },
+  set(value: number) {
+    scrollPositions.set(this, Math.max(0, Math.min(value, scrollHeight - clientHeight)));
+  },
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -22,6 +31,69 @@ afterEach(() => {
 });
 
 describe("ConversationViewport", () => {
+  it.each([
+    { layout: "delayed image", initialHeight: 1_000, initialTop: 700, anchoredTop: 900 },
+    { layout: "cold short-to-long hydration", initialHeight: 200, initialTop: 0, anchoredTop: 0 },
+  ])("keeps following when $layout dispatches scroll before ResizeObserver", ({ initialHeight, initialTop, anchoredTop }) => {
+    scrollHeight = initialHeight;
+    let resize: (() => void) | undefined;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    render(<ConversationViewport threadId="images" history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <img alt="Delayed image" /><div>Newest assistant final answer</div>
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+    expect(viewport.scrollTop).toBe(initialTop);
+
+    scrollHeight = 2_000;
+    // Scroll anchoring can move down by less than the full image growth.
+    viewport.scrollTop = anchoredTop;
+    fireEvent.scroll(viewport);
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(1_700);
+
+    // Explicitly reading upward still cancels following delayed images.
+    viewport.scrollTop = 500;
+    fireEvent.scroll(viewport);
+    scrollHeight = 2_500;
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(500);
+  });
+
+  it("resets reading-up state when switching tasks and follows composer resizing", () => {
+    let resize: (() => void) | undefined;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    const { rerender } = render(<ConversationViewport threadId="old" history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <div>Old task</div>
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+    viewport.scrollTop = 200;
+    fireEvent.scroll(viewport);
+
+    scrollHeight = 2_000;
+    rerender(<ConversationViewport threadId="new" history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <div>Newest assistant final answer</div>
+    </ConversationViewport>);
+    expect(viewport.scrollTop).toBe(1_700);
+
+    // A taller composer leaves less room for the conversation.
+    clientHeight = 100;
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(1_900);
+    viewport.scrollTop = 500;
+    fireEvent.scroll(viewport);
+    clientHeight = 250;
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(500);
+  });
+
   it("follows delayed content resizing without dragging a reader away from history", () => {
     let resize: (() => void) | undefined;
     vi.stubGlobal("ResizeObserver", class {
@@ -35,7 +107,7 @@ describe("ConversationViewport", () => {
     const viewport = screen.getByTestId("timeline-scroll");
     scrollHeight = 1_400;
     act(() => resize?.());
-    expect(viewport.scrollTop).toBe(1_400);
+    expect(viewport.scrollTop).toBe(1_100);
     viewport.scrollTop = 200;
     fireEvent.scroll(viewport);
     scrollHeight = 1_800;
@@ -62,7 +134,7 @@ describe("ConversationViewport", () => {
       </ConversationViewport>,
     );
 
-    expect(screen.getByTestId("timeline-scroll").scrollTop).toBe(1_000);
+    expect(screen.getByTestId("timeline-scroll").scrollTop).toBe(700);
   });
 
   it("loads more history automatically when the latest page cannot fill the viewport", () => {
@@ -155,7 +227,7 @@ describe("ConversationViewport", () => {
         <div>More streaming output</div>
       </ConversationViewport>,
     );
-    expect(viewport.scrollTop).toBe(1_300);
+    expect(viewport.scrollTop).toBe(1_000);
   });
 
   it("notifies the thread view when the conversation content is tapped", () => {

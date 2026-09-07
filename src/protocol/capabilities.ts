@@ -7,6 +7,7 @@ const CLIENT_METHODS = Object.freeze([
   "thread/list",
   "thread/search",
   "thread/read",
+  "thread/turns/list",
   "thread/start",
   "thread/resume",
   "thread/archive",

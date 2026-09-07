@@ -14,6 +14,7 @@ import type {
 } from "../protocol/types";
 import { createGateway } from "./server";
 import { initialCodexState, reduceCodexState } from "../protocol/thread-store";
+import { hydrateThread } from "../web/state/conversation-history";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -21,6 +22,129 @@ const PNG_1X1 = Buffer.from(
 );
 
 describe("active message reconnect", () => {
+  it.each([undefined, "completed", "inProgress"])("recovers a Desktop failure after gateway restart despite older activity %j", async (olderStatus) => {
+    class FailedTurnTransport extends AlreadyInitializedTransport {
+      override send(message: RpcMessage) {
+        if ("method" in message && message.method === "thread/turns/list" && "id" in message) {
+          this.sent.push(message);
+          queueMicrotask(() => this.emit({ id: message.id, result: { data: [
+            { id: "failed-turn", status: "failed", error: { message: '{"detail":"Bad Request"}', additionalDetails: null }, items: [], itemsView: "notLoaded" },
+          ], nextCursor: null } }));
+        } else super.send(message);
+      }
+    }
+    const transport = new FailedTurnTransport();
+    const origin = "http://127.0.0.1:4310";
+    const gateway = createGateway({ port: 0, token: "test-token", allowedOrigins: [origin], transport,
+      desktopState: { request: () => ({ desktopMirror: true, thread: { id: "t", status: { type: "idle" }, turns: [
+        { id: "older-turn", status: "completed", items: [] },
+        { id: "failed-turn", status: "completed", items: [
+          { id: "question", type: "userMessage", text: "Reply CHECK-OK. No tools." },
+          { id: "answer", type: "agentMessage", text: "Partial answer" },
+        ] },
+      ] } }), close() {} },
+    });
+    const address = await gateway.start();
+    if (olderStatus) transport.emit({ method: olderStatus === "inProgress" ? "turn/started" : "turn/completed", params: {
+      threadId: "t", turn: { id: "older-turn", status: olderStatus },
+    } });
+    const socket = await connect(address, "test-token", origin);
+    await nextJson(socket);
+    try {
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: 80, method: "desktopState/readThread", params: { threadId: "t" } } }));
+      const response = await nextJson(socket);
+      expect(response.payload.result.thread.turns[1]).toMatchObject({ status: "failed", error: { message: '{"detail":"Bad Request"}' } });
+      const hydrated = hydrateThread(initialCodexState, response.payload.result);
+      expect(hydrated.threads.t.status).toBe("error");
+      expect(hydrated.threads.t.turns["failed-turn"].items.answer.text).toBe("Partial answer");
+      expect(transport.sent).toContainEqual(expect.objectContaining({
+        method: "thread/turns/list", params: { threadId: "t", limit: 8, sortDirection: "desc", itemsView: "notLoaded" },
+      }));
+    } finally {
+      socket.close();
+      await once(socket, "close");
+      await gateway.stop();
+    }
+  });
+
+  it.each(["systemError", "idle", "notLoaded", "idle-list", "completion-replay"])("retains live failure details after thread status %s when Desktop history and summary lack them", async (status) => {
+    const transport = new PeriodicStatusTransport();
+    transport.threads = [{ id: "t", status: { type: "idle" } }];
+    const origin = "http://127.0.0.1:4310";
+    const gateway = createGateway({ port: 0, token: "test-token", allowedOrigins: [origin], transport, mobileStatusSyncIntervalMs: 10,
+      desktopState: { request: () => ({ desktopMirror: true, thread: { id: "t", status: "idle", turns: [
+        { id: "turn", status: "completed", items: [] },
+      ] } }), close() {} },
+    });
+    const address = await gateway.start();
+    transport.emit({ method: "turn/completed", params: { threadId: "t", turn: {
+      id: "turn", status: "failed", error: { message: "Bad Request" },
+    } } });
+    transport.emit({ method: "thread/status/changed", params: { threadId: "t", status: { type: status } } });
+    if (status === "completion-replay") transport.emit({ method: "turn/completed", params: {
+      threadId: "t", turn: { id: "turn", status: "completed" },
+    } });
+    const socket = await connect(address, "test-token", origin);
+    await nextJson(socket);
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      if (status === "idle-list") {
+        const previousPolls = transport.sent.filter((request) => "method" in request && request.method === "thread/list").length;
+        clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_000);
+        await vi.waitFor(() => expect(transport.sent.filter((request) => "method" in request && request.method === "thread/list").length).toBeGreaterThan(previousPolls));
+      }
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: 81, method: "desktopState/readThread", params: { threadId: "t" } } }));
+      const response = await nextJson(socket);
+      expect(response.payload.result.thread.turns[0]).toMatchObject({ status: "failed", error: { message: "Bad Request" } });
+    } finally {
+      clock?.mockRestore();
+      socket.close();
+      await once(socket, "close");
+      await gateway.stop();
+    }
+  });
+
+  it.each([[true, "failed"], [false, "failed"], [false, "inProgress"]] as const)("does not project older cached activity onto a newer successful turn (older included: %s, status: %s)", async (includeOlder, olderStatus) => {
+    class RecoveredTransport extends AlreadyInitializedTransport {
+      override send(message: RpcMessage) {
+        if ("method" in message && message.method === "thread/turns/list" && "id" in message) {
+          this.sent.push(message);
+          queueMicrotask(() => this.emit({ id: message.id, result: { data: [
+            { id: "newer", status: "completed", items: [] },
+            { id: "older", status: "failed", error: { message: "Old failure" }, items: [] },
+          ], nextCursor: null } }));
+        } else super.send(message);
+      }
+    }
+    const transport = new RecoveredTransport();
+    const origin = "http://127.0.0.1:4310";
+    const gateway = createGateway({ port: 0, token: "test-token", allowedOrigins: [origin], transport,
+      desktopState: { request: () => ({ desktopMirror: true, thread: { id: "t", status: "idle", turns: [
+        ...(includeOlder ? [{ id: "older", status: "completed", items: [] }] : []),
+        { id: "newer", status: "completed", items: [{ id: "answer", type: "agentMessage", text: "Done" }] },
+      ] } }), close() {} },
+    });
+    const address = await gateway.start();
+    transport.emit({ method: olderStatus === "inProgress" ? "turn/started" : "turn/completed", params: { threadId: "t", turn: {
+      id: "older", status: olderStatus, error: olderStatus === "failed" ? { message: "Old failure" } : undefined,
+    } } });
+    const socket = await connect(address, "test-token", origin);
+    await nextJson(socket);
+    try {
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: 82, method: "desktopState/readThread", params: { threadId: "t" } } }));
+      const response = await nextJson(socket);
+      const hydrated = hydrateThread(initialCodexState, response.payload.result);
+      expect(hydrated.threads.t.status).toBe("idle");
+      if (includeOlder) expect(hydrated.threads.t.turns.older).toMatchObject({ status: "failed", error: { message: "Old failure" } });
+      else expect(hydrated.threads.t.turnOrder).toEqual(["newer"]);
+      expect(hydrated.threads.t.turns.newer.items.answer.text).toBe("Done");
+    } finally {
+      socket.close();
+      await once(socket, "close");
+      await gateway.stop();
+    }
+  });
+
   it("restores the raw streaming prefix before new deltas without duplicating a retained client", async () => {
     const transport = new AlreadyInitializedTransport();
     const origin = "http://127.0.0.1:4310";
@@ -79,6 +203,9 @@ class FakeTransport implements CodexTransport {
     this.sent.push(message);
     if ("method" in message && message.method === "initialize" && "id" in message) {
       queueMicrotask(() => this.emit({ id: message.id, result: { ready: true } }));
+    }
+    if ("method" in message && message.method === "thread/turns/list" && "id" in message) {
+      queueMicrotask(() => this.emit({ id: message.id, result: { data: [], nextCursor: null } }));
     }
   }
 

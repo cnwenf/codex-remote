@@ -102,6 +102,32 @@ describe("Composer", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("offline");
   });
 
+  it("shows a settings failure next to the permission picker and allows retry", async () => {
+    const onSettingsChange = vi.fn()
+      .mockRejectedValueOnce(new Error("Settings could not be saved"))
+      .mockResolvedValue(undefined);
+    render(<Composer
+      onSend={vi.fn()}
+      running={false}
+      expanded
+      permission="auto"
+      permissions={[
+        { id: "auto", label: "请求批准" },
+        { id: "full-access", label: "完全访问权限" },
+      ]}
+      onSettingsChange={onSettingsChange}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: "权限：请求批准" }));
+    await userEvent.click(screen.getByRole("option", { name: "完全访问权限" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Settings could not be saved");
+
+    await userEvent.click(screen.getByRole("button", { name: "权限：请求批准" }));
+    await userEvent.click(screen.getByRole("option", { name: "完全访问权限" }));
+    expect(onSettingsChange).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("does not submit a composing IME value on the send shortcut", async () => {
     const onSend = vi.fn();
     render(<Composer onSend={onSend} running={false} />);
