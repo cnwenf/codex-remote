@@ -71,6 +71,77 @@ describe("ConversationViewport", () => {
     );
   });
 
+  it.each([
+    {
+      candidate: "a different-ID user from another turn",
+      source: "user" as const,
+      attributes: { "data-user-message": "true", "data-turn-id": "other-turn", "data-item-id": "other-question" },
+      pinVisible: true,
+    },
+    {
+      candidate: "a same-ID user from another turn",
+      source: "user" as const,
+      attributes: { "data-user-message": "true", "data-turn-id": "other-turn", "data-item-id": "question-1" },
+      pinVisible: true,
+      keepsExpansion: true,
+    },
+    {
+      candidate: "a same-ID tool",
+      source: "user" as const,
+      attributes: { "data-turn-id": "turn-1", "data-item-id": "question-1" },
+      pinVisible: true,
+      keepsExpansion: true,
+    },
+    {
+      candidate: "a delegated source for a user question",
+      source: "user" as const,
+      attributes: { "data-delegated-input": "true", "data-turn-id": "turn-1", "data-item-id": "question-1" },
+      pinVisible: true,
+    },
+    {
+      candidate: "the matching user source",
+      source: "user" as const,
+      attributes: { "data-user-message": "true", "data-turn-id": "turn-1", "data-item-id": "question-1" },
+      pinVisible: false,
+    },
+    {
+      candidate: "the matching delegated source",
+      source: "delegated" as const,
+      attributes: { "data-delegated-input": "true", "data-turn-id": "turn-1", "data-item-id": "question-1" },
+      pinVisible: false,
+    },
+  ])("matches the full question identity when $candidate is visible", async ({ source, attributes, pinVisible, keepsExpansion }) => {
+    const readQuestionContext = vi.fn(async (request: QuestionContextRequest) => ({
+      ...request, state: "ready" as const, revision: "1",
+      question: { id: "question-1", text: "CURRENT ORIGINAL QUESTION", imageCount: 0, source, truncated: false, textOffset: 0 },
+    }));
+    render(<ConversationViewport threadId="thread-1" connection="ready"
+      readQuestionContext={readQuestionContext} history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <article data-testid="source-candidate" {...attributes}>Visible candidate</article>
+      <article data-testid="visible-answer" data-question-anchor="true" data-turn-id="turn-1" data-anchor-item-id="answer-1">回答正文</article>
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 } as DOMRect);
+    screen.getByTestId("source-candidate").getBoundingClientRect = () => ({ top: 110, bottom: 180 } as DOMRect);
+    screen.getByTestId("visible-answer").getBoundingClientRect = () => ({ top: 200, bottom: 400 } as DOMRect);
+
+    fireEvent.scroll(viewport);
+
+    await vi.waitFor(() => expect(readQuestionContext).toHaveBeenCalledTimes(1));
+    await act(async () => { await readQuestionContext.mock.results[0]!.value; });
+
+    if (pinVisible) {
+      const pinned = screen.getByRole("button", { name: /原始问题：CURRENT ORIGINAL QUESTION/ });
+      if (keepsExpansion) {
+        fireEvent.click(pinned);
+        fireEvent.scroll(viewport);
+        expect(pinned).toHaveAttribute("aria-expanded", "true");
+      }
+    } else {
+      expect(screen.queryByRole("button", { name: /原始问题：CURRENT ORIGINAL QUESTION/ })).not.toBeInTheDocument();
+    }
+  });
+
   it("keeps expansion while a new visible anchor confirms the same question generation", async () => {
     let answerBReads = 0;
     const readQuestionContext = vi.fn(async (request: QuestionContextRequest) => {

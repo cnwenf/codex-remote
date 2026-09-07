@@ -1,14 +1,21 @@
 // @vitest-environment node
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DesktopState, projectHistoryRecord } from "./desktop-state";
 import { initialCodexState } from "../protocol/thread-store";
 import { hydrateThread } from "../web/state/conversation-history";
 import { registerToolOutputImages } from "./tool-output-images";
 import { ImageUploadStore, MAX_IMAGE_BYTES } from "./image-upload-store";
+
+const testDirectories = new Set<string>();
+
+afterEach(() => {
+  for (const dir of testDirectories) rmSync(dir, { recursive: true, force: true });
+  testDirectories.clear();
+});
 
 describe("structured tool result images", () => {
   it.each([
@@ -37,7 +44,7 @@ describe("structured tool result images", () => {
     } };
     const raw = Buffer.from(JSON.stringify(outputRecord));
     expect(raw.length).toBeGreaterThan(2 * 1024 * 1024);
-    const store = new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-image-quota-")));
+    const store = new ImageUploadStore(temporaryDirectory("project-image-quota-"));
     const registrations = vi.spyOn(store, "referenceForDataUrl");
     const readRange = vi.fn((start: number, length: number) => raw.subarray(start, start + length));
     const projected = projectHistoryRecord(readRange, 0, raw.length, store);
@@ -77,7 +84,7 @@ describe("structured tool result images", () => {
         { type: "text", text: "After seventeen" }],
     } };
     const raw = Buffer.from(JSON.stringify(record));
-    const store = new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-genuine-limit-")));
+    const store = new ImageUploadStore(temporaryDirectory("project-genuine-limit-"));
     const registrations = vi.spyOn(store, "referenceForDataUrl");
     const projected = projectHistoryRecord((start, length) => raw.subarray(start, start + length), 0, raw.length, store);
     expect(projected).toBeDefined();
@@ -113,13 +120,13 @@ describe("structured tool result images", () => {
     const prefix = Buffer.from("中文🙂 prefix\n");
     const source = Buffer.from(JSON.stringify(record).replaceAll('"data":', '"d\\u0061ta":'));
     const raw = Buffer.concat([prefix, source]);
-    const store = new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-ordinary-offsets-")));
+    const store = new ImageUploadStore(temporaryDirectory("project-ordinary-offsets-"));
     const projected = projectHistoryRecord((start, length) => raw.subarray(start, start + length), prefix.length, raw.length, store);
     expect(JSON.parse(projected!).payload.output[0]).toEqual(data);
   });
 
   it("retains the bounded failure for oversized ordinary data and more than 512 containers", () => {
-    const store = new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-ordinary-bounds-")));
+    const store = new ImageUploadStore(temporaryDirectory("project-ordinary-bounds-"));
     const registrations = vi.spyOn(store, "referenceForDataUrl");
     for (const output of [
       [{ data: "A".repeat(2_100_000), type: "metadata" }],
@@ -139,7 +146,7 @@ describe("structured tool result images", () => {
       ],
     } }).replace('"ordinary"', '"bad\\q"'));
     expect(projectHistoryRecord((start, length) => raw.subarray(start, start + length), 0, raw.length,
-      new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-malformed-data-"))))).toBeUndefined();
+      new ImageUploadStore(temporaryDirectory("project-malformed-data-")))).toBeUndefined();
   });
 
   it("preserves legacy non-data image URLs without treating source strings as span keys", () => {
@@ -148,7 +155,7 @@ describe("structured tool result images", () => {
       { type: "input_image", image_url: "https://example.invalid/image.png", data: "0" },
       { type: "input_image", image_url: "1" },
     ] } }));
-    const store = new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-legacy-urls-")));
+    const store = new ImageUploadStore(temporaryDirectory("project-legacy-urls-"));
     const registrations = vi.spyOn(store, "referenceForDataUrl");
     const projected = projectHistoryRecord((start, length) => raw.subarray(start, start + length), 0, raw.length, store);
     expect(JSON.parse(projected!).payload.content).toEqual([
@@ -276,7 +283,7 @@ describe("structured tool result images", () => {
     const raw = Buffer.from(JSON.stringify(outputRecord));
     const projected = projectHistoryRecord(
       (start, length) => raw.subarray(start, start + length), 0, raw.length,
-      new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-mixed-data-"))),
+      new ImageUploadStore(temporaryDirectory("project-mixed-data-")),
     );
     expect((JSON.parse(projected!) as typeof outputRecord).payload.output[1]).toEqual({
       data: unrelated, _meta: { note: "ordinary" }, type: "metadata",
@@ -310,7 +317,7 @@ describe("structured tool result images", () => {
     const raw = Buffer.from(JSON.stringify(outputRecord));
     const projected = projectHistoryRecord(
       (start, length) => raw.subarray(start, start + length), 0, raw.length,
-      new ImageUploadStore(mkdtempSync(join(tmpdir(), "project-nested-scope-"))),
+      new ImageUploadStore(temporaryDirectory("project-nested-scope-")),
     );
     const projectedPart = (JSON.parse(projected!) as typeof outputRecord).payload.output[0];
     expect(projectedPart.annotations).toBeUndefined();
@@ -350,7 +357,7 @@ describe("structured tool result images", () => {
   });
 
   it("bounds image registrations and marks omitted images without dropping later text", () => {
-    const store = new ImageUploadStore(mkdtempSync(join(tmpdir(), "tool-images-bounds-")));
+    const store = new ImageUploadStore(temporaryDirectory("tool-images-bounds-"));
     const dataUrl = `data:image/png;base64,${readFileSync(resolve("assets/app-icon.png")).toString("base64")}`;
     const output = registerToolOutputImages({ type: "custom_tool_call_output", output: [
       ...Array.from({ length: 17 }, () => ({ type: "input_image", image_url: dataUrl })),
@@ -426,7 +433,7 @@ function crc32(value: Buffer) {
 }
 
 function history(records: unknown[]) {
-  const dir = mkdtempSync(join(tmpdir(), "tool-result-images-"));
+  const dir = temporaryDirectory("tool-result-images-");
   mkdirSync(join(dir, "sessions"));
   const rollout = join(dir, "sessions", "rollout.jsonl");
   writeFileSync(rollout, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
@@ -438,4 +445,10 @@ function history(records: unknown[]) {
   db.prepare("INSERT INTO threads VALUES ('t', ?, 'test', 'test', '', '/', 0, NULL, NULL, '{}', 'never', 1, 1, 0, NULL)").run(rollout);
   db.close();
   return { desktop: new DesktopState(databasePath), dir };
+}
+
+function temporaryDirectory(prefix: string) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  testDirectories.add(dir);
+  return dir;
 }

@@ -39,7 +39,6 @@ export function ConversationViewport({
   const [questionSourceVisible, setQuestionSourceVisible] = useState(false);
   const [questionExpanded, setQuestionExpanded] = useState(false);
   const question = useQuestionContext({ threadId, anchor: visibleAnchor, connection, readQuestionContext });
-  const questionId = question.context?.question?.id;
   const questionIdentity = question.context?.state === "ready" && question.context.question
     ? [question.context.threadId, question.context.turnId, question.context.revision,
       question.context.question.id, question.context.question.source,
@@ -128,9 +127,15 @@ export function ConversationViewport({
     });
     const next = selectVisibleQuestionAnchor(candidates, viewportRect.top, viewportRect.bottom, followLatest.current);
     setVisibleAnchor((current) => sameAnchor(current, next) ? current : next);
-    const sourceVisible = Boolean(questionId && [...viewport.querySelectorAll<HTMLElement>("[data-item-id]")]
+    const sourceIdentity = question.context?.state === "ready" && question.context.question ? {
+      turnId: question.context.turnId,
+      itemId: question.context.question.id,
+      source: question.context.question.source,
+    } : undefined;
+    const sourceVisible = Boolean(sourceIdentity && [...viewport.querySelectorAll<HTMLElement>("[data-item-id]")]
       .some((element) => {
-        if (element.dataset.itemId !== questionId) return false;
+        if (element.dataset.turnId !== sourceIdentity.turnId || element.dataset.itemId !== sourceIdentity.itemId) return false;
+        if (sourceIdentity.source === "user" ? element.dataset.userMessage !== "true" : element.dataset.delegatedInput !== "true") return false;
         const rect = element.getBoundingClientRect();
         return rect.bottom > viewportRect.top && rect.top < viewportRect.bottom;
       }));
