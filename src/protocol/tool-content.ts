@@ -22,6 +22,22 @@ export function boundedToolText(text: string) {
   return { text: text.slice(0, TOOL_TEXT_LIMIT), truncated: text.length > TOOL_TEXT_LIMIT, length: text.length };
 }
 
+export function toolOutputFromProtocol(item: Record<string, unknown>) {
+  for (const key of ["toolOutput", "aggregatedOutput", "output", "result", "content"] as const) {
+    if (item[key] !== undefined && item[key] !== null) return { key, value: item[key] };
+  }
+  if (item.aggregated_output !== undefined && item.aggregated_output !== null) {
+    return { key: "aggregated_output", value: item.aggregated_output };
+  }
+  if (item.formatted_output !== undefined && item.formatted_output !== null) {
+    return { key: "formatted_output", value: item.formatted_output };
+  }
+  if (typeof item.stdout === "string" && item.stdout.length > 0) return { key: "stdout", value: item.stdout };
+  if (item.stderr !== undefined && item.stderr !== null) return { key: "stderr", value: item.stderr };
+  if (item.stdout !== undefined && item.stdout !== null) return { key: "stdout", value: item.stdout };
+  return undefined;
+}
+
 function resultText(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "string") return value;
@@ -46,9 +62,7 @@ export function toolDetailsFromProtocol(item: Record<string, unknown>): ToolDeta
   if (!isToolActivity(String(item.type ?? "")) && item.toolInput === undefined && item.toolOutput === undefined) return {};
   const inputValue = item.toolInput ?? item.command ?? item.arguments ?? item.input;
   const input = inputValue == null ? undefined : typeof inputValue === "string" ? inputValue : JSON.stringify(inputValue, null, 2);
-  const snakeOutput = item.aggregated_output ?? item.formatted_output ??
-    (typeof item.stdout === "string" && item.stdout.length > 0 ? item.stdout : item.stderr ?? item.stdout);
-  const result = resultText(item.toolOutput ?? item.aggregatedOutput ?? item.output ?? item.result ?? item.content ?? snakeOutput);
+  const result = resultText(toolOutputFromProtocol(item)?.value);
   const error = resultText(item.error);
   const output = result === undefined ? error : error ? `${result}\n${error}` : result;
   const inputTruncated = item.toolInputTruncated === true || item.inputTruncated === true;

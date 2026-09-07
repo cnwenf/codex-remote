@@ -681,6 +681,49 @@ describe("DesktopState", () => {
     } finally { desktop.close(); }
   });
 
+  it("projects oversized persisted CommandExecution camelCase output", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, `${JSON.stringify({
+      type: "event_msg", payload: { type: "task_started", turn_id: "large-camel-command" },
+    })}\n` + '{"type":"event_msg","payload":{"type":"item_completed","turn_id":"large-camel-command","item":' +
+      '{"id":"large-camel-item","type":"CommandExecution","command":["/bin/zsh","-lc","large"],' +
+      '"status":"completed","aggregatedOutput":"');
+    appendFileSync(rolloutPath, "c".repeat(3 * 1024 * 1024));
+    appendFileSync(rolloutPath, '"}}}\n' + `${JSON.stringify({
+      type: "event_msg", payload: { type: "task_complete", turn_id: "large-camel-command" },
+    })}\n`);
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(desktop.request("desktopState/readThread", { threadId: "thread-1" }))
+        .toMatchObject({ thread: { status: { type: "idle" }, turns: [{
+          id: "large-camel-command", status: "completed", items: [{
+            id: "large-camel-item", type: "commandExecution", status: "completed",
+            toolInput: '[\n  "/bin/zsh",\n  "-lc",\n  "large"\n]',
+            toolOutput: "c".repeat(16_384), toolOutputTruncated: true,
+          }],
+        }] } });
+    } finally { desktop.close(); }
+  });
+
+  it("does not inherit truncation from an unselected CommandExecution output alias", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, `${JSON.stringify({
+      type: "event_msg", payload: { type: "task_started", turn_id: "preferred-command" },
+    })}\n` + '{"type":"event_msg","payload":{"type":"item_completed","turn_id":"preferred-command","item":' +
+      '{"id":"preferred-item","type":"CommandExecution","command":"pwd","status":"completed",' +
+      '"aggregatedOutput":"preferred","aggregated_output":"');
+    appendFileSync(rolloutPath, "s".repeat(3 * 1024 * 1024));
+    appendFileSync(rolloutPath, '"}}}\n');
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(desktop.request("desktopState/readThread", { threadId: "thread-1" }))
+        .toMatchObject({ thread: { turns: [{ id: "preferred-command", items: [{
+          id: "preferred-item", type: "commandExecution", toolInput: "pwd",
+          toolOutput: "preferred", toolOutputTruncated: false,
+        }] }] } });
+    } finally { desktop.close(); }
+  });
+
   it("keeps the latest Desktop todo list when it predates the paged conversation tail", () => {
     const { databasePath, rolloutPath } = fixture();
     appendFileSync(rolloutPath, JSON.stringify({

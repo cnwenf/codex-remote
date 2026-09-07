@@ -4,11 +4,11 @@ import { DatabaseSync } from "node:sqlite";
 import { permissionStateFromProtocol } from "../protocol/permissions";
 import { displayUserInput } from "../protocol/user-message-identity";
 import { itemText, messageKind } from "../protocol/message-content";
-import { MAX_PENDING_TOOL_OUTPUTS, TOOL_TEXT_LIMIT, toolDetailsFromProtocol, type ToolDetails, type PendingToolOutput } from "../protocol/tool-content";
+import { isToolActivity, MAX_PENDING_TOOL_OUTPUTS, MAX_TOOL_OUTPUT_IMAGES, TOOL_TEXT_LIMIT, toolDetailsFromProtocol, toolOutputFromProtocol, type ToolDetails, type PendingToolOutput } from "../protocol/tool-content";
 import { ImageUploadStore, MAX_IMAGE_BYTES } from "./image-upload-store";
 import { registerAssistantImages } from "./assistant-images";
 import { delegatedInputFromProtocol } from "../protocol/delegated-input";
-import { PROJECTED_IMAGE_URL_PREFIX, registerToolOutputImages } from "./tool-output-images";
+import { mapToolOutputImages, PROJECTED_IMAGE_URL_PREFIX, registerToolOutputImages } from "./tool-output-images";
 import { QuestionIndex } from "./question-index";
 import type { QuestionContextRequest } from "../protocol/question-context";
 
@@ -708,7 +708,8 @@ function readConversationPage(
   return { start: Math.min(cursor, scanFloor), turns: [] as ParsedTurn[], pendingToolOutputs: [] as PendingToolOutput[], toolOutputOverflow: false };
 }
 
-function projectHistoryRecord(
+/** @internal Exported only for bounded projector regression tests. */
+export function projectHistoryRecord(
   readRange: (start: number, length: number) => Buffer,
   start: number,
   end: number,
@@ -717,114 +718,144 @@ function projectHistoryRecord(
   const toolRecord = projectToolHistoryRecord(readRange, start, end);
   if (toolRecord) return toolRecord;
   const output = Buffer.allocUnsafe(MAX_HISTORY_BYTES);
+  type DeferredString = {
+    sourceStart: number;
+    sourceEnd: number;
+  };
+  const containers: ("object" | "array")[] = [];
+  const deferredStrings = new Map<string, DeferredString>();
   let length = 0;
   let inString = false;
   let escaped = false;
   let stringStart = 0;
+  let stringSourceStart = 0;
   let stringProperty = "";
-  let objectType = "";
-  let imageUrl = false;
-  let restoreImageUrl = false;
   let omit = false;
-  let imageData: Buffer | undefined;
-  let imageDataLength = 0;
-  let imageDataOverflow = false;
-  let deferredImage: { data: Buffer; length: number; overflow: boolean; insertAt: number } | undefined;
   let lastString = "";
   let lastToken = 0;
+  let sourceOffset = start;
+  const deferredBytes = (deferred: DeferredString, limit: number) => {
+    const deferredLength = deferred.sourceEnd - deferred.sourceStart;
+    return deferredLength <= limit ? readRange(deferred.sourceStart, deferredLength) : undefined;
+  };
   for (let position = start; position < end; position += 64 * 1024) {
     const chunk = readRange(position, Math.min(64 * 1024, end - position));
-    for (const byte of chunk) {
+    for (let chunkOffset = 0; chunkOffset < chunk.length; chunkOffset++) {
+      const byte = chunk[chunkOffset];
+      sourceOffset = position + chunkOffset;
       if (!omit) {
         if (length >= output.length) return undefined;
         output[length++] = byte;
       }
       if (inString) {
-        if (omit && imageUrl && byte !== 34) {
-          if (!imageData || imageDataLength >= imageData.length) {
-            if (restoreImageUrl) throw historyImageError("image-too-large");
-            imageDataOverflow = true;
-          } else {
-            imageData[imageDataLength++] = byte;
-          }
-        }
+        const closesString = byte === 34 && !escaped;
         if (escaped) { escaped = false; continue; }
         if (byte === 92) {
-          if (omit) throw historyImageError("image-data-url-invalid");
           escaped = true;
           continue;
         }
-        if (byte === 34) {
+        if (closesString) {
           if (omit) {
-            if (restoreImageUrl && imageData) {
-              const id = restoreHistoryImage(
-                imageStore,
-                imageData.subarray(0, imageDataLength).toString("ascii"),
-              );
-              const marker = Buffer.from(`${PROJECTED_IMAGE_URL_PREFIX}${id}`);
-              if (length + marker.length + 1 > output.length) return undefined;
-              marker.copy(output, length);
-              length += marker.length;
-            } else if (imageData) {
-              deferredImage = {
-                data: imageData,
-                length: imageDataLength,
-                overflow: imageDataOverflow,
-                insertAt: stringStart,
-              };
-            }
+            // Every string-valued data/image_url is replaced, so source values
+            // cannot impersonate these local span keys. The bounded output also
+            // bounds their count; no image bytes are retained while scanning.
+            const key = String(deferredStrings.size);
+            deferredStrings.set(key, {
+              sourceStart: stringSourceStart,
+              sourceEnd: sourceOffset,
+            });
+            if (length + key.length + 1 > output.length) return undefined;
+            length += output.write(key, length, "ascii");
             output[length++] = byte;
           }
           const closedString = length - stringStart < 128
             ? output.subarray(stringStart, length - 1).toString("utf8") : "";
-          if (stringProperty === "type") {
-            objectType = closedString;
-            if (objectType === "input_image" && deferredImage) {
-              if (deferredImage.overflow) throw historyImageError("image-too-large");
-              const id = restoreHistoryImage(
-                imageStore,
-                deferredImage.data.subarray(0, deferredImage.length).toString("ascii"),
-              );
-              const marker = Buffer.from(`${PROJECTED_IMAGE_URL_PREFIX}${id}`);
-              if (length + marker.length > output.length) return undefined;
-              output.copy(output, deferredImage.insertAt + marker.length, deferredImage.insertAt, length);
-              marker.copy(output, deferredImage.insertAt);
-              length += marker.length;
-              deferredImage = undefined;
-            }
-          }
-          lastString = closedString;
+          try { lastString = closedString ? JSON.parse(`"${closedString}"`) as string : ""; }
+          catch { return undefined; }
           lastToken = 34;
           inString = false;
           omit = false;
           stringProperty = "";
-          imageData = undefined;
-          imageDataLength = 0;
-          imageDataOverflow = false;
-        } else if (imageUrl && !omit && length - stringStart === 11 &&
-          output.subarray(stringStart, length).toString("ascii") === "data:image/") {
-          imageData = Buffer.allocUnsafe(MAX_IMAGE_DATA_URL_BYTES);
-          output.subarray(stringStart, length).copy(imageData);
-          imageDataLength = length - stringStart;
-          length = stringStart;
-          omit = true;
         }
       } else if (byte === 34) {
         inString = true;
         stringStart = length;
+        stringSourceStart = sourceOffset + 1;
         stringProperty = lastToken === 58 ? lastString : "";
-        imageUrl = lastToken === 58 && lastString === "image_url";
-        restoreImageUrl = imageUrl && objectType === "input_image";
+        omit = containers.at(-1) === "object" && (stringProperty === "data" || stringProperty === "image_url");
       } else if (byte > 32) {
-        if (byte === 123 || byte === 125) {
-          objectType = "";
-          deferredImage = undefined;
+        if (byte === 123) {
+          if (containers.length >= 512) return undefined;
+          containers.push("object");
+        } else if (byte === 91) {
+          if (containers.length >= 512) return undefined;
+          containers.push("array");
+        } else if (byte === 125) {
+          if (containers.pop() !== "object") return undefined;
+        } else if (byte === 93) {
+          if (containers.pop() !== "array") return undefined;
         }
         lastToken = byte;
       }
     }
   }
-  return output.subarray(0, length).toString("utf8");
+  if (containers.length || inString) return undefined;
+  let record: Record<string, unknown>;
+  try { record = asRecord(JSON.parse(output.subarray(0, length).toString("utf8"))); }
+  catch { return undefined; }
+  const payload = asRecord(record.payload);
+  const tool = isToolActivity(String(payload.type ?? ""));
+  const span = (value: unknown) => typeof value === "string" ? deferredStrings.get(value) : undefined;
+  const isDataImageUrl = (deferred: DeferredString) => readRange(deferred.sourceStart,
+    Math.min(11, deferred.sourceEnd - deferred.sourceStart)).toString("ascii") === "data:image/";
+  const imageUrl = (part: Record<string, unknown>) => {
+    const urlSpan = span(part.image_url);
+    const dataSpan = span(part.data);
+    const deferred = urlSpan ?? (part.type === "image" ? dataSpan : undefined);
+    const encoded = deferred && deferredBytes(deferred, MAX_IMAGE_DATA_URL_BYTES);
+    if (!encoded) throw historyImageError("image-too-large");
+    const value = JSON.parse(`"${encoded.toString("utf8")}"`) as string;
+    return urlSpan || value.startsWith(PROJECTED_IMAGE_URL_PREFIX) ? value
+      : `data:${String(part.mimeType ?? "")};base64,${value}`;
+  };
+  let imageCount = 0;
+  if (tool) {
+    // Classify complete ancestors before reading image bodies. This is exactly
+    // registration's traversal and field order, including its stop at images.
+    record.payload = mapToolOutputImages(payload, (part) => {
+      let marker = `${PROJECTED_IMAGE_URL_PREFIX}invalid`;
+      if (++imageCount <= MAX_TOOL_OUTPUT_IMAGES) {
+        try { marker = `${PROJECTED_IMAGE_URL_PREFIX}${restoreHistoryImage(imageStore, imageUrl(part))}`; }
+        catch { /* Registration marks the invalid stored-image marker incomplete. */ }
+      }
+      return part.type === "image" ? { type: part.type, data: marker, mimeType: part.mimeType }
+        : { type: part.type, image_url: marker };
+    });
+  }
+  let restoredBytes = length;
+  let unsupported = false;
+  const projected = JSON.stringify(record, function (key, value: unknown): unknown {
+    if (!tool && value && typeof value === "object" && !Array.isArray(value)) {
+      const part = value as Record<string, unknown>;
+      // Preserve legacy message input_image recovery, including its errors.
+      const deferred = span(part.image_url);
+      if (part.type === "input_image" && deferred && isDataImageUrl(deferred)) {
+        return { ...part, image_url: `${PROJECTED_IMAGE_URL_PREFIX}${restoreHistoryImage(imageStore, imageUrl(part))}` };
+      }
+    }
+    if (key !== "data" && key !== "image_url") return value;
+    const deferred = span(value);
+    if (!deferred) return value;
+    // Undeclared image_url bytes remain transport-only noise, as before.
+    const size = deferred.sourceEnd - deferred.sourceStart;
+    if (key === "image_url" && isDataImageUrl(deferred)) return "";
+    if (size > MAX_HISTORY_BYTES - restoredBytes) { unsupported = true; return ""; }
+    restoredBytes += size;
+    const encoded = deferredBytes(deferred, size)!;
+    try { return JSON.parse(`"${encoded.toString("utf8")}"`) as string; }
+    catch { unsupported = true; return ""; }
+  });
+  return !unsupported && Buffer.byteLength(projected) + 1 <= MAX_HISTORY_BYTES ? `${projected}\n` : undefined;
 }
 
 function projectToolHistoryRecord(
@@ -880,7 +911,8 @@ function projectToolHistoryRecord(
         stringStart = length;
         property = classifyOnly ? "value"
           : lastToken === 58 && (depth === 2 && ["arguments", "input", "output"].includes(lastString) ||
-            depth === 3 && ["aggregated_output", "formatted_output", "stdout", "stderr"].includes(lastString))
+            depth === 3 && ["toolOutput", "aggregatedOutput", "output", "result", "content",
+              "aggregated_output", "formatted_output", "stdout", "stderr"].includes(lastString))
             ? lastString : "";
       } else if (byte > 32) {
         if (byte === 123 || byte === 91) depth++;
@@ -897,12 +929,8 @@ function projectToolHistoryRecord(
   const isNativeCommand = record.type === "event_msg" && payload.type === "item_completed" &&
     String(nativeCommand.type ?? "").replace(/[_-]/g, "").toLowerCase() === "commandexecution";
   if (isNativeCommand) {
-    const outputProperty = nativeCommand.aggregated_output !== undefined ? "aggregated_output"
-      : nativeCommand.formatted_output !== undefined ? "formatted_output"
-      : typeof nativeCommand.stdout === "string" && nativeCommand.stdout.length > 0 ? "stdout"
-      : nativeCommand.stderr !== undefined ? "stderr"
-      : nativeCommand.stdout !== undefined ? "stdout" : undefined;
-    if (outputProperty && truncated.has(outputProperty)) nativeCommand.outputTruncated = true;
+    const selectedOutput = toolOutputFromProtocol(nativeCommand);
+    if (selectedOutput && truncated.has(selectedOutput.key)) nativeCommand.outputTruncated = true;
     return `${JSON.stringify(record)}\n`;
   }
   if (record.type !== "response_item" ||
