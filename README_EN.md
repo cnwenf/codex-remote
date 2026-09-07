@@ -36,6 +36,12 @@ The native clients reuse the Web conversation UI. Tap **Scan QR** to scan the Ma
 
 Android displays a low-priority foreground notification listing running tasks and sends a completion or failure notification; tapping it opens that connection and task. iOS refreshes and notifies when the operating system grants background execution time. iOS does not guarantee polling intervals; production-grade immediate lock-screen notifications require connecting `CodexRemoteNativePlugin` to APNs.
 
+## Original questions in long conversations
+
+While reading a long answer, the conversation header shows its original question and follows the older turn when you scroll back. The Mac resolves the question by turn and message identity; the phone does not need to load the entire history. Expand long questions in pages. Image-only questions show the image count, and inputs from another task are labeled as delegated. Unconfirmed queued input does not replace the current question.
+
+The first lookup in a large session builds a chunked background index while message history remains paginated. Pending or unknown associations are shown explicitly instead of substituting a question from another turn.
+
 ## Install through a Codex conversation
 
 Copy this prompt into Codex:
