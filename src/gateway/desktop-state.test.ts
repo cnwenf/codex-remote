@@ -644,15 +644,40 @@ describe("DesktopState", () => {
     writeFileSync(rolloutPath, [
       { type: "turn_context", payload: { turn_id: "context-only-turn" } },
       { type: "event_msg", payload: { type: "item_completed", turn_id: "context-only-turn", item: {
-        id: "context-command", type: "CommandExecution", command: "pwd", aggregatedOutput: "/code", status: "completed",
+        id: "context-command", type: "CommandExecution", command: ["/bin/zsh", "-lc", "pwd"], status: "completed",
+        stdout: "/\n", stderr: "", aggregated_output: "/\n", exit_code: 0,
+        duration: { secs: 0, nanos: 1125 }, formatted_output: "/\n",
       } } },
     ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
     const desktop = new DesktopState(databasePath);
     try {
       expect(desktop.request("desktopState/readThread", { threadId: "thread-1" }))
         .toMatchObject({ thread: { status: { type: "idle" }, turns: [{
-          id: "context-only-turn", status: "unknown", items: [{ id: "context-command", type: "commandExecution" }],
+          id: "context-only-turn", status: "unknown", items: [{
+            id: "context-command", type: "commandExecution", toolOutput: "/\n",
+          }],
         }] } });
+    } finally { desktop.close(); }
+  });
+
+  it("projects oversized persisted CommandExecution snake_case output", () => {
+    const { databasePath, rolloutPath } = fixture();
+    writeFileSync(rolloutPath, `${JSON.stringify({
+      type: "event_msg", payload: { type: "task_started", turn_id: "large-command" },
+    })}\n` + '{"type":"event_msg","payload":{"type":"item_completed","turn_id":"large-command","item":' +
+      '{"id":"large-command-item","type":"CommandExecution","command":["/bin/zsh","-lc","large"],' +
+      '"status":"completed","aggregated_output":"');
+    appendFileSync(rolloutPath, "x".repeat(3 * 1024 * 1024));
+    appendFileSync(rolloutPath, '","stdout":"","stderr":"","formatted_output":""}}}\n' + `${JSON.stringify({
+      type: "event_msg", payload: { type: "task_complete", turn_id: "large-command" },
+    })}\n`);
+    const desktop = new DesktopState(databasePath);
+    try {
+      expect(desktop.request("desktopState/readThread", { threadId: "thread-1" }))
+        .toMatchObject({ thread: { turns: [{ id: "large-command", items: [{
+          id: "large-command-item", type: "commandExecution", toolOutput: "x".repeat(16_384),
+          toolOutputTruncated: true,
+        }] }] } });
     } finally { desktop.close(); }
   });
 

@@ -46,7 +46,9 @@ export function toolDetailsFromProtocol(item: Record<string, unknown>): ToolDeta
   if (!isToolActivity(String(item.type ?? "")) && item.toolInput === undefined && item.toolOutput === undefined) return {};
   const inputValue = item.toolInput ?? item.command ?? item.arguments ?? item.input;
   const input = inputValue == null ? undefined : typeof inputValue === "string" ? inputValue : JSON.stringify(inputValue, null, 2);
-  const result = resultText(item.toolOutput ?? item.aggregatedOutput ?? item.output ?? item.result ?? item.content);
+  const snakeOutput = item.aggregated_output ?? item.formatted_output ??
+    (typeof item.stdout === "string" && item.stdout.length > 0 ? item.stdout : item.stderr ?? item.stdout);
+  const result = resultText(item.toolOutput ?? item.aggregatedOutput ?? item.output ?? item.result ?? item.content ?? snakeOutput);
   const error = resultText(item.error);
   const output = result === undefined ? error : error ? `${result}\n${error}` : result;
   const inputTruncated = item.toolInputTruncated === true || item.inputTruncated === true;

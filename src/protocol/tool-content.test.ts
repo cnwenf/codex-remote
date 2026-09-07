@@ -1,12 +1,47 @@
 import { describe, expect, it } from "vitest";
 import { initialCodexState, reduceCodexState } from "./thread-store";
 import { hydrateThread } from "../web/state/conversation-history";
+import { TOOL_TEXT_LIMIT, toolDetailsFromProtocol } from "./tool-content";
 
 function event(state: typeof initialCodexState, method: string, item: Record<string, unknown>) {
   return reduceCodexState(state, { method, params: { threadId: "t", turnId: "turn", item } });
 }
 
 describe("tool details", () => {
+  it.each([
+    { label: "non-empty", aggregated_output: "/\n", expected: "/\n" },
+    { label: "empty", aggregated_output: "", expected: "" },
+  ])("restores $label persisted CommandExecution snake_case output", ({ aggregated_output, expected }) => {
+    expect(toolDetailsFromProtocol({
+      type: "CommandExecution", command: ["/bin/zsh", "-lc", "pwd"], aggregated_output,
+    })).toMatchObject({
+      toolInput: '[\n  "/bin/zsh",\n  "-lc",\n  "pwd"\n]',
+      toolOutput: expected,
+      toolOutputTruncated: false,
+      toolOutputLength: expected.length,
+    });
+  });
+
+  it("uses stderr when a persisted CommandExecution has no aggregate and empty stdout", () => {
+    expect(toolDetailsFromProtocol({
+      type: "CommandExecution", command: ["false"], stdout: "", stderr: "command failed\n",
+    }).toolOutput).toBe("command failed\n");
+  });
+
+  it("keeps existing camelCase CommandExecution output ahead of snake_case fields", () => {
+    expect(toolDetailsFromProtocol({
+      type: "CommandExecution", aggregatedOutput: "camel", aggregated_output: "snake",
+      formatted_output: "formatted", stdout: "stdout", stderr: "stderr",
+    }).toolOutput).toBe("camel");
+  });
+
+  it("bounds persisted CommandExecution snake_case output", () => {
+    const output = "x".repeat(TOOL_TEXT_LIMIT + 1);
+    expect(toolDetailsFromProtocol({ type: "CommandExecution", aggregated_output: output })).toMatchObject({
+      toolOutput: "x".repeat(TOOL_TEXT_LIMIT), toolOutputTruncated: true, toolOutputLength: TOOL_TEXT_LIMIT + 1,
+    });
+  });
+
   it("restores newly available image metadata on a retained completed result without losing text", () => {
     const item = { id: "c", type: "toolCall", toolInput: "view_image", toolOutput: "Screenshot\n[非文本结果]", status: "completed" };
     let state = hydrateThread(initialCodexState, { thread: { id: "t", turns: [{ id: "turn", status: "completed", items: [item] }] } });

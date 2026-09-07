@@ -878,8 +878,10 @@ function projectToolHistoryRecord(
       } else if (byte === 34) {
         inString = true;
         stringStart = length;
-        property = classifyOnly ? "value" : depth === 2 && lastToken === 58 && ["arguments", "input", "output"].includes(lastString)
-          ? lastString : "";
+        property = classifyOnly ? "value"
+          : lastToken === 58 && (depth === 2 && ["arguments", "input", "output"].includes(lastString) ||
+            depth === 3 && ["aggregated_output", "formatted_output", "stdout", "stderr"].includes(lastString))
+            ? lastString : "";
       } else if (byte > 32) {
         if (byte === 123 || byte === 91) depth++;
         if (byte === 125 || byte === 93) depth--;
@@ -891,6 +893,18 @@ function projectToolHistoryRecord(
   try { record = asRecord(JSON.parse(output.subarray(0, length).toString("utf8"))); } catch { return undefined; }
   const payload = asRecord(record.payload);
   if (classifyOnly) return JSON.stringify(record);
+  const nativeCommand = asRecord(payload.item);
+  const isNativeCommand = record.type === "event_msg" && payload.type === "item_completed" &&
+    String(nativeCommand.type ?? "").replace(/[_-]/g, "").toLowerCase() === "commandexecution";
+  if (isNativeCommand) {
+    const outputProperty = nativeCommand.aggregated_output !== undefined ? "aggregated_output"
+      : nativeCommand.formatted_output !== undefined ? "formatted_output"
+      : typeof nativeCommand.stdout === "string" && nativeCommand.stdout.length > 0 ? "stdout"
+      : nativeCommand.stderr !== undefined ? "stderr"
+      : nativeCommand.stdout !== undefined ? "stdout" : undefined;
+    if (outputProperty && truncated.has(outputProperty)) nativeCommand.outputTruncated = true;
+    return `${JSON.stringify(record)}\n`;
+  }
   if (record.type !== "response_item" ||
     !["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"].includes(String(payload.type))) return undefined;
   // Delegation wrappers are messages, not disposable tool-output prefixes.
