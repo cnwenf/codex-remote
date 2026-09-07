@@ -13,11 +13,56 @@ import type {
   TransportDiagnostic,
 } from "../protocol/types";
 import { createGateway } from "./server";
+import { initialCodexState, reduceCodexState } from "../protocol/thread-store";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
+
+describe("active message reconnect", () => {
+  it("restores the raw streaming prefix before new deltas without duplicating a retained client", async () => {
+    const transport = new AlreadyInitializedTransport();
+    const origin = "http://127.0.0.1:4310";
+    const gateway = createGateway({ port: 0, token: "test-token", allowedOrigins: [origin], transport });
+    const address = await gateway.start();
+    const start: RpcMessage = { method: "item/started", params: {
+      threadId: "t", turnId: "turn", item: { id: "a", type: "agentMessage", text: "", phase: "final_answer" },
+    } };
+    const first: RpcMessage = { method: "item/agentMessage/delta", params: {
+      threadId: "t", turnId: "turn", itemId: "a", delta: "**Hello**",
+    } };
+    transport.emit(start);
+    transport.emit(first);
+    const socket = await connect(address, "test-token", origin);
+    await nextJson(socket);
+    try {
+      await vi.waitFor(() => expect(messageQueues.get(socket)).toHaveLength(1));
+      const replay = (await nextJson(socket)).payload;
+      const retained = reduceCodexState(reduceCodexState(initialCodexState, start), first);
+      const retainedDom = reduceCodexState(initialCodexState, { method: "desktop/visibleAgentMessage", params: {
+        threadId: "t", turnId: "turn", itemId: "a", text: "Hello",
+      } });
+      const retainedFragment = reduceCodexState(initialCodexState, { method: "item/agentMessage/delta", params: {
+        threadId: "t", turnId: "turn", itemId: "a", delta: "llo**",
+      } });
+      const next: RpcMessage = { method: "item/agentMessage/delta", params: {
+        threadId: "t", turnId: "turn", itemId: "a", delta: " world",
+      } };
+      transport.emit(next);
+      const streamed = (await nextJson(socket)).payload;
+      for (const previous of [initialCodexState, retained, retainedDom, retainedFragment]) {
+        const state = reduceCodexState(reduceCodexState(previous, replay), streamed);
+        expect(state.threads.t.turns.turn.items.a.text).toBe("**Hello** world");
+        expect(state.threads.t.turns.turn.items.a.phase).toBe("final_answer");
+      }
+    } finally {
+      socket.close();
+      await once(socket, "close");
+      await gateway.stop();
+    }
+  });
+});
 
 class FakeTransport implements CodexTransport {
   sent: RpcMessage[] = [];

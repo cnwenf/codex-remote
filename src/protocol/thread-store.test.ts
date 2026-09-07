@@ -2,6 +2,34 @@ import { describe, expect, it } from "vitest";
 import { initialCodexState, reduceCodexState } from "./thread-store";
 
 describe("reduceCodexState", () => {
+  it("keeps a longer retained raw prefix when reconnect replays an older snapshot", () => {
+    const state = reduceCodexState(initialCodexState, {
+      method: "item/agentMessage/delta",
+      params: { threadId: "t", turnId: "turn", itemId: "a", delta: "**Hello** world" },
+    });
+    const restored = reduceCodexState(state, {
+      method: "gateway/agentMessageSnapshot",
+      params: { threadId: "t", turnId: "turn", itemId: "a", text: "**Hello**" },
+    });
+    expect(restored.threads.t.turns.turn.items.a).toMatchObject({
+      text: "**Hello** world", streamedText: "**Hello** world",
+    });
+  });
+
+  it("does not reopen a completed body when a reconnect snapshot arrives late", () => {
+    const state = reduceCodexState(initialCodexState, {
+      method: "item/completed",
+      params: { threadId: "t", turnId: "turn", item: {
+        id: "a", type: "agentMessage", text: "Done", phase: "final_answer",
+      } },
+    });
+    const restored = reduceCodexState(state, {
+      method: "gateway/agentMessageSnapshot",
+      params: { threadId: "t", turnId: "turn", itemId: "a", text: "Do", phase: "commentary" },
+    });
+    expect(restored.threads.t.turns.turn.items.a).toEqual(state.threads.t.turns.turn.items.a);
+  });
+
   it("preserves the assistant message phase from item notifications", () => {
     const next = reduceCodexState(initialCodexState, {
       method: "item/completed",

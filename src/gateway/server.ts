@@ -32,6 +32,7 @@ import {
 } from "./image-upload-store";
 import { projectMobileStatus } from "./mobile-status";
 import { PairingStore } from "./pairing-store";
+import { ActiveMessageReplay } from "./active-message-replay";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 4 * 1024;
@@ -83,6 +84,7 @@ export function createGateway(options: GatewayOptions) {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4321;
   const router = new RpcRouter();
+  const activeMessages = new ActiveMessageReplay();
   const controllers = new Map<string, WebSocket>();
   let nextControllerId = 1;
   const sessionCredential = createSessionCredential(options.token);
@@ -236,12 +238,17 @@ export function createGateway(options: GatewayOptions) {
     controllers.set(clientId, socket);
     controllerAlive.set(socket, true);
     socket.on("pong", () => controllerAlive.set(socket, true));
-    setImmediate(() => sendEnvelope(socket, {
+    // Seed complete prefixes synchronously before this connection can receive
+    // another live delta. Replaying deltas would duplicate retained clients.
+    sendEnvelope(socket, {
       type: "session",
       state: "ready",
       ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
       ...options.transport.getSessionInfo?.(),
-    }));
+    });
+    for (const snapshot of activeMessages.snapshots()) {
+      sendEnvelope(socket, { type: "rpc", payload: snapshot });
+    }
 
     socket.on("message", (data, isBinary) => {
       if (isBinary || rawDataLength(data) > MAX_FRAME_BYTES) {
@@ -502,6 +509,7 @@ export function createGateway(options: GatewayOptions) {
       }
     }
     updateLiveThreadActivity(message);
+    activeMessages.observe(message);
     if (isRpcRequest(message) && !KNOWN_SERVER_REQUESTS.has(message.method)) {
       options.transport.send({
         id: message.id,

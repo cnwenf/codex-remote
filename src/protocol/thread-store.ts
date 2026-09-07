@@ -77,7 +77,8 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
   const params = asRecord(message.params);
   const threadId = stringValue(params.threadId);
 
-  if (message.method === "item/agentMessage/delta" && threadId) {
+  const isMessageSnapshot = message.method === "gateway/agentMessageSnapshot";
+  if ((message.method === "item/agentMessage/delta" || isMessageSnapshot) && threadId) {
     const itemId = stringValue(params.itemId);
     const delta = stringValue(params.delta) ?? "";
     if (!itemId) return state;
@@ -90,14 +91,24 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           text: "",
         };
         if (previous.textSource === "completed") return turn;
-        const { text, streamedText } = appendAssistantText(previous, delta);
+        const snapshotText = stringValue(params.text) ?? "";
+        // Reconnect carries a raw baseline, not a new delta or Desktop innerText.
+        // Keep a retained longer raw prefix, but replace DOM/fragment fallbacks.
+        const rawText = previous.textSource !== "visible" && previous.text.startsWith(snapshotText)
+          ? previous.text : snapshotText;
+        const { text, streamedText } = isMessageSnapshot
+          ? { text: rawText, streamedText: rawText }
+          : appendAssistantText(previous, delta);
         return {
           ...turn,
           status: "inProgress",
           itemOrder: appendUnique(turn.itemOrder, itemId),
           items: {
             ...turn.items,
-            [itemId]: { ...previous, text, streamedText, textSource: "stream", status: "running" },
+            [itemId]: {
+              ...previous, text, streamedText, textSource: "stream", status: "running",
+              phase: stringValue(params.phase) ?? previous.phase,
+            },
           },
         };
       }, "inProgress", true);
