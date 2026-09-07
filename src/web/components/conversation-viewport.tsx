@@ -25,12 +25,27 @@ export function ConversationViewport({
   children,
 }: ConversationViewportProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const mountedThreadId = useRef<string | undefined>(undefined);
   const followLatest = useRef(true);
   const prependAnchor = useRef<ScrollAnchor | undefined>(undefined);
   const pinnedQuestionRef = useRef<HTMLButtonElement>(null);
   const [pinnedQuestion, setPinnedQuestion] = useState<string>();
   const [questionExpanded, setQuestionExpanded] = useState(false);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (followLatest.current && !prependAnchor.current) viewport.scrollTop = viewport.scrollHeight;
+    });
+    // Images and native details resize after React's layout effect. Composer
+    // expansion also changes the available viewport without a new message.
+    observer.observe(content);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [threadId]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -113,7 +128,13 @@ export function ConversationViewport({
       className="timeline-scroll"
       data-testid="timeline-scroll"
       onScroll={handleScroll}
-      onPointerDown={onInteract}
+      onPointerDown={(event) => {
+        if ((event.target as Element).closest("summary, button, a, input, textarea, select")) {
+          followLatest.current = false;
+          return;
+        }
+        onInteract?.();
+      }}
     >
       {pinnedQuestion ? (
         <button
@@ -136,7 +157,7 @@ export function ConversationViewport({
             ? "继续向上滚动可加载更早内容"
             : "已显示最早内容"}
       </div>
-      {children}
+      <div ref={contentRef}>{children}</div>
     </div>
   );
 }

@@ -1596,6 +1596,29 @@ describe("useCodex", () => {
     });
   });
 
+  it("does not let an in-flight idle snapshot end a newly started turn", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const request = JSON.parse(fake.sent.at(-1) as string).payload;
+    act(() => fake.serverSend({ type: "rpc", payload: {
+      method: "turn/started", params: { threadId: "t1", turn: { id: "new-turn" } },
+    } }));
+    fake.serverSend({ type: "rpc", payload: { id: request.id, result: {
+      desktopMirror: true,
+      thread: { id: "t1", status: "idle", turns: [{ id: "old-turn", status: "completed", items: [
+        { id: "old-answer", type: "agentMessage", text: "旧答案" },
+      ] }] },
+    } } });
+    await act(() => selection);
+    expect(result.current.state.threads.t1.activeTurnId).toBe("new-turn");
+    expect(result.current.state.threads.t1.status).toBe("running");
+    expect(result.current.state.threads.t1.turns["old-turn"].items["old-answer"].text).toBe("旧答案");
+  });
+
   it("prefers a completed resume snapshot over a partial live item with the same id", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

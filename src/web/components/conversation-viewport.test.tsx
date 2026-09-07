@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodexThread } from "../../protocol/thread-store";
 import { ConversationViewport, currentThreadQuestion } from "./conversation-viewport";
@@ -16,11 +16,41 @@ Object.defineProperty(HTMLElement.prototype, "clientHeight", {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   scrollHeight = 1_000;
   clientHeight = 300;
 });
 
 describe("ConversationViewport", () => {
+  it("follows delayed content resizing without dragging a reader away from history", () => {
+    let resize: (() => void) | undefined;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    render(<ConversationViewport threadId="t" history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()}>
+      <div>正文和稍后载入的图片</div>
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+    scrollHeight = 1_400;
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(1_400);
+    viewport.scrollTop = 200;
+    fireEvent.scroll(viewport);
+    scrollHeight = 1_800;
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(200);
+  });
+
+  it("does not move composer controls before an execution summary click completes", () => {
+    const onInteract = vi.fn();
+    render(<ConversationViewport threadId="t" history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={vi.fn()} onInteract={onInteract}>
+      <details><summary>执行过程</summary>工具记录</details>
+    </ConversationViewport>);
+    fireEvent.pointerDown(screen.getByText("执行过程"));
+    expect(onInteract).not.toHaveBeenCalled();
+  });
   it("opens a conversation at its newest content", () => {
     render(
       <ConversationViewport

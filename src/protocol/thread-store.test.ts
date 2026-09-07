@@ -54,7 +54,7 @@ describe("reduceCodexState", () => {
     expect(state.threads.t1.turns["turn-1"].items.i1.text).toBe("hello");
   });
 
-  it("ignores a retransmitted full assistant delta for the same item", () => {
+  it("keeps repeated long chunks because text equality is not an event identity", () => {
     const first = reduceCodexState(initialCodexState, {
       method: "item/agentMessage/delta",
       params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "Full response" },
@@ -64,8 +64,8 @@ describe("reduceCodexState", () => {
       params: { threadId: "t1", turnId: "turn-1", itemId: "agent-1", delta: "Full response" },
     });
 
-    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].text).toBe("Full response");
-    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].streamedText).toBe("Full response");
+    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].text).toBe("Full responseFull response");
+    expect(repeated.threads.t1.turns["turn-1"].items["agent-1"].streamedText).toBe("Full responseFull response");
   });
 
   it("keeps identical short assistant deltas because they can be legitimate tokens", () => {

@@ -81,11 +81,9 @@ test("controller opens a task, streams output, denies approval, and reviews diff
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
   await page.getByRole("button", { name: /^Fixture task，/ }).click();
-  const completedProcess = page.getByText("执行过程（3 项）");
+  const completedProcess = page.locator(".activity-group").first();
   await expect(completedProcess).toBeVisible();
   await expect(page.getByText("Initial inspection complete")).toBeVisible();
-  await expect(page.getByText("I checked the message grouping before running tests.")).not.toBeVisible();
-  await completedProcess.click();
   await expect(page.getByText("I checked the message grouping before running tests.")).toBeVisible();
   await page.getByRole("textbox", { name: "Instruction" }).click();
   await expect(page.getByRole("combobox", { name: "模型" })).toHaveValue("gpt-fixture");
@@ -201,10 +199,10 @@ test("keeps the semantic final reply visible after many tools and late commentar
   await expect(page.locator(".task-status")).toHaveText("空闲");
   const completedTurn = page.locator('[data-turn-id="fixture-live-turn"]').last();
   const finalReply = completedTurn.locator(":scope > .message-agent");
-  await expect(finalReply).toHaveCount(1);
-  await expect(finalReply).toContainText("Semantic final reply remains visible");
-  await expect(completedTurn.getByText("执行过程（10 项）")).toBeVisible();
-  await expect(completedTurn.getByText("Older commentary delivered after completion")).not.toBeVisible();
+  await expect(finalReply).toHaveCount(3);
+  await expect(completedTurn.getByText("Semantic final reply remains visible")).toBeVisible();
+  await expect(completedTurn.getByText("执行过程（8 项）")).toBeVisible();
+  await expect(completedTurn.getByText("Older commentary delivered after completion")).toBeVisible();
 });
 
 test("pins the latest long user question in two lines after it leaves the mobile viewport", async ({ page }, testInfo) => {

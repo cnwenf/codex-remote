@@ -101,7 +101,7 @@ describe("Timeline", () => {
     expect(screen.getByText("pnpm test")).toBeVisible();
   });
 
-  it("collapses every intermediate assistant output into one completed turn process", async () => {
+  it("collapses only tools and reasoning while preserving every assistant output", async () => {
     const thread: CodexThread = {
       id: "completed-process",
       title: "Completed process",
@@ -129,12 +129,13 @@ describe("Timeline", () => {
 
     expect(screen.getByText("把问题修好")).toBeVisible();
     expect(screen.getByText("问题已经修好。")).toBeVisible();
-    expect(screen.getByText("执行过程（4 项）")).toBeVisible();
-    expect(screen.getByText("1 分 2 秒")).toBeVisible();
-    expect(screen.queryByText("我先检查消息分组。")).not.toBeVisible();
-    expect(screen.queryByText("测试已经通过。")).not.toBeVisible();
+    expect(screen.getAllByText("执行过程（1 项）")).toHaveLength(2);
+    expect(screen.queryByText("我先检查消息分组。")).toBeVisible();
+    expect(screen.queryByText("测试已经通过。")).toBeVisible();
+    expect(screen.getByText("先定位根因")).not.toBeVisible();
+    expect(screen.getByText("pnpm test")).not.toBeVisible();
 
-    await userEvent.click(screen.getByText("执行过程（4 项）"));
+    for (const summary of screen.getAllByText("执行过程（1 项）")) await userEvent.click(summary);
 
     expect(screen.getByText("先定位根因")).toBeVisible();
     expect(screen.getByText("我先检查消息分组。")).toBeVisible();
@@ -177,8 +178,6 @@ describe("Timeline", () => {
     render(<Timeline thread={thread} />);
 
     expect(screen.getByText("真正的最终回复")).toBeVisible();
-    expect(screen.getByText("较早但晚到的过程说明")).not.toBeVisible();
-    await userEvent.click(screen.getByText("执行过程（3 项）"));
     expect(screen.getByText("较早但晚到的过程说明")).toBeVisible();
   });
 
@@ -269,7 +268,7 @@ describe("Timeline", () => {
     expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
   });
 
-  it("keeps intermediate assistant text visible until the whole thread is terminal", () => {
+  it("keeps intermediate assistant text visible after the whole thread is terminal", () => {
     const thread: CodexThread = {
       id: "premature-terminal-turn",
       title: "Do not collapse live text",
@@ -296,7 +295,7 @@ describe("Timeline", () => {
     expect(screen.getByLabelText("Codex 仍在输出")).toBeVisible();
 
     rerender(<Timeline thread={{ ...thread, status: "idle" }} />);
-    expect(screen.getByText("我先定位状态同步问题")).not.toBeVisible();
+    expect(screen.getByText("我先定位状态同步问题")).toBeVisible();
     expect(screen.getByText("还在继续检查")).toBeVisible();
   });
 

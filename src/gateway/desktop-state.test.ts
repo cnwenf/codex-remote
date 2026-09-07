@@ -179,6 +179,69 @@ describe("DesktopState", () => {
     state.close();
   });
 
+  it.each([false, true])("preserves long assistant Markdown through persisted records (completion event: %s)", (withCompletion) => {
+    const { databasePath, rolloutPath } = fixture();
+    const text = `# 长回复\n${"正文".repeat(3_000)}\nTHE_END`;
+    appendFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "long" } },
+      ...(withCompletion ? [{ type: "event_msg", payload: { type: "item_completed", turn_id: "long", item: {
+        id: "long-final", type: "AgentMessage", content: [{ type: "Text", text }], phase: "final_answer",
+      } } }] : []),
+      { type: "response_item", payload: { type: "message", id: "long-final", role: "assistant", content: [{ type: "output_text", text }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "long" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(result.thread.turns.at(-1).items[0].text).toBe(text);
+      if (withCompletion) expect(result.thread.turns.at(-1).items[0].phase).toBe("final_answer");
+    } finally { state.close(); }
+  });
+
+  it("attributes legacy assistant records in a bounded tail to their terminal turn", () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "legacy" } },
+      { type: "event_msg", payload: { type: "agent_reasoning", text: "x".repeat(150_000) } },
+      { type: "response_item", payload: { type: "message", id: "legacy-final", role: "assistant", content: [{ type: "output_text", text: "完整旧格式回复" }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "legacy" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      const result = state.request("desktopState/readThread", { threadId: "thread-1", history: { maxBytes: 64 * 1024 } }) as any;
+      expect(result.thread.turns.at(-1)).toMatchObject({ id: "legacy", status: "completed", items: [
+        { id: "legacy-final", type: "agentMessage", text: "完整旧格式回复" },
+      ] });
+    } finally { state.close(); }
+  });
+
+  it("recovers assistant text from item completion records inside a long turn tail", () => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "long-turn" } },
+      { type: "event_msg", payload: { type: "agent_reasoning", text: "x".repeat(150_000) } },
+      { type: "event_msg", payload: { type: "item_completed", turn_id: "long-turn", item: {
+        id: "middle", type: "AgentMessage", phase: "commentary", content: [{ type: "Text", text: "中间正文" }],
+      } } },
+      { type: "event_msg", payload: { type: "item_completed", turn_id: "long-turn", item: {
+        id: "final", type: "AgentMessage", phase: "final_answer", content: [{ type: "Text", text: "# 最终正文" }],
+      } } },
+      { type: "response_item", payload: { type: "message", id: "final", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "# 最终正文" }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "long-turn" } },
+    ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      const result = state.request("desktopState/readThread", {
+        threadId: "thread-1", history: { limitTurns: 8, maxBytes: 64 * 1024 },
+      }) as any;
+      expect(result.thread.turns.at(-1)).toMatchObject({ id: "long-turn", status: "completed", items: [
+        { id: "middle", type: "agentMessage", text: "中间正文", phase: "commentary" },
+        { id: "final", type: "agentMessage", text: "# 最终正文", phase: "final_answer" },
+      ] });
+      expect(result.history.hasMoreBefore).toBe(true);
+    } finally { state.close(); }
+  });
+
   it("keeps the latest Desktop todo list when it predates the paged conversation tail", () => {
     const { databasePath, rolloutPath } = fixture();
     appendFileSync(rolloutPath, JSON.stringify({

@@ -3,6 +3,7 @@ import { dirname, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { permissionStateFromProtocol } from "../protocol/permissions";
 import { displayUserInput } from "../protocol/user-message-identity";
+import { itemText, messageKind } from "../protocol/message-content";
 import { ImageUploadStore } from "./image-upload-store";
 
 const MAX_THREAD_IDS = 100;
@@ -781,6 +782,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
   const order: string[] = [];
   let currentTurnId: string | undefined;
   let pendingUserImageIds: string[] = [];
+  let unassignedItems: ParsedItem[] = [];
   const ensureTurn = (id: string) => {
     let turn = turns.get(id);
     if (!turn) {
@@ -789,6 +791,17 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
       order.push(id);
     }
     return turn;
+  };
+  const upsertItem = (turn: ParsedTurn, item: ParsedItem) => {
+    const index = turn.items.findIndex((candidate) => candidate.id === item.id);
+    if (index < 0) { turn.items.push(item); return; }
+    const previous = turn.items[index];
+    turn.items[index] = {
+      ...previous, ...item,
+      text: previous.text.startsWith(item.text) ? previous.text : item.text,
+      phase: item.phase ?? previous.phase,
+      status: item.status ?? previous.status,
+    };
   };
 
   for (const line of raw.split("\n")) {
@@ -801,6 +814,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     }
     const payload = asRecord(entry.payload);
     if (entry.type === "turn_context") {
+      unassignedItems = [];
       currentTurnId = stringValue(payload.turn_id) ?? currentTurnId;
       if (currentTurnId) ensureTurn(currentTurnId).completeFromTurnStart = true;
       continue;
@@ -808,6 +822,23 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     if (entry.type === "event_msg") {
       const eventType = stringValue(payload.type);
       const turnId = stringValue(payload.turn_id) ?? currentTurnId;
+      if (eventType === "item_completed" && turnId) {
+        // The bounded tail may not contain turn_context/task_started. Desktop
+        // completion records carry their own turn and item identities.
+        currentTurnId = turnId;
+        for (const item of unassignedItems) upsertItem(ensureTurn(turnId), item);
+        unassignedItems = [];
+        const value = asRecord(payload.item);
+        const id = stringValue(value.id);
+        if (id && messageKind(stringValue(value.type) ?? "") === "agent") {
+          const text = itemText(value);
+          if (text) {
+            const turn = ensureTurn(turnId);
+            const item: ParsedItem = { id, type: "agentMessage", text, phase: stringValue(value.phase), status: "completed" };
+            upsertItem(turn, item);
+          }
+        }
+      }
       if (eventType === "user_message") {
         const imageIds = Array.isArray(payload.local_images)
           ? payload.local_images.flatMap((value) => {
@@ -828,6 +859,7 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
         }
       }
       if (eventType === "task_started" && turnId) {
+        unassignedItems = [];
         currentTurnId = turnId;
         const turn = ensureTurn(turnId);
         turn.status = "inProgress";
@@ -835,6 +867,8 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
         turn.startedAt = timestampValue(payload.started_at);
       } else if ((eventType === "task_complete" || eventType === "turn_aborted") && turnId) {
         const turn = ensureTurn(turnId);
+        for (const item of unassignedItems) upsertItem(turn, item);
+        unassignedItems = [];
         turn.status = eventType === "task_complete" ? "completed" : "interrupted";
         turn.completedAt = timestampValue(payload.completed_at);
         turn.durationMs = numberValue(payload.duration_ms);
@@ -858,14 +892,13 @@ function parseRollout(raw: string, imageStore: ImageUploadStore): ParsedTurn[] {
     }
     if (entry.type !== "response_item") continue;
     const itemTurnId = stringValue(asRecord(payload.internal_chat_message_metadata_passthrough).turn_id) ?? currentTurnId;
-    if (!itemTurnId) continue;
     const item = rolloutItem(payload, imageStore, pendingUserImageIds);
     if (!item) continue;
+    if (!itemTurnId) { unassignedItems.push(item); continue; }
+    currentTurnId = itemTurnId;
     if (item.type === "userMessage") pendingUserImageIds = [];
     const turn = ensureTurn(itemTurnId);
-    const index = turn.items.findIndex((candidate) => candidate.id === item.id);
-    if (index >= 0) turn.items[index] = item;
-    else turn.items.push(item);
+    upsertItem(turn, item);
   }
   return order.map((id) => turns.get(id) as ParsedTurn).filter((turn) => turn.items.length > 0);
 }
@@ -898,7 +931,7 @@ function rolloutItem(
     if (role === "user" && contentKinds.length > 0 && !contentKinds.some((kind) => kind.startsWith("user."))) {
       return undefined;
     }
-    const rawText = textContent(payload.content);
+    const rawText = itemText(payload);
     const text = role === "user" ? displayUserInput(rawText) : rawText;
     const persistedImageIds = role === "user"
       ? [...rawText.matchAll(/<image\b[^>]*\bpath=(?:"([^"]+)"|'([^']+)')[^>]*>/gi)]
@@ -914,6 +947,7 @@ function rolloutItem(
       id,
       type: role === "user" ? "userMessage" : "agentMessage",
       text,
+      ...(role === "assistant" ? { status: "completed" } : {}),
       ...(role === "assistant" && stringValue(payload.phase)
         ? { phase: stringValue(payload.phase) }
         : {}),

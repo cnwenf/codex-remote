@@ -1,6 +1,8 @@
 import type { RpcMessage } from "./types";
 import { permissionStateFromProtocol, type PermissionState } from "./permissions";
 import { displayUserInput, sameUserInput } from "./user-message-identity";
+import { appendAssistantText, itemText, messageKind, visibleAssistantText } from "./message-content";
+import { mergeMessageOrder } from "./message-order";
 
 export type ThreadStatus = "running" | "idle" | "error" | "unknown";
 export type TurnStatus = "inProgress" | "completed" | "interrupted" | "failed" | "unknown";
@@ -23,6 +25,7 @@ export type CodexItem = {
   lifecycle?: "pending" | "queued" | "promoting" | "accepted" | "confirmed" | "failed";
   streamedText?: string;
   visibleText?: string;
+  textSource?: "stream" | "visible" | "snapshot" | "completed";
 };
 
 export type CodexTurn = {
@@ -86,19 +89,15 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           type: "agentMessage",
           text: "",
         };
-        const priorStream = previous.streamedText ?? (previous.visibleText === undefined ? previous.text : "");
-        const retransmittedFullDelta = delta.length >= 8 &&
-          previous.streamedText === delta &&
-          previous.text === delta;
-        const streamedText = retransmittedFullDelta ? priorStream : `${priorStream}${delta}`;
-        const text = reconcileAssistantDelta(previous, streamedText, delta);
+        if (previous.textSource === "completed") return turn;
+        const { text, streamedText } = appendAssistantText(previous, delta);
         return {
           ...turn,
           status: "inProgress",
           itemOrder: appendUnique(turn.itemOrder, itemId),
           items: {
             ...turn.items,
-            [itemId]: { ...previous, text, streamedText, status: "running" },
+            [itemId]: { ...previous, text, streamedText, textSource: "stream", status: "running" },
           },
         };
       }, "inProgress", true);
@@ -125,7 +124,8 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
             [itemId]: {
               ...previous,
               type: "agentMessage",
-              text: reconcileVisibleAssistantText(previous, text),
+              text: visibleAssistantText(previous, text),
+              textSource: previous.textSource ?? "visible",
               visibleText: text,
               status: previous.status ?? "running",
             },
@@ -269,12 +269,23 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
   if (message.method === "turn/completed" && threadId) {
     const turnValue = asRecord(params.turn);
     const turnId = stringValue(turnValue.id) ?? stringValue(params.turnId);
-    return updateThread(state, threadId, (thread) => {
+    const recovered = (Array.isArray(turnValue.items) ? turnValue.items : []).reduce<CodexState>(
+      (current, item) => reduceCodexState(current, {
+        method: "item/completed", params: { threadId, turnId, item },
+      }), state,
+    );
+    return updateThread(recovered, threadId, (thread) => {
       const completedTurnId = turnId ?? thread.activeTurnId;
       const next = completedTurnId
         ? updateTurn(thread, completedTurnId, (turn) => ({
             ...turn,
             status: normalizeTurnStatus(turnValue.status, "completed"),
+            itemOrder: mergeMessageOrder(turn.itemOrder,
+              (Array.isArray(turnValue.items) ? turnValue.items : []).flatMap((item) => {
+                const id = stringValue(asRecord(item).id);
+                return id ? [id] : [];
+              }),
+            ),
             completedAt: numberValue(turnValue.completedAt) ?? turn.completedAt,
             durationMs: numberValue(turnValue.durationMs) ?? turn.durationMs,
           }))
@@ -347,7 +358,10 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
       const baseThread = removeItemFromOtherTurns(withoutOptimistic, turnId, itemId);
       return updateTurn(baseThread, turnId, (turn) => {
         const previous = turn.items[itemId];
-        const resolvedText = text || previous?.text || "";
+        if (message.method === "item/started" && previous?.textSource === "completed") return turn;
+        const completed = message.method === "item/completed";
+        const resolvedText = completed || messageKind(itemType) !== "agent" ? text || previous?.text || ""
+          : previous?.text && !text.startsWith(previous.text) ? previous.text : text || previous?.text || "";
         const nextItems = { ...turn.items };
         const imageIds = [...new Set([
           ...(previous?.imageIds ?? []),
@@ -355,9 +369,11 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           ...stringArray(item.imageIds),
         ])];
         nextItems[itemId] = {
+          ...previous,
           id: itemId,
           type: itemType,
           text: resolvedText,
+          textSource: messageKind(itemType) === "agent" && completed && text ? "completed" : previous?.textSource,
           phase: stringValue(item.phase) ?? previous?.phase,
           clientMessageId: clientMessageId ?? previous?.clientMessageId ?? reconciledMatch?.item.clientMessageId,
           lifecycle: isUserMessageType(itemType) ? "confirmed" : previous?.lifecycle,
@@ -405,7 +421,12 @@ function updateTurn(
 ): CodexThread {
   const current = thread.turns[turnId] ?? emptyTurn(turnId, initialStatus);
   const terminal = isTerminalTurnStatus(current.status);
+  const activeIndex = thread.activeTurnId ? thread.turnOrder.indexOf(thread.activeTurnId) : -1;
+  const incomingIndex = thread.turnOrder.indexOf(turnId);
+  const canBecomeActive = markRunning && !terminal &&
+    (incomingIndex < 0 || activeIndex < 0 || incomingIndex >= activeIndex);
   const updated = update(current);
+  if (updated === current) return thread;
   const normalized = terminal || isTerminalTurnStatus(updated.status)
     ? {
         ...updated,
@@ -420,15 +441,19 @@ function updateTurn(
     : updated;
   return {
     ...thread,
-    status: markRunning && !terminal ? "running" : thread.status,
-    activeTurnId: markRunning && !terminal ? turnId : thread.activeTurnId,
+    status: canBecomeActive ? "running" : thread.status,
+    activeTurnId: canBecomeActive ? turnId : thread.activeTurnId,
     turnOrder: appendUnique(thread.turnOrder, turnId),
     turns: { ...thread.turns, [turnId]: normalized },
   };
 }
 
 function resolveTurnId(thread: CodexThread, params: Record<string, unknown>) {
-  return stringValue(params.turnId) ?? thread.activeTurnId ?? `live-${thread.id}`;
+  const explicit = stringValue(params.turnId);
+  if (explicit) return explicit;
+  const itemId = stringValue(params.itemId) ?? stringValue(asRecord(params.item).id);
+  const knownTurn = itemId ? thread.turnOrder.find((id) => thread.turns[id]?.items[itemId]) : undefined;
+  return knownTurn ?? thread.activeTurnId ?? `live-${thread.id}`;
 }
 
 function emptyThread(id: string): CodexThread {
@@ -548,27 +573,6 @@ function messageIdentity(item: Record<string, unknown>) {
     stringValue(item.client_message_id);
 }
 
-function reconcileAssistantDelta(previous: CodexItem, streamedText: string, delta: string) {
-  const visibleText = previous.visibleText;
-  if (visibleText === undefined) return streamedText;
-  const normalizedStream = streamedText.trim();
-  if (normalizedStream && visibleText.includes(normalizedStream)) return visibleText;
-  if (streamedText.includes(visibleText)) return streamedText;
-  const priorStream = previous.streamedText ?? "";
-  if (priorStream && visibleText.startsWith(priorStream)) {
-    return visibleText.endsWith(delta) ? visibleText : `${visibleText}${delta}`;
-  }
-  if (visibleText.endsWith(delta)) return visibleText;
-  return streamedText.length > visibleText.length ? streamedText : visibleText;
-}
-
-function reconcileVisibleAssistantText(previous: CodexItem, visibleText: string) {
-  const streamedText = previous.streamedText;
-  if (!streamedText) return visibleText;
-  if (visibleText.startsWith(streamedText)) return visibleText;
-  if (streamedText.startsWith(visibleText)) return streamedText;
-  return visibleText.length >= streamedText.length ? visibleText : streamedText;
-}
 
 function isTerminalTurnStatus(status: TurnStatus | undefined) {
   return status === "completed" || status === "interrupted" || status === "failed";
@@ -679,31 +683,4 @@ function normalizeTurnStatus(value: unknown, fallback: TurnStatus = "unknown"): 
     value === "inProgress" || value === "completed" || value === "interrupted" || value === "failed"
   ) return value;
   return fallback;
-}
-
-function itemText(item: Record<string, unknown>) {
-  const direct = stringValue(item.text) ?? stringValue(item.command) ?? stringValue(item.query);
-  if (direct) return direct;
-  const content = item.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => typeof part === "string" ? part : stringValue(asRecord(part).text) ?? "")
-      .filter(Boolean)
-      .join("\n");
-  }
-  const summary = item.summary;
-  if (Array.isArray(summary)) return summary.filter((part): part is string => typeof part === "string").join("\n");
-  if (stringValue(item.tool)) {
-    const server = stringValue(item.server);
-    return server ? `${server} / ${stringValue(item.tool)}` : stringValue(item.tool) ?? "";
-  }
-  const changes = item.changes;
-  if (Array.isArray(changes)) {
-    return changes
-      .map((change) => stringValue(asRecord(change).path) ?? stringValue(asRecord(change).filePath) ?? "")
-      .filter(Boolean)
-      .join("\n");
-  }
-  return "";
 }

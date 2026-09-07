@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-store";
+import { messageKind } from "../../protocol/message-content";
 
 type ImageRequest = { baseUrl: string; token: string };
 type ImagePreview = { source: string; alt: string };
@@ -85,57 +86,6 @@ function TurnView({
 }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const segments = segmentItems(items);
-  const completedLayout = showTyping ? undefined : completedTurnLayout(segments, turn.status);
-
-  if (completedLayout) {
-    return (
-      <li className="conversation-turn" data-turn-id={turn.id}>
-        {completedLayout.leading.map((segment) => (
-          <MessageSegment
-            key={segment.item.id}
-            segment={segment}
-            imageRequest={imageRequest}
-            onPreviewImage={onPreviewImage}
-            onOpenExternalUrl={onOpenExternalUrl}
-          />
-        ))}
-        {completedLayout.process.length > 0 ? (
-          <details className="activity-group turn-process-group">
-            <summary>
-              <span className={`run-indicator run-${turn.status === "failed" ? "failed" : "completed"}`} aria-hidden="true" />
-              <span>执行过程（{segmentItemCount(completedLayout.process)} 项）</span>
-              <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
-            </summary>
-            <div className="turn-process-content">
-              {completedLayout.process.map((segment) => (
-                segment.kind === "activity" ? (
-                  <ol className="activity-list" key={segment.key}>
-                    {segment.items.map((item) => <ActivityItem key={item.id} item={item} />)}
-                  </ol>
-                ) : (
-                  <MessageSegment
-                    key={segment.item.id}
-                    segment={segment}
-                    imageRequest={imageRequest}
-                    onPreviewImage={onPreviewImage}
-                    onOpenExternalUrl={onOpenExternalUrl}
-                  />
-                )
-              ))}
-            </div>
-          </details>
-        ) : null}
-        {completedLayout.final ? (
-          <MessageSegment
-            segment={completedLayout.final}
-            imageRequest={imageRequest}
-            onPreviewImage={onPreviewImage}
-            onOpenExternalUrl={onOpenExternalUrl}
-          />
-        ) : null}
-      </li>
-    );
-  }
 
   return (
     <li className="conversation-turn" data-turn-id={turn.id}>
@@ -311,50 +261,17 @@ type TurnSegment =
 
 type MessageTurnSegment = Extract<TurnSegment, { kind: "user" | "agent" }>;
 
-function completedTurnLayout(segments: TurnSegment[], status: CodexTurn["status"]) {
-  if (status === "inProgress" || status === "unknown") return undefined;
-  let finalIndex = -1;
-  for (let index = segments.length - 1; index >= 0; index -= 1) {
-    const segment = segments[index];
-    if (segment.kind !== "agent" || !isFinalAnswerPhase(segment.item.phase)) continue;
-    finalIndex = index;
-    break;
-  }
-  if (finalIndex < 0) {
-    for (let index = segments.length - 1; index >= 0; index -= 1) {
-      if (segments[index].kind !== "agent") continue;
-      finalIndex = index;
-      break;
-    }
-  }
-  let processStart = 0;
-  while (processStart < segments.length && segments[processStart].kind === "user") processStart += 1;
-  const process = segments.filter((_, index) => index >= processStart && index !== finalIndex);
-  return {
-    leading: segments.slice(0, processStart) as MessageTurnSegment[],
-    process,
-    final: finalIndex >= 0 ? segments[finalIndex] as MessageTurnSegment : undefined,
-  };
-}
-
-function isFinalAnswerPhase(phase?: string) {
-  return phase?.replace(/[_-]/g, "").toLocaleLowerCase() === "finalanswer";
-}
-
-function segmentItemCount(segments: TurnSegment[]) {
-  return segments.reduce((count, segment) => count + (segment.kind === "activity" ? segment.items.length : 1), 0);
-}
 
 function segmentItems(items: CodexItem[]): TurnSegment[] {
   const segments: TurnSegment[] = [];
   for (const item of items) {
-    if (item.type === "todoList" || item.type === "todo-list") continue;
-    const value = item.type.toLocaleLowerCase();
-    if (value.includes("user")) {
+    const kind = messageKind(item.type);
+    if (kind === "plan") continue;
+    if (kind === "user") {
       segments.push({ kind: "user", item });
       continue;
     }
-    if (value.includes("agentmessage")) {
+    if (kind === "agent") {
       segments.push({ kind: "agent", item });
       continue;
     }

@@ -3,14 +3,14 @@ import {
   initialCodexState,
   markCodexStateStale,
   reduceCodexState,
-  todoItems,
   type CodexState,
   type CodexThread,
-  type CodexTurn,
   type ThreadStatus,
   type TurnStatus,
 } from "../../protocol/thread-store";
 import { displayUserInput, sameUserInput } from "../../protocol/user-message-identity";
+import { itemText } from "../../protocol/message-content";
+import { hydrateThread, sameUserMessage } from "./conversation-history";
 import { isRpcRequest, type RpcRequest } from "../../protocol/types";
 import {
   permissionModeOptions,
@@ -58,8 +58,9 @@ export class ConversationReconciler {
     state: CodexState,
     value: unknown,
     placement: "snapshot" | "prepend" | "append" = "snapshot",
+    closeRetainedTurns = true,
   ) {
-    return hydrateThread(state, value, placement);
+    return hydrateThread(state, value, placement, closeRetainedTurns);
   }
 
   stageUserMessage(
@@ -113,7 +114,7 @@ export class ConversationReconciler {
         if (!type.includes("user")) continue;
         next = this.confirmQueuedMessage(next, {
           threadId,
-          text: displayUserInput(extractItemText(item)),
+          text: displayUserInput(itemText(item)),
           clientMessageId: stringValue(item.clientMessageId) ??
             stringValue(item.clientUserMessageId) ??
             stringValue(item.client_message_id),
@@ -221,6 +222,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const desktopControlAvailable = transportMode === "desktop-live" && !transportReadOnly;
   const catalogRequestVersion = useRef(0);
   const selectionRequestVersion = useRef(0);
+  const liveRevisions = useRef(new Map<string, number>());
   const historyLoads = useRef(new Set<string>());
   const desktopHistoryThreads = useRef(new Set<string>());
   const optimisticItemSequence = useRef(0);
@@ -229,13 +231,21 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const reconcileSnapshot = useCallback((
     value: unknown,
     placement: "snapshot" | "prepend" | "append" = "snapshot",
+    requestedRevision?: number,
   ) => {
-    setState((current) => reconciler.hydrate(current, value, placement));
+    const threadId = stringValue(asRecord(asRecord(value).thread ?? value).id);
+    setState((current) => reconciler.hydrate(current, value, placement,
+      requestedRevision === undefined || requestedRevision === (liveRevisions.current.get(threadId ?? "") ?? 0),
+    ));
     setQueuedByThread((current) => reconciler.confirmQueuedFromSnapshot(current, value));
   }, [reconciler]);
 
   useEffect(() => {
     const unsubscribeRpc = socket.subscribe((message) => {
+      if ("method" in message) {
+        const id = stringValue(asRecord(message.params).threadId);
+        if (id) liveRevisions.current.set(id, (liveRevisions.current.get(id) ?? 0) + 1);
+      }
       if (isRpcRequest(message)) {
         setPendingRequests((current) => [...current, message]);
         return;
@@ -502,6 +512,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const selectThread = useCallback(
     async (threadId: string) => {
       const version = ++selectionRequestVersion.current;
+      const requestedRevision = liveRevisions.current.get(threadId) ?? 0;
       const preserveDesktopHistory = desktopHistoryThreads.current.has(threadId);
       let desktopMirrorLoaded = false;
       setSelectedThreadId(threadId);
@@ -520,7 +531,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
           }
           if (mirror !== undefined) {
             if (version === selectionRequestVersion.current) {
-              reconcileSnapshot(mirror, preserveDesktopHistory ? "append" : "snapshot");
+              reconcileSnapshot(mirror, preserveDesktopHistory ? "append" : "snapshot", requestedRevision);
               setThreadHistory((current) => ({
                 ...current,
                 [threadId]: preserveDesktopHistory
@@ -538,7 +549,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         }
         const result = await socket.request("thread/resume", { threadId });
         if (version === selectionRequestVersion.current) {
-          reconcileSnapshot(result);
+          reconcileSnapshot(result, "snapshot", requestedRevision);
           setThreadHistory((current) => ({ ...current, [threadId]: emptyThreadHistory }));
           desktopHistoryThreads.current.delete(threadId);
         }
@@ -558,7 +569,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
             history: HISTORY_PAGE,
           });
           if (version === selectionRequestVersion.current) {
-            reconcileSnapshot(mirror, preserveDesktopHistory ? "append" : "snapshot");
+            reconcileSnapshot(mirror, preserveDesktopHistory ? "append" : "snapshot", requestedRevision);
             setThreadHistory((current) => ({
               ...current,
               [threadId]: preserveDesktopHistory
@@ -618,15 +629,23 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     if (
       connection !== "ready" || !selectedThreadId || !selectedDesktopMirror
     ) return;
+    let cancelled = false;
+    let pending = false;
     const timer = window.setInterval(() => {
+      if (pending) return;
+      pending = true;
+      const requestedRevision = liveRevisions.current.get(selectedThreadId) ?? 0;
       void socket.request("desktopState/readThread", {
         threadId: selectedThreadId,
         history: { ...HISTORY_PAGE, limitTurns: 1 },
       })
-        .then((value) => reconcileSnapshot(value, "append"))
-        .catch(() => undefined);
+        .then((value) => {
+          if (!cancelled) reconcileSnapshot(value, "append", requestedRevision);
+        })
+        .catch(() => undefined)
+        .finally(() => { pending = false; });
     }, 2_000);
-    return () => window.clearInterval(timer);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [connection, reconcileSnapshot, selectedDesktopMirror, selectedThreadId, socket]);
 
   const clearSelection = useCallback(() => setSelectedThreadId(undefined), []);
@@ -1318,340 +1337,6 @@ function isNoActiveTurnToStop(cause: unknown) {
   return cause instanceof Error && /no\s+active\s+turn(?:\s+to\s+stop)?/i.test(cause.message);
 }
 
-function hydrateThread(
-  state: CodexState,
-  value: unknown,
-  placement: "snapshot" | "prepend" | "append" = "snapshot",
-): CodexState {
-  const outer = asRecord(value);
-  const record = asRecord(outer.thread ?? value);
-  const id = stringValue(record.id);
-  if (!id) return state;
-  const current = state.threads[id] ?? emptyThread(id);
-  const hydratedTurns: Record<string, CodexTurn> = { ...current.turns };
-  let latestTodoList = current.todoList;
-  const recordTodoList = asRecord(record.todoList);
-  const recordTodoItems = todoItems(recordTodoList.plan);
-  if (recordTodoItems.length > 0) {
-    latestTodoList = {
-      explanation: stringValue(recordTodoList.explanation),
-      items: recordTodoItems,
-    };
-  }
-  const snapshotTurnOrder: string[] = [];
-  const snapshotFallbackItemKeys = new Set<string>();
-  let snapshotHasInProgressTurn = false;
-  const turnValues = Array.isArray(record.turns) ? record.turns : [];
-  for (const turnValue of turnValues) {
-    const turnRecord = asRecord(turnValue);
-    const turnId = stringValue(turnRecord.id);
-    if (!turnId) continue;
-    snapshotTurnOrder.push(turnId);
-    const existing = current.turns[turnId];
-    const snapshotStatus = normalizeTurnStatus(turnRecord.status);
-    if (snapshotStatus === "inProgress") snapshotHasInProgressTurn = true;
-    const snapshotTerminal = isTerminalTurnStatus(snapshotStatus);
-    const snapshotItems: CodexTurn["items"] = {};
-    const snapshotItemOrder: string[] = [];
-    for (const itemValue of Array.isArray(turnRecord.items) ? turnRecord.items : []) {
-      const item = asRecord(itemValue);
-      const itemId = stringValue(item.id);
-      if (!itemId) continue;
-      const itemType = stringValue(item.type) ?? "item";
-      if (itemType === "todoList" || itemType === "todo-list") {
-        const items = todoItems(item.plan);
-        if (items.length > 0) {
-          latestTodoList = {
-            turnId,
-            explanation: stringValue(item.explanation),
-            items,
-          };
-        }
-      }
-      snapshotItemOrder.push(itemId);
-      const snapshotItem: CodexTurn["items"][string] = {
-        id: itemId,
-        type: itemType,
-        text: extractItemText(item),
-        phase: stringValue(item.phase),
-        clientMessageId: stringValue(item.clientMessageId) ??
-          stringValue(item.clientUserMessageId) ??
-          stringValue(item.client_message_id),
-        lifecycle: itemType.toLocaleLowerCase().includes("user") ? "confirmed" : undefined,
-        status: stringValue(item.status),
-        imageIds: stringArray(item.imageIds),
-      };
-      snapshotItems[itemId] = snapshotItem;
-      const previousItem = existing?.items[itemId];
-      if (
-        placement !== "prepend" &&
-        isUserMessage(snapshotItem) &&
-        (!previousItem ||
-          !sameUserMessage(previousItem, snapshotItem) ||
-          previousItem.clientMessageId !== snapshotItem.clientMessageId)
-      ) {
-        snapshotFallbackItemKeys.add(`${turnId}\0${itemId}`);
-      }
-    }
-    const items = { ...snapshotItems };
-    const snapshotTurnIsComplete = turnRecord.completeFromTurnStart === true;
-    const reconciledExistingIds = new Set<string>();
-    for (const snapshotItemId of snapshotItemOrder) {
-      const snapshotItem = snapshotItems[snapshotItemId];
-      if (!snapshotItem || existing?.items[snapshotItemId] || !isUserMessage(snapshotItem)) continue;
-      const liveItemId = existing?.itemOrder.find((existingItemId) => {
-        if (reconciledExistingIds.has(existingItemId) || snapshotItems[existingItemId]) return false;
-        const liveItem = existing.items[existingItemId];
-        const stableIdentity = Boolean(
-          snapshotItem.clientMessageId &&
-          liveItem?.clientMessageId === snapshotItem.clientMessageId,
-        );
-        return Boolean(liveItem) &&
-          !isOptimisticUserMessage(existingItemId, liveItem) &&
-          (stableIdentity || snapshotTurnIsComplete) &&
-          sameUserMessage(snapshotItem, liveItem);
-      });
-      if (!liveItemId || !existing) continue;
-      reconciledExistingIds.add(liveItemId);
-      items[snapshotItemId] = {
-        ...mergeHydratedItem(snapshotItem, existing.items[liveItemId], snapshotTerminal),
-        id: snapshotItemId,
-        lifecycle: "confirmed",
-      };
-    }
-    const retainedExistingOrder: string[] = [];
-    for (const [itemId, existingItem] of Object.entries(existing?.items ?? {})) {
-      if (reconciledExistingIds.has(itemId)) continue;
-      items[itemId] = mergeHydratedItem(snapshotItems[itemId], existingItem, snapshotTerminal);
-      retainedExistingOrder.push(itemId);
-    }
-    const existingTerminal = existing ? isTerminalTurnStatus(existing.status) : false;
-    hydratedTurns[turnId] = {
-      id: turnId,
-      status: existingTerminal
-        ? existing.status
-        : snapshotTerminal
-        ? snapshotStatus
-        : existing?.status === "inProgress"
-          ? existing.status
-          : snapshotStatus,
-      itemOrder: appendMissing(snapshotItemOrder, retainedExistingOrder),
-      items,
-      startedAt: existing?.startedAt ?? numberValue(turnRecord.startedAt),
-      completedAt: snapshotTerminal
-        ? numberValue(turnRecord.completedAt) ?? existing?.completedAt
-        : existing?.completedAt ?? numberValue(turnRecord.completedAt),
-      durationMs: snapshotTerminal
-        ? numberValue(turnRecord.durationMs) ?? existing?.durationMs
-        : existing?.durationMs ?? numberValue(turnRecord.durationMs),
-    };
-  }
-  const initialTurnOrder = placement === "append"
-    ? appendMissing(current.turnOrder, snapshotTurnOrder)
-    : appendMissing(snapshotTurnOrder, current.turnOrder);
-  const snapshotStatus = normalizeStatus(record.status, current.status);
-  if (
-    placement !== "prepend" &&
-    outer.desktopMirror === true &&
-    snapshotStatus === "idle" &&
-    !snapshotHasInProgressTurn
-  ) {
-    for (const turnId of initialTurnOrder) {
-      const turn = hydratedTurns[turnId];
-      if (!turn || turn.status !== "inProgress") continue;
-      hydratedTurns[turnId] = completeRetainedTurn(turn);
-    }
-  }
-  const deduplicated = dedupeOptimisticUserMessages(
-    hydratedTurns,
-    initialTurnOrder,
-    snapshotFallbackItemKeys,
-  );
-  const deduplicatedTurns = deduplicated.turns;
-  const turnOrder = deduplicated.turnOrder;
-  const activeTurnId = [...turnOrder].reverse().find(
-    (turnId) => deduplicatedTurns[turnId]?.status === "inProgress",
-  );
-  for (const turnId of turnOrder) {
-    const turn = deduplicatedTurns[turnId];
-    if (!turn || turnId === activeTurnId || turn.status !== "inProgress") continue;
-    deduplicatedTurns[turnId] = completeRetainedTurn(turn);
-  }
-  const reconciledStatus = activeTurnId
-    ? "running"
-    : current.status === "idle" && snapshotStatus === "running" &&
-        snapshotTurnOrder.length > 0 &&
-        !snapshotTurnOrder.some((turnId) => deduplicatedTurns[turnId]?.status === "inProgress")
-      ? "idle"
-      : snapshotStatus;
-  const reconciledTodoList = latestTodoList &&
-      !latestTodoList.items.every((item) => item.status === "completed") &&
-      (!latestTodoList.turnId || !isTerminalTurnStatus(deduplicatedTurns[latestTodoList.turnId]?.status))
-    ? latestTodoList
-    : undefined;
-  return {
-    ...state,
-    stale: false,
-    threadOrder: state.threadOrder.includes(id) ? state.threadOrder : [id, ...state.threadOrder],
-    threads: {
-      ...state.threads,
-      [id]: {
-        ...current,
-        title: stringValue(record.name) ?? stringValue(record.title) ?? current.title,
-        cwd: stringValue(record.cwd) ?? current.cwd,
-        projectId: stringValue(record.projectId) ?? stringValue(outer.projectId) ?? current.projectId,
-        projectName: stringValue(record.projectName) ?? stringValue(outer.projectName) ?? current.projectName,
-        projectRootPaths:
-          stringArray(record.projectRootPaths) ?? stringArray(outer.projectRootPaths) ?? current.projectRootPaths,
-        status: reconciledStatus,
-        turns: deduplicatedTurns,
-        turnOrder,
-        activeTurnId,
-        model: stringValue(outer.model) ?? current.model,
-        reasoningEffort:
-          stringValue(outer.reasoningEffort) ?? stringValue(outer.effort) ?? current.reasoningEffort,
-        ...permissionStateFromProtocol(outer, current),
-        sectionId: stringValue(asRecord(record.section).id) ?? current.sectionId,
-        sectionName: stringValue(asRecord(record.section).name) ?? current.sectionName,
-        desktopMirror: outer.desktopMirror === true,
-        todoList: reconciledTodoList,
-      },
-    },
-  };
-}
-
-function completeRetainedTurn(turn: CodexTurn): CodexTurn {
-  return {
-    ...turn,
-    status: "completed",
-    items: Object.fromEntries(Object.entries(turn.items).map(([itemId, item]) => [
-      itemId,
-      item.status === "running" || item.status === "inProgress"
-        ? { ...item, status: "completed" }
-        : item,
-    ])),
-  };
-}
-
-function sameUserMessage(
-  left: CodexTurn["items"][string],
-  right: CodexTurn["items"][string],
-) {
-  if (
-    left.clientMessageId &&
-    right.clientMessageId &&
-    left.clientMessageId !== right.clientMessageId &&
-    left.lifecycle !== "pending" &&
-    right.lifecycle !== "pending"
-  ) return false;
-  if (!isUserMessage(left) || !isUserMessage(right) || !sameUserInput(
-    left.text,
-    right.text,
-    Boolean(left.imageIds?.length),
-    Boolean(right.imageIds?.length),
-  )) {
-    return false;
-  }
-  const leftImages = left.imageIds ?? [];
-  const rightImages = right.imageIds ?? [];
-  return leftImages.length === 0 || rightImages.length === 0 || (
-    leftImages.length === rightImages.length &&
-    leftImages.every((value, index) => value === rightImages[index])
-  );
-}
-
-function dedupeOptimisticUserMessages(
-  turns: Record<string, CodexTurn>,
-  turnOrder: string[],
-  snapshotFallbackItemKeys: Set<string>,
-) {
-  let next = turns;
-  let nextTurnOrder = turnOrder;
-  const authoritative = turnOrder.flatMap((turnId) => {
-    const turn = turns[turnId];
-    return (turn?.itemOrder ?? []).flatMap((itemId) => {
-      const item = turn.items[itemId];
-      return item && !isOptimisticUserMessage(itemId, item) && isUserMessage(item)
-        ? [{ turnId, itemId, item }]
-        : [];
-    });
-  });
-  const optimistic = turnOrder.flatMap((turnId) => {
-    const turn = turns[turnId];
-    return (turn?.itemOrder ?? []).flatMap((itemId) => {
-      const item = turn.items[itemId];
-      return item && isOptimisticUserMessage(itemId, item) && isUserMessage(item)
-        ? [{ turnId, itemId, item }]
-        : [];
-    });
-  });
-  const usedAuthoritative = new Set<string>();
-  const matches = new Map<string, (typeof authoritative)[number]>();
-  const keyOf = ({ turnId, itemId }: { turnId: string; itemId: string }) => `${turnId}\0${itemId}`;
-  for (const candidate of optimistic) {
-    if (!candidate.item.clientMessageId) continue;
-    const match = authoritative.find((value) =>
-      !usedAuthoritative.has(keyOf(value)) &&
-      value.item.clientMessageId === candidate.item.clientMessageId &&
-      sameUserMessage(value.item, candidate.item)
-    );
-    if (!match) continue;
-    matches.set(keyOf(candidate), match);
-    usedAuthoritative.add(keyOf(match));
-  }
-  for (const candidate of optimistic) {
-    if (matches.has(keyOf(candidate))) continue;
-    const match = authoritative.find((value) =>
-      snapshotFallbackItemKeys.has(keyOf(value)) &&
-      !usedAuthoritative.has(keyOf(value)) &&
-      sameUserMessage(value.item, candidate.item)
-    );
-    if (!match) continue;
-    matches.set(keyOf(candidate), match);
-    usedAuthoritative.add(keyOf(match));
-  }
-  for (const candidate of optimistic) {
-    const match = matches.get(keyOf(candidate));
-    if (!match) continue;
-    const sourceTurn = next[candidate.turnId];
-    const sourceItems = { ...sourceTurn.items };
-    delete sourceItems[candidate.itemId];
-    const sourceItemOrder = sourceTurn.itemOrder.filter((id) => id !== candidate.itemId);
-    if (candidate.turnId.startsWith("web-start-turn-") && sourceItemOrder.length === 0) {
-      const withoutSource = { ...next };
-      delete withoutSource[candidate.turnId];
-      next = withoutSource;
-      nextTurnOrder = nextTurnOrder.filter((turnId) => turnId !== candidate.turnId);
-    } else {
-      next = {
-        ...next,
-        [candidate.turnId]: {
-          ...sourceTurn,
-          itemOrder: sourceItemOrder,
-          items: sourceItems,
-        },
-      };
-    }
-    if (candidate.item.imageIds?.length && !match.item.imageIds?.length) {
-      const targetTurn = next[match.turnId];
-      next = {
-        ...next,
-        [match.turnId]: {
-          ...targetTurn,
-          items: {
-            ...targetTurn.items,
-            [match.itemId]: { ...targetTurn.items[match.itemId], imageIds: candidate.item.imageIds },
-          },
-        },
-      };
-    }
-  }
-  return { turns: next, turnOrder: nextTurnOrder };
-}
-
-function isUserMessage(item: CodexTurn["items"][string]) {
-  return item.type.toLocaleLowerCase().includes("user");
-}
 
 function historyState(value: unknown): ThreadHistoryState {
   const history = asRecord(asRecord(value).history);
@@ -1684,41 +1369,11 @@ function mergeDesktopThreadList(appServerValue: unknown, desktopValue: unknown) 
   };
 }
 
-function mergeHydratedItem(
-  snapshot: CodexTurn["items"][string] | undefined,
-  live: CodexTurn["items"][string],
-  snapshotTerminal: boolean,
-) {
-  if (!snapshot) return live;
-  let text = live.text;
-  if (snapshot.text.startsWith(live.text)) text = snapshot.text;
-  else if (live.text.startsWith(snapshot.text)) text = live.text;
-  else if (snapshotTerminal && snapshot.text) text = snapshot.text;
-  const imageIds = [...new Set([...(snapshot.imageIds ?? []), ...(live.imageIds ?? [])])];
-  return {
-    ...snapshot,
-    ...live,
-    text,
-    phase: live.phase ?? snapshot.phase,
-    ...(imageIds.length > 0 ? { imageIds } : {}),
-    status: snapshotTerminal ? snapshot.status ?? "completed" : live.status ?? snapshot.status,
-  };
-}
 
 function isTerminalTurnStatus(status: TurnStatus) {
   return status === "completed" || status === "interrupted" || status === "failed";
 }
 
-function isOptimisticUserMessage(itemId: string, item: CodexTurn["items"][string]) {
-  return itemId.startsWith("web-steer-") ||
-    item.lifecycle === "pending" ||
-    item.lifecycle === "promoting" ||
-    item.lifecycle === "accepted";
-}
-
-function appendMissing(primary: string[], secondary: string[]) {
-  return [...primary, ...secondary.filter((value) => !primary.includes(value))];
-}
 
 function emptyThread(id: string): CodexThread {
   return { id, title: "Untitled task", status: "unknown", turnOrder: [], turns: {} };
@@ -1844,7 +1499,7 @@ function confirmedUserMessage(message: import("../../protocol/types").RpcMessage
   if (!threadId) return undefined;
   return {
     threadId,
-    text: displayUserInput(extractItemText(item)),
+    text: displayUserInput(itemText(item)),
     clientMessageId: stringValue(item.clientMessageId) ??
       stringValue(item.clientUserMessageId) ??
       stringValue(item.client_message_id),
@@ -1861,41 +1516,4 @@ function normalizeStatus(value: unknown, fallback: ThreadStatus = "unknown"): Th
   if (raw === "idle" || raw === "completed" || raw === "notLoaded") return "idle";
   if (raw === "error" || raw === "failed" || raw === "systemError") return "error";
   return fallback;
-}
-
-function normalizeTurnStatus(value: unknown): TurnStatus {
-  if (
-    value === "inProgress" || value === "completed" || value === "interrupted" || value === "failed"
-  ) return value;
-  return "unknown";
-}
-
-function extractItemText(item: Record<string, unknown>) {
-  const direct =
-    stringValue(item.text) ??
-    stringValue(item.command) ??
-    stringValue(item.query);
-  if (direct) return direct;
-  const content = item.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => typeof part === "string" ? part : stringValue(asRecord(part).text) ?? "")
-      .filter(Boolean)
-      .join("\n");
-  }
-  const summary = item.summary;
-  if (Array.isArray(summary)) {
-    return summary.filter((part): part is string => typeof part === "string").join("\n");
-  }
-  const tool = stringValue(item.tool);
-  if (tool) return stringValue(item.server) ? `${stringValue(item.server)} / ${tool}` : tool;
-  const changes = item.changes;
-  if (Array.isArray(changes)) {
-    return changes
-      .map((change) => stringValue(asRecord(change).path) ?? stringValue(asRecord(change).filePath) ?? "")
-      .filter(Boolean)
-      .join("\n");
-  }
-  return "";
 }
