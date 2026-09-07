@@ -101,12 +101,15 @@ lines.on("line", (line) => {
   }
   if (message.method === "thread/resume") {
     const isFixture = message.params?.threadId === "fixture-thread";
+    const isQuestionContextFixture = message.params?.threadId === "fixture-question-context-thread";
     loadedThreads.add(message.params?.threadId);
     send({
       id: message.id,
       result: {
         thread: isFixture
           ? fixtureThreadWithTurns()
+          : isQuestionContextFixture
+            ? fixtureThreadWithTurns(true)
           : listThreads().find((thread) => thread.id === message.params?.threadId),
         model: "gpt-fixture",
         reasoningEffort: "medium",
@@ -393,6 +396,13 @@ function listThreads(archived = false) {
     status: { type: "idle" },
     updatedAt: 1_787_200_000,
   };
+  const questionContextFixture = {
+    id: "fixture-question-context-thread",
+    name: "Question context fixture",
+    cwd: "/tmp/codex-fixture",
+    status: { type: "idle" },
+    updatedAt: 1_787_199_999,
+  };
   const extras = Array.from({ length: 17 }, (_, index) => ({
     id: `fixture-extra-${index}`,
     name: `Fixture conversation ${String(index + 1).padStart(2, "0")}`,
@@ -400,7 +410,7 @@ function listThreads(archived = false) {
     status: { type: index === 2 ? "active" : "idle", activeFlags: [] },
     updatedAt: 1_787_199_999 - index,
   }));
-  return [createdThread, fixture, ...extras].filter(Boolean)
+  return [createdThread, fixture, questionContextFixture, ...extras].filter(Boolean)
     .filter((thread) => !deletedThreads.has(thread.id))
     .filter((thread) => archivedThreads.has(thread.id) === archived)
     .map((thread) => ({
@@ -411,7 +421,7 @@ function listThreads(archived = false) {
   }));
 }
 
-function fixtureThreadWithTurns() {
+function fixtureThreadWithTurns(questionContext = false) {
   const firstTurn = {
     id: "fixture-history-turn",
     status: "completed",
@@ -431,7 +441,7 @@ function fixtureThreadWithTurns() {
     status: "completed",
     durationMs: 1_500 + index,
     items: [
-      ...(index === 9 ? [] : [
+      ...(questionContext && index === 9 ? [] : [
         {
           id: `user-${index}`,
           type: "userMessage",
@@ -447,7 +457,7 @@ function fixtureThreadWithTurns() {
       },
     ],
   }));
-  const persistedTurn = persistedFixtureUserItems.length > 0 ? [{
+  const persistedTurn = !questionContext && persistedFixtureUserItems.length > 0 ? [{
     id: "fixture-persisted-upload-turn",
     status: "completed",
     items: persistedFixtureUserItems,
@@ -462,12 +472,12 @@ function fixtureThreadWithTurns() {
     }],
   };
   return {
-    id: "fixture-thread",
-    name: "Fixture task",
+    id: questionContext ? "fixture-question-context-thread" : "fixture-thread",
+    name: questionContext ? "Question context fixture" : "Fixture task",
     cwd: "/tmp/codex-fixture",
     status: { type: "idle" },
     updatedAt: 1_787_200_000,
-    turns: [firstTurn, ...longTurns, paginatedTurn, ...persistedTurn],
+    turns: [firstTurn, ...longTurns, ...(questionContext ? [paginatedTurn] : []), ...persistedTurn],
   };
 }
 

@@ -190,8 +190,11 @@ test("keeps the completed final reply above expanded mobile controls", async ({ 
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.locator(".task-status")).toHaveText("空闲");
-  const completedTurn = page.locator('[data-turn-id="fixture-live-turn"]').last();
+  const completedTurn = page.locator('li.conversation-turn[data-turn-id="fixture-live-turn"]').last();
   await expect(completedTurn.getByText("执行过程（1 项）")).toBeVisible();
+  await expect(completedTurn.locator(":scope > .message-user")).toContainText("Finish a compact mobile turn");
+  await expect(page.locator(".pinned-user-question")).toHaveCount(0);
+  await expect(page.getByText(/请持续检查这个很长的移动端任务/)).toHaveCount(0);
   await expect(page.locator(".composer")).toHaveClass(/composer-expanded/);
   await page.getByLabel("添加图片").setInputFiles({
     name: "next-message.png",
@@ -219,7 +222,7 @@ test("keeps the semantic final reply visible after many tools and late commentar
   await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.locator(".task-status")).toHaveText("空闲");
-  const completedTurn = page.locator('[data-turn-id="fixture-live-turn"]').last();
+  const completedTurn = page.locator('li.conversation-turn[data-turn-id="fixture-live-turn"]').last();
   const finalReply = completedTurn.locator(":scope > .message-agent");
   await expect(finalReply).toHaveCount(3);
   await expect(completedTurn.getByText("Semantic final reply remains visible")).toBeVisible();

@@ -5,7 +5,7 @@ async function openFixture(page: import("@playwright/test").Page) {
   await page.getByLabel("Access token").fill("e2e-token");
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
-  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("button", { name: /^Question context fixture，/ }).click();
 }
 
 test("pins server question context without rendering the original user item", async ({ page }) => {
