@@ -14,8 +14,8 @@
 
 - Task 1 completed in `532ae11`; independent review and 3 GiB bounded-memory benchmark passed.
 - Task 2 completed through `83208bd`, including index cache repair in `a58f9ec`; startup-state, native command identity, raw output and nested image semantic-count regressions are covered. Independent scoped review approved. Source-adapter comparisons passed for 17 question contexts, 3 cold tool histories and 3 native-origin images.
-- Task 3 completed in `f3a169b`; all scoped review findings closed, independent focused177/177 and desktop/mobile layout2/2 passed. Final whole-suite and installed-native results must be recorded separately.
-- Task 4 in progress. Full integrated check passed 813 tests. Five selector/shared-fixture integration failures were corrected without removing original coverage; the author's and root's full Web E2E runs both passed 55 tests with 9 existing platform skips. Mac lock prevents supported native UI control; no new-candidate Android/iPhone acceptance or release claim until actual clicks can resume.
+- Task 3 completed in `f3a169b`, with the final full-source-identity visibility repair in `0e4891a`. Whole-feature review and scoped re-review findings are closed; the new collision regressions and existing expansion behavior pass.
+- Task 4 in progress. Final integrated check passed 819 tests; full Web E2E passed 55 tests with 9 existing platform skips. Five selector/shared-fixture integration failures were corrected without removing original coverage, and generated image-test directories now have exact cleanup. Mac lock prevents supported native UI control; packaged-app execution and installed Android/iPhone acceptance remain separate gates. No public release has been triggered.
 - Detailed per-step evidence and execution rulings: `.superpowers/sdd/2026-09-07-question-context/progress.md` (local execution ledger, not a published acceptance claim).
 
 ## Global Constraints
