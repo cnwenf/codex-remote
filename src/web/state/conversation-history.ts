@@ -163,8 +163,17 @@ export function hydrateThread(
       ? completeRetainedItems(hydratedTurn)
       : hydratedTurn;
   }
-  const initialTurnOrder = mergeMessageOrder(current.turnOrder,
+  let initialTurnOrder = mergeMessageOrder(current.turnOrder,
     withHistoryAnchors(snapshotTurnOrder, stringValue(historyAnchor.turnId), stringValue(historyAfterAnchor.turnId), current.turnOrder), placement !== "append");
+  // A recovered page can sit before, after, or between native/live turns.
+  // Shared IDs remain authoritative; only unanchored snapshots use time.
+  if (placement === "snapshot" && current.turnOrder.length > 0 &&
+    snapshotTurnOrder.length > 0 && !snapshotTurnOrder.some(id => current.turns[id])) {
+    const timed = initialTurnOrder.map(id => ({ id, time: turnTimeSeconds(hydratedTurns[id]) }));
+    if (timed.every(turn => turn.time !== undefined)) {
+      initialTurnOrder = timed.sort((a, b) => a.time! - b.time!).map(turn => turn.id);
+    }
+  }
   const snapshotStatus = normalizeStatus(record.status, current.status);
   if (
     placement !== "prepend" &&
@@ -247,6 +256,17 @@ export function hydrateThread(
       },
     },
   };
+}
+
+// Codex turn IDs are UUIDv7. Their time remains available when a bounded
+// history page omits task_started. Compare at the same second precision as
+// legacy IDs' startedAt; finer precision would misorder mixed-source ties.
+function turnTimeSeconds(turn: CodexTurn | undefined): number | undefined {
+  if (!turn) return undefined;
+  if (/^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i.test(turn.id)) {
+    return Math.floor(Number.parseInt(turn.id.slice(0, 8) + turn.id.slice(9, 13), 16) / 1_000);
+  }
+  return typeof turn.startedAt === "number" && Number.isFinite(turn.startedAt) ? Math.floor(turn.startedAt) : undefined;
 }
 
 function reconcilePendingToolOutputs(

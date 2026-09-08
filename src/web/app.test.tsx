@@ -64,6 +64,21 @@ describe("App", () => {
     expect(document.querySelector(".brand-mark img")).toBeVisible();
   });
 
+  it("shows native connection progress until the handshake actually fails", () => {
+    const remote = { connectionId: "local", name: "Test Mac", baseUrl: "http://local:4321", token: "test", onManageConnections: vi.fn() };
+    useCodexMock.mockReturnValue(codexState({ connection: "connecting" }));
+    const { rerender } = render(<App remote={remote} />);
+    expect(screen.getByRole("status")).toHaveTextContent("正在连接 Test Mac");
+    expect(screen.queryByRole("heading", { name: "无法连接 Test Mac" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+
+    useCodexMock.mockReturnValue(codexState({ connection: "disconnected", error: "Connection refused" }));
+    rerender(<App remote={remote} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Connection refused");
+    expect(screen.getByRole("heading", { name: "无法连接 Test Mac" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
+  });
+
   it("shows loading instead of claiming the initial task list is empty", () => {
     useCodexMock.mockReturnValue(codexState({ connection: "ready", threadsLoading: true }));
 

@@ -1000,6 +1000,20 @@ describe("DesktopState", () => {
     state.close();
   });
 
+  it.each([10, "1970-01-01T00:00:10.750Z"])("normalizes rollout turn times to native Unix seconds: %s", (timestamp) => {
+    const { databasePath, rolloutPath } = fixture();
+    appendFileSync(rolloutPath, [
+      { type: "event_msg", payload: { type: "task_started", turn_id: "timed", started_at: timestamp } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "timed", completed_at: timestamp, duration_ms: 0 } },
+    ].map(value => JSON.stringify(value)).join("\n") + "\n");
+    const state = new DesktopState(databasePath);
+    try {
+      const result = state.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(result.thread.turns.find((turn: { id: string }) => turn.id === "timed"))
+        .toMatchObject({ startedAt: 10, completedAt: 10, durationMs: 0 });
+    } finally { state.close(); }
+  });
+
   it("does not expose injected AGENTS or environment context as a user message", () => {
     const { databasePath, rolloutPath } = fixture();
     writeFileSync(rolloutPath, [

@@ -713,6 +713,158 @@ describe("ConversationReconciler", () => {
 });
 
 describe("Desktop history gaps", () => {
+  it("waits for the initial history read before polling or establishing another cursor", async () => {
+    vi.useFakeTimers();
+    const socket = new CodexSocket(() => new FakeBrowserSocket());
+    let releaseInitial!: (value: unknown) => void;
+    const initial = new Promise(resolve => { releaseInitial = resolve; });
+    const turn = (id: string) => ({ id, status: "completed", items: [{ id, type: "agentMessage", text: id }] });
+    const latest = {
+      desktopMirror: true, historyRange: { start: 500, end: 900 },
+      history: { hasMoreBefore: true, beforeCursor: "500" },
+      thread: { id: "t1", status: "idle", turns: [turn("latest")] },
+    };
+    let reads = 0;
+    vi.spyOn(socket, "request").mockImplementation(async (method, params) => {
+      if (method === "thread/list" || method === "desktopState/listThreads") return { data: [{ id: "t1", status: "idle" }] };
+      if (method === "desktopState/readThread") {
+        if (++reads === 1) return initial;
+        if ((params as { history: { beforeCursor?: string } }).history.beforeCursor === "500") return {
+          desktopMirror: true, historyRange: { start: 0, end: 500 }, history: { hasMoreBefore: false },
+          thread: { id: "t1", status: "idle", turns: [turn("oldest")] },
+        };
+        return latest;
+      }
+      return {};
+    });
+    const { result, unmount } = renderHook(() => useCodex(socket));
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      await act(() => result.current.refreshThreads());
+      let select!: Promise<void>;
+      act(() => { select = result.current.selectThread("t1"); });
+      await act(() => vi.advanceTimersByTimeAsync(4_000));
+      expect(reads).toBe(1);
+      await act(async () => { releaseInitial(latest); await select; });
+      await act(() => result.current.loadEarlierThreadHistory());
+      expect(result.current.selectedThread?.turnOrder).toEqual(["oldest", "latest"]);
+      expect(result.current.selectedThreadHistory.hasMoreBefore).toBe(false);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(reads).toBe(3);
+      expect(result.current.selectedThreadHistory.hasMoreBefore).toBe(false);
+    } finally { unmount(); vi.useRealTimers(); }
+  });
+
+  it.each(["before-discovery", "initial-read-failed"])("bootstraps bounded Desktop history after a partial native resume: %s", async (failure) => {
+    vi.useFakeTimers();
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const turn = (id: string) => ({ id, status: "completed", items: [{ id, type: "agentMessage", text: id }] });
+    let reads = 0;
+    const request = vi.spyOn(socket, "request").mockImplementation(async (method, params) => {
+      if (method === "thread/list" || method === "desktopState/listThreads") return { data: [{ id: "t1", status: "idle" }] };
+      if (method === "thread/resume") return { thread: { id: "t1", status: "idle", turns: [turn("latest")] } };
+      if (method === "desktopState/readThread") {
+        if (failure === "initial-read-failed" && reads++ === 0) throw new Error("temporary mirror failure");
+        const history = (params as { history: { limitTurns: number; beforeCursor?: string } }).history;
+        const older = history.beforeCursor === "500";
+        return {
+          desktopMirror: true,
+          historyRange: { start: older ? 0 : 500, end: older ? 500 : 900 },
+          history: older ? { hasMoreBefore: false } : { hasMoreBefore: true, beforeCursor: "500" },
+          thread: { id: "t1", status: "idle", turns: older ? [turn("oldest")] : history.limitTurns === 1 ? [turn("latest")] : [turn("previous"), turn("latest")] },
+        };
+      }
+      return {};
+    });
+    const { result, unmount } = renderHook(() => useCodex(socket));
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      act(() => fake.serverSend({ type: "session", state: "ready", transport: "desktop-live", readOnly: false }));
+      if (failure === "initial-read-failed") await act(() => result.current.refreshThreads());
+      await act(() => result.current.selectThread("t1"));
+      expect(result.current.selectedThread?.turnOrder).toEqual(["latest"]);
+      if (failure === "before-discovery") await act(() => result.current.refreshThreads());
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(result.current.selectedThreadHistory).toMatchObject({ hasMoreBefore: true, beforeCursor: "500" });
+      expect(result.current.selectedThread?.turnOrder).toEqual(["previous", "latest"]);
+      await act(() => result.current.loadEarlierThreadHistory());
+      expect(result.current.selectedThread?.turnOrder).toEqual(["oldest", "previous", "latest"]);
+      expect(result.current.selectedThreadHistory.hasMoreBefore).toBe(false);
+      const readsBeforePoll = request.mock.calls.length;
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      const poll = request.mock.calls.slice(readsBeforePoll).find(([method]) => method === "desktopState/readThread");
+      expect(poll?.[1]).toEqual({ threadId: "t1", history: { limitTurns: 1, maxBytes: 2 * 1024 * 1024 } });
+      expect(result.current.selectedThreadHistory.hasMoreBefore).toBe(false);
+    } finally { unmount(); vi.useRealTimers(); }
+  });
+
+  it("keeps newer non-overlapping mirror turns after retained native history", async () => {
+    vi.useFakeTimers();
+    const socket = new CodexSocket(() => new FakeBrowserSocket());
+    const turn = (id: string, startedAt: number) => ({ id, startedAt, status: "completed", items: [{ id, type: "agentMessage", text: id }] });
+    let reads = 0;
+    vi.spyOn(socket, "request").mockImplementation(async (method) => {
+      if (method === "thread/list" || method === "desktopState/listThreads") return { data: [{ id: "t1", status: "idle" }] };
+      if (method === "thread/resume") return { thread: { id: "t1", status: "idle", turns: [turn("native-old", 1)] } };
+      if (method === "desktopState/readThread") {
+        if (++reads === 1) throw new Error("temporary mirror failure");
+        return {
+          desktopMirror: true, historyRange: { start: 500, end: 900 },
+          history: { hasMoreBefore: true, beforeCursor: "500" },
+          thread: { id: "t1", status: "idle", turns: [turn("newer-mirror", 2)] },
+        };
+      }
+      return {};
+    });
+    const { result, unmount } = renderHook(() => useCodex(socket));
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      await act(() => result.current.refreshThreads());
+      await act(() => result.current.selectThread("t1"));
+      expect(result.current.selectedThread?.turnOrder).toEqual(["native-old"]);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(result.current.selectedThread?.turnOrder).toEqual(["native-old", "newer-mirror"]);
+      expect(result.current.selectedThreadHistory).toMatchObject({ hasMoreBefore: true, beforeCursor: "500" });
+    } finally { unmount(); vi.useRealTimers(); }
+  });
+
+  it("inserts a recovered page between retained native history and a newer live turn", async () => {
+    vi.useFakeTimers();
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const turn = (id: string, startedAt: number) => ({ id, startedAt, status: "completed", items: [{ id, type: "agentMessage", text: id }] });
+    let releasePage!: (value: unknown) => void;
+    const page = new Promise(resolve => { releasePage = resolve; });
+    let reads = 0;
+    vi.spyOn(socket, "request").mockImplementation(async (method) => {
+      if (method === "thread/list" || method === "desktopState/listThreads") return { data: [{ id: "t1", status: "idle" }] };
+      if (method === "thread/resume") return { thread: { id: "t1", status: "idle", turns: [turn("native-old", 1)] } };
+      if (method === "desktopState/readThread") {
+        if (++reads === 1) throw new Error("temporary mirror failure");
+        return page;
+      }
+      return {};
+    });
+    const { result, unmount } = renderHook(() => useCodex(socket));
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      await act(() => result.current.refreshThreads());
+      await act(() => result.current.selectThread("t1"));
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      act(() => fake.serverSend({ type: "rpc", payload: { method: "turn/started", params: {
+        threadId: "t1", turn: { id: "live-new", status: "inProgress", startedAt: 3, items: [] },
+      } } }));
+      await act(async () => releasePage({
+        desktopMirror: true, historyRange: { start: 500, end: 900 },
+        history: { hasMoreBefore: true, beforeCursor: "500" },
+        thread: { id: "t1", status: "idle", turns: [turn("mirror-middle", 2)] },
+      }));
+      expect(result.current.selectedThread?.turnOrder).toEqual(["native-old", "mirror-middle", "live-new"]);
+      expect(result.current.selectedThread?.activeTurnId).toBe("live-new");
+    } finally { unmount(); vi.useRealTimers(); }
+  });
+
   it("places a missing whole turn and partial-turn items before their right-hand history anchors", () => {
     const reconciler = new ConversationReconciler();
     const turn = (id: string, ids: string[]) => ({ id, status: "completed", items: ids.map(id => ({ id, type: "agentMessage", text: id })) });

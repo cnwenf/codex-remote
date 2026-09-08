@@ -1625,7 +1625,7 @@ function timestampValue(value: unknown) {
   if (typeof value === "number") return value;
   if (typeof value !== "string") return undefined;
   const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? undefined : parsed;
+  return Number.isNaN(parsed) ? undefined : Math.floor(parsed / 1_000);
 }
 
 function asThreadIds(value: unknown) {

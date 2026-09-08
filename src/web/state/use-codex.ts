@@ -728,21 +728,30 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     : false;
   useEffect(() => {
     if (
-      connection !== "ready" || !selectedThreadId || !selectedDesktopMirror
+      connection !== "ready" || !selectedThreadId || loadingThreadId === selectedThreadId ||
+      (!selectedDesktopMirror && !desktopStateAvailable)
     ) return;
     let cancelled = false;
     let pending = false;
     const timer = window.setInterval(() => {
       if (pending) return;
       pending = true;
+      const selection = selectionRequestVersion.current;
       const requestedRevision = liveRevisions.current.get(selectedThreadId) ?? 0;
+      // A native resume may contain only live items after a transient mirror
+      // failure. Establish bounded history and its cursor before tail polling.
+      const bootstrapHistory = !desktopHistoryThreads.current.has(selectedThreadId);
       void socket.request("desktopState/readThread", {
         threadId: selectedThreadId,
-        history: { ...HISTORY_PAGE, limitTurns: 1 },
+        history: bootstrapHistory ? HISTORY_PAGE : { ...HISTORY_PAGE, limitTurns: 1 },
       })
         .then(async (value) => {
-          if (!cancelled) {
-            reconcileSnapshot(value, "append", requestedRevision);
+          if (!cancelled && selection === selectionRequestVersion.current) {
+            reconcileSnapshot(value, bootstrapHistory ? "snapshot" : "append", requestedRevision);
+            if (bootstrapHistory) {
+              desktopHistoryThreads.current.add(selectedThreadId);
+              setThreadHistory((current) => ({ ...current, [selectedThreadId]: historyState(value) }));
+            }
             await recoverHistoryGap(selectedThreadId);
           }
         })
@@ -750,7 +759,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         .finally(() => { pending = false; });
     }, 2_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [connection, reconcileSnapshot, recoverHistoryGap, selectedDesktopMirror, selectedThreadId, socket]);
+  }, [connection, desktopStateAvailable, loadingThreadId, reconcileSnapshot, recoverHistoryGap, selectedDesktopMirror, selectedThreadId, socket]);
 
   const refreshQueuedMessages = useCallback(async (threadId: string) => {
     if (!desktopControlAvailable) return;

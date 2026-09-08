@@ -21,6 +21,51 @@ function snapshot(item: CodexItem) {
   ] } };
 }
 
+describe("snapshot turn ordering", () => {
+  it.each(["current", "incoming"])("does not reorder the %s side when the other snapshot side is empty", (side) => {
+    const source = { thread: { id: "t", turns: [
+      { id: "first", startedAt: 2, status: "completed", items: [] },
+      { id: "second", startedAt: 1, status: "completed", items: [] },
+    ] } };
+    const empty = { thread: { id: "t", turns: [] } };
+    const state = hydrateThread(initialCodexState, side === "current" ? source : empty);
+    const next = hydrateThread(state, side === "current" ? empty : source);
+    expect(next.threads.t.turnOrder).toEqual(["first", "second"]);
+  });
+
+  it("does not order a mixed-source same-second snapshot by false subsecond precision", () => {
+    const older = "00000001-8704-7000-8000-000000000001"; // 100100 ms; native seconds may hide a later subsecond.
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", turns: [
+      { id: "native", startedAt: 100, status: "completed", items: [] },
+    ] } });
+    const next = hydrateThread(state, { thread: { id: "t", turns: [{ id: older, status: "completed", items: [] }] } });
+    expect(next.threads.t.turnOrder).toEqual([older, "native"]);
+  });
+
+  it.each([false, true])("orders UUIDv7 turns without task-start metadata, incoming older: %s", (older) => {
+    const first = "018f0000-0000-7000-8000-000000000001";
+    const last = "018f0001-0000-7000-8000-000000000002";
+    const turn = (id: string) => ({ id, status: "completed", items: [{ id, type: "agentMessage", text: id }] });
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", turns: [turn(older ? last : first)] } });
+    const next = hydrateThread(state, { thread: { id: "t", turns: [turn(older ? first : last)] } });
+    expect(next.threads.t.turnOrder).toEqual([first, last]);
+  });
+
+  it.each([
+    { currentStart: 1, incomingStart: 2, expected: ["current", "incoming"] },
+    { currentStart: 2, incomingStart: 1, expected: ["incoming", "current"] },
+    { currentStart: undefined, incomingStart: 2, expected: ["incoming", "current"] },
+    { currentStart: 1, incomingStart: undefined, expected: ["incoming", "current"] },
+    { currentStart: 1, incomingStart: 1, expected: ["incoming", "current"] },
+  ])("places an unanchored snapshot using known turn times: $currentStart -> $incomingStart", ({ currentStart, incomingStart, expected }) => {
+    const turn = (id: string, startedAt?: number) => ({ id, startedAt, status: "completed", items: [{ id, type: "agentMessage", text: id }] });
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", turns: [turn("current", currentStart)] } });
+    const next = hydrateThread(state, { thread: { id: "t", turns: [turn("incoming", incomingStart)] } });
+    expect(next.threads.t.turnOrder).toEqual(expected);
+    expect(Object.keys(next.threads.t.turns)).toHaveLength(2);
+  });
+});
+
 describe("user identity during history reconciliation", () => {
   it.each(["snapshot", "prepend", "append"] as const)("keeps a renamed image question before retained reasoning during %s", (placement) => {
     const state = stateWith([

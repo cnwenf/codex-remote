@@ -43,6 +43,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     imageUploader: remote.imageUploader,
   } : {});
   const autoConnectAttempted = useRef(false);
+  const nativeConnecting = Boolean(remote) &&
+    (codex.connection === "connecting" || !autoConnectAttempted.current);
   const remoteSwipeOrigin = useRef<{ x: number; y: number } | null>(null);
   const [decisionNotice, setDecisionNotice] = useState<string>();
   const [showNewConversation, setShowNewConversation] = useState(false);
@@ -313,16 +315,16 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
       {codex.connection !== "ready" && codex.connection !== "reconnecting" ? (
         <div className="connect-stage">
           {remote ? (
-            <section className="native-connect-error">
-              <h2>{copy.cannotConnect} {remote.name}</h2>
-              <p>{codex.error ?? copy.connectionHint}</p>
+            <section className="native-connect-error" role={nativeConnecting ? "status" : "alert"} aria-busy={nativeConnecting}>
+              <h2>{nativeConnecting ? connectionLabel("connecting", language) : copy.cannotConnect} {remote.name}</h2>
+              {!nativeConnecting ? <p>{codex.error ?? copy.connectionHint}</p> : null}
               <div>
                 <button type="button" className="secondary-button" onClick={remote.onManageConnections}>{copy.backToConnections}</button>
-                <button
+                {!nativeConnecting ? <button
                   type="button"
                   className="primary-button"
                   onClick={() => window.location.reload()}
-                >{copy.retry}</button>
+                >{copy.retry}</button> : null}
               </div>
             </section>
           ) : (
