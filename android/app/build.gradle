@@ -12,10 +12,30 @@ def releaseSigningConfigured = [
     releaseKeyPassword,
 ].every { value -> value != null && !value.isBlank() }
 
-tasks.register('generateBrandResources', Copy) {
-    from(rootProject.file('../assets/app-icon.png'))
-    into(generatedBrandResDir.map { it.dir('drawable-nodpi') })
-    rename { 'ic_launcher_source.png' }
+tasks.register('generateBrandResources') {
+    def source = rootProject.file('../assets/app-icon.png')
+    def outputDir = generatedBrandResDir.map { it.dir('drawable-nodpi') }
+    inputs.file(source)
+    outputs.dir(outputDir)
+    doLast {
+        def directory = outputDir.get().asFile
+        directory.mkdirs()
+        def sourceImage = javax.imageio.ImageIO.read(source)
+        java.nio.file.Files.copy(source.toPath(), new File(directory, 'ic_launcher_source.png').toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        def smallIcon = new java.awt.image.BufferedImage(96, 96, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+        def graphics = smallIcon.createGraphics()
+        graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+        graphics.drawImage(sourceImage, 0, 0, 96, 96, null)
+        graphics.dispose()
+        for (int y = 0; y < 96; y++) {
+            for (int x = 0; x < 96; x++) {
+                int pixel = smallIcon.getRGB(x, y)
+                int brightness = Math.round((0.2126f * ((pixel >> 16) & 0xff) + 0.7152f * ((pixel >> 8) & 0xff) + 0.0722f * (pixel & 0xff)) * ((pixel >>> 24) / 255f))
+                smallIcon.setRGB(x, y, (brightness << 24) | 0x00ffffff)
+            }
+        }
+        javax.imageio.ImageIO.write(smallIcon, 'png', new File(directory, 'ic_stat_codex_remote.png'))
+    }
 }
 
 android {

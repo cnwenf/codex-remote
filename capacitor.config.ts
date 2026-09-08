@@ -27,7 +27,7 @@ const config: CapacitorConfig = {
     },
     LocalNotifications: {
       smallIcon: "ic_stat_codex_remote",
-      iconColor: "#34A853",
+      iconColor: "#000000",
     },
   },
 };

@@ -8,6 +8,10 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.IBinder;
@@ -53,6 +57,7 @@ public class CodexRemoteMonitorService extends Service {
     private String connectionId;
     private String connectionName;
     private String baseUrl;
+    private Bitmap notificationLogo;
 
     static Intent startIntent(Context context, String id, String name, String baseUrl) {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE);
@@ -78,6 +83,11 @@ public class CodexRemoteMonitorService extends Service {
         super.onCreate();
         active = true;
         createChannels();
+        int size = Math.min(256, Math.round(64 * getResources().getDisplayMetrics().density));
+        notificationLogo = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Drawable icon = getApplicationInfo().loadIcon(getPackageManager());
+        icon.setBounds(0, 0, size, size);
+        icon.draw(new Canvas(notificationLogo));
     }
 
     @Override
@@ -286,8 +296,7 @@ public class CodexRemoteMonitorService extends Service {
     }
 
     private Notification ongoing(String title, String body, @Nullable String threadId) {
-        return new NotificationCompat.Builder(this, CHANNEL_RUNNING)
-            .setSmallIcon(R.drawable.ic_stat_codex_remote)
+        return notificationBuilder(CHANNEL_RUNNING)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
@@ -303,8 +312,7 @@ public class CodexRemoteMonitorService extends Service {
 
     private void notifyRunning(String threadId, String title) {
         int notificationId = runningNotificationId(threadId);
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_RUNNING)
-            .setSmallIcon(R.drawable.ic_stat_codex_remote)
+        Notification notification = notificationBuilder(CHANNEL_RUNNING)
             .setContentTitle(title)
             .setContentText(connectionName == null ? "对话运行中" : connectionName + " · 对话运行中")
             .setOngoing(true)
@@ -321,14 +329,20 @@ public class CodexRemoteMonitorService extends Service {
     }
 
     private void notifyCompleted(String threadId, String title, boolean failed) {
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_COMPLETED)
-            .setSmallIcon(R.drawable.ic_stat_codex_remote)
+        Notification notification = notificationBuilder(CHANNEL_COMPLETED)
             .setContentTitle(failed ? "对话执行失败" : "对话已完成")
             .setContentText(title)
             .setAutoCancel(true)
             .setContentIntent(openIntent(threadId, threadId.hashCode()))
             .build();
         getSystemService(NotificationManager.class).notify(20_000 + Math.abs(threadId.hashCode() % 10_000), notification);
+    }
+
+    private NotificationCompat.Builder notificationBuilder(String channelId) {
+        return new NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_stat_codex_remote)
+            .setLargeIcon(notificationLogo)
+            .setColor(Color.BLACK);
     }
 
     private PendingIntent openIntent(@Nullable String threadId, int requestCode) {
