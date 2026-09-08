@@ -6,6 +6,7 @@ import { Composer } from "./composer";
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("Composer", () => {
@@ -292,6 +293,46 @@ describe("Composer", () => {
     releaseRead();
     expect(await screen.findByText("first.png")).toBeVisible();
     expect(screen.queryByText("second.png")).not.toBeInTheDocument();
+  });
+
+  it("keeps existing images and restores send and selection after a stalled preflight times out", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<Composer onSend={onSend} running={false} expanded />);
+    const existing = pngFile("existing.png", 400, 300);
+    await userEvent.upload(screen.getByLabelText("添加图片"), existing);
+    await screen.findByText("existing.png");
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal("FileReader", class {
+      result: string | ArrayBuffer | null = pngHeader(400, 300).buffer;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      abort = vi.fn(() => this.onabort?.());
+      readAsArrayBuffer() {
+        reads += 1;
+        if (reads > 1) this.onload?.();
+      }
+    });
+    fireEvent.change(screen.getByLabelText("添加图片"), {
+      target: { files: [pngFile("stalled.png", 400, 300)] },
+    });
+    expect(screen.getByLabelText("添加图片")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("无法读取图片尺寸");
+    expect(screen.getByText("existing.png")).toBeVisible();
+    expect(screen.getByLabelText("添加图片")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeEnabled();
+    vi.useRealTimers();
+    const recovered = pngFile("recovered.png", 400, 300);
+    fireEvent.change(screen.getByLabelText("添加图片"), { target: { files: [recovered] } });
+    expect(await screen.findByText("recovered.png")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(onSend).toHaveBeenCalledWith("", [existing, recovered]);
   });
 
   it("drops a pending preview when switching conversations", async () => {

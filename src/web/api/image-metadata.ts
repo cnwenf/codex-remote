@@ -6,6 +6,8 @@ import {
 export const MAX_BROWSER_IMAGE_PIXELS = 32_000_000;
 export const MAX_BROWSER_IMAGE_HEADER_BYTES = 256 * 1024;
 const MAX_HEADER_SEGMENTS = 128;
+const IMAGE_HEADER_READ_TIMEOUT_MS = 5_000;
+const IMAGE_READ_ERROR = "无法读取图片尺寸，请重新选择图片";
 
 export type ImageDimensions = { width: number; height: number; pixels: number };
 
@@ -22,9 +24,9 @@ export async function inspectImageFile(file: File): Promise<ImageDimensions> {
       : file.type === "image/jpeg"
         ? jpegDimensions(bytes)
         : webpDimensions(bytes, file.size);
-  if (!dimensions) throw new Error("无法读取图片尺寸，请重新选择图片");
+  if (!dimensions) throw new Error(IMAGE_READ_ERROR);
   const pixels = dimensions.width * dimensions.height;
-  if (!Number.isSafeInteger(pixels) || pixels <= 0) throw new Error("无法读取图片尺寸，请重新选择图片");
+  if (!Number.isSafeInteger(pixels) || pixels <= 0) throw new Error(IMAGE_READ_ERROR);
   if (pixels > MAX_BROWSER_IMAGE_PIXELS) throw new Error("图片像素不能超过 3200 万，请选择较小的图片");
   return { ...dimensions, pixels };
 }
@@ -125,11 +127,30 @@ function readUint24(bytes: Uint8Array, offset: number) {
 function readBytes(blob: Blob) {
   return new Promise<Uint8Array>((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("无法读取图片尺寸，请重新选择图片"));
-    reader.onload = () => {
-      if (reader.result instanceof ArrayBuffer) resolve(new Uint8Array(reader.result));
-      else reject(new Error("无法读取图片尺寸，请重新选择图片"));
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reader.onload = null;
+      reader.onerror = null;
+      reader.onabort = null;
+      complete();
     };
-    reader.readAsArrayBuffer(blob);
+    const fail = () => settle(() => reject(new Error(IMAGE_READ_ERROR)));
+    reader.onload = () => {
+      const result = reader.result;
+      if (result instanceof ArrayBuffer) settle(() => resolve(new Uint8Array(result)));
+      else fail();
+    };
+    reader.onerror = fail;
+    reader.onabort = fail;
+    timer = setTimeout(() => {
+      if (settled) return;
+      fail();
+      try { reader.abort(); } catch { /* Already settled with the timeout error. */ }
+    }, IMAGE_HEADER_READ_TIMEOUT_MS);
+    try { reader.readAsArrayBuffer(blob); } catch { fail(); }
   });
 }

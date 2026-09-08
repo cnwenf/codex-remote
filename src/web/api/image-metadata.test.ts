@@ -1,9 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BROWSER_IMAGE_HEADER_BYTES,
   MAX_BROWSER_IMAGE_PIXELS,
   inspectImageFile,
 } from "./image-metadata";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe("browser image metadata preflight", () => {
   it.each([
@@ -48,7 +54,112 @@ describe("browser image metadata preflight", () => {
 
     await expect(inspectImageFile(file)).resolves.toEqual({ width: 4_000, height: 3_000, pixels: 12_000_000 });
   });
+
+  it("times out a stalled header read, cleans handlers, then aborts without synchronous re-entry", async () => {
+    vi.useFakeTimers();
+    const reader = installFileReader("stall");
+    let state = "pending";
+    const result = inspectImageFile(pngFile("stalled.png")).then(
+      () => { state = "resolved"; },
+      (error: unknown) => { state = error instanceof Error ? error.message : "rejected"; throw error; },
+    );
+    void result.catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(state).toBe("pending");
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(state).toContain("无法读取图片尺寸");
+    await expect(result).rejects.toThrow("无法读取图片尺寸");
+    expect(reader.current().abort).toHaveBeenCalledOnce();
+    expect(reader.abortSawHandler()).toBe(false);
+    expect(reader.current()).toMatchObject({ onload: null, onerror: null, onabort: null });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects an active FileReader abort and clears its timer and handlers", async () => {
+    vi.useFakeTimers();
+    const reader = installFileReader("abort");
+    let state = "pending";
+    const result = inspectImageFile(pngFile("aborted.png")).then(
+      () => { state = "resolved"; },
+      (error: unknown) => { state = error instanceof Error ? error.message : "rejected"; throw error; },
+    );
+    void result.catch(() => undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(state).toContain("无法读取图片尺寸");
+    await expect(result).rejects.toThrow("无法读取图片尺寸");
+    expect(reader.current()).toMatchObject({ onload: null, onerror: null, onabort: null });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cleans its timer and handlers when FileReader throws synchronously", async () => {
+    vi.useFakeTimers();
+    const reader = installFileReader("throw");
+
+    await expect(inspectImageFile(pngFile("throw.png"))).rejects.toThrow("无法读取图片尺寸");
+
+    expect(reader.current()).toMatchObject({ onload: null, onerror: null, onabort: null });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["load", "error"] as const)("cleans its timer and handlers after FileReader %s", async (action) => {
+    vi.useFakeTimers();
+    const reader = installFileReader(action);
+    const result = inspectImageFile(pngFile(`${action}.png`));
+
+    if (action === "load") await expect(result).resolves.toEqual({ width: 400, height: 300, pixels: 120_000 });
+    else await expect(result).rejects.toThrow("无法读取图片尺寸");
+
+    expect(reader.current()).toMatchObject({ onload: null, onerror: null, onabort: null });
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
+
+type TestReader = {
+  result: string | ArrayBuffer | null;
+  onload: (() => void) | null;
+  onerror: (() => void) | null;
+  onabort: (() => void) | null;
+  abort: ReturnType<typeof vi.fn>;
+};
+
+function installFileReader(action: "stall" | "abort" | "throw" | "load" | "error") {
+  let instance: TestReader | undefined;
+  let abortSawHandler = false;
+  vi.stubGlobal("FileReader", class implements TestReader {
+    result: string | ArrayBuffer | null = pngHeader(400, 300).buffer;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    abort = vi.fn(() => {
+      abortSawHandler = this.onabort !== null;
+      this.onabort?.();
+    });
+
+    constructor() { instance = this; }
+
+    readAsArrayBuffer() {
+      if (action === "abort") this.onabort?.();
+      if (action === "throw") throw new Error("reader-threw");
+      if (action === "load") this.onload?.();
+      if (action === "error") this.onerror?.();
+    }
+  });
+  return {
+    current: () => {
+      if (!instance) throw new Error("FileReader was not created");
+      return instance;
+    },
+    abortSawHandler: () => abortSawHandler,
+  };
+}
+
+function pngFile(name: string) {
+  return new File([pngHeader(400, 300)], name, { type: "image/png" });
+}
 
 function pngHeader(width: number, height: number) {
   const bytes = new Uint8Array(24);

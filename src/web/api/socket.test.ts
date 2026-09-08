@@ -35,6 +35,7 @@ class FakeBrowserSocket implements BrowserSocket {
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -162,6 +163,47 @@ describe("CodexSocket", () => {
     await expect(uploadImage(original, webFetch as typeof fetch, { imageUploader }))
       .rejects.toThrow("50 MiB");
 
+    expect(imageUploader).not.toHaveBeenCalled();
+    expect(webFetch).not.toHaveBeenCalled();
+  });
+
+  it("times out a stalled header read without invoking a codec or uploader, and ignores late load", async () => {
+    vi.useFakeTimers();
+    const header = pngHeader(2_400, 1_200).buffer;
+    let lateLoad!: () => void;
+    vi.stubGlobal("FileReader", class {
+      result: string | ArrayBuffer | null = header;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      abort = vi.fn(() => this.onabort?.());
+      readAsArrayBuffer() { lateLoad = this.onload!; }
+    });
+    const createObjectURL = vi.fn();
+    const image = vi.fn();
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    vi.stubGlobal("Image", image);
+    const imageUploader = vi.fn();
+    const webFetch = vi.fn();
+    let state = "pending";
+    const result = uploadImage(
+      pngFile("stalled.png", 2_400, 1_200, 1_000_001),
+      webFetch as typeof fetch,
+      { imageUploader },
+    );
+    void result.then(
+      () => { state = "resolved"; },
+      () => { state = "rejected"; },
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(state).toBe("rejected");
+    await expect(result).rejects.toThrow("无法读取图片尺寸");
+    lateLoad();
+    await Promise.resolve();
+
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(image).not.toHaveBeenCalled();
     expect(imageUploader).not.toHaveBeenCalled();
     expect(webFetch).not.toHaveBeenCalled();
   });
@@ -416,10 +458,15 @@ describe("CodexSocket", () => {
 });
 
 function pngFile(name: string, width: number, height: number, size = 24) {
+  const header = pngHeader(width, height);
+  return new File([header, new Uint8Array(Math.max(0, size - header.length))], name, { type: "image/png" });
+}
+
+function pngHeader(width: number, height: number) {
   const header = new Uint8Array(24);
   header.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
   const view = new DataView(header.buffer);
   view.setUint32(16, width);
   view.setUint32(20, height);
-  return new File([header, new Uint8Array(Math.max(0, size - header.length))], name, { type: "image/png" });
+  return header;
 }
