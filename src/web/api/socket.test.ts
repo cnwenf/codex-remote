@@ -111,7 +111,7 @@ describe("CodexSocket", () => {
   });
 
   it("uses a configured native image uploader instead of WebView fetch", async () => {
-    const image = new File(["image"], "screen.png", { type: "image/png" });
+    const image = pngFile("screen.png", 400, 300);
     const uploaded = { id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 };
     const imageUploader = vi.fn(async () => uploaded);
     const webFetch = vi.fn(() => Promise.reject(new Error("webview-fetch-blocked")));
@@ -127,7 +127,7 @@ describe("CodexSocket", () => {
   });
 
   it("compresses a large image before invoking the native uploader", async () => {
-    const original = new File([new Uint8Array(1_000_001)], "large.png", { type: "image/png" });
+    const original = pngFile("large.png", 2_400, 1_200, 1_000_001);
     const imageUploader = vi.fn(async (transmitted: File) => ({
       id: "upload-1", name: transmitted.name, mimeType: transmitted.type, size: transmitted.size,
     }));
@@ -166,12 +166,13 @@ describe("CodexSocket", () => {
     expect(webFetch).not.toHaveBeenCalled();
   });
 
-  it("shows a clear format error when image bytes do not match the claimed PNG type", async () => {
+  it("rejects bytes that do not match the claimed PNG type before fetch", async () => {
     const image = new File(["not a png"], "screen.png", { type: "image/png" });
     const webFetch = vi.fn(async () => new Response(null, { status: 415 }));
 
     await expect(uploadImage(image, webFetch as typeof fetch))
-      .rejects.toThrow("仅支持 PNG、JPEG、GIF 和 WebP 图片");
+      .rejects.toThrow("无法读取图片尺寸");
+    expect(webFetch).not.toHaveBeenCalled();
   });
 
   it("resolves a request when its response arrives", async () => {
@@ -413,3 +414,12 @@ describe("CodexSocket", () => {
     expect(sockets[1].sent).toEqual([]);
   });
 });
+
+function pngFile(name: string, width: number, height: number, size = 24) {
+  const header = new Uint8Array(24);
+  header.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+  const view = new DataView(header.buffer);
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  return new File([header, new Uint8Array(Math.max(0, size - header.length))], name, { type: "image/png" });
+}

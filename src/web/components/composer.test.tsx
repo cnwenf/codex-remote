@@ -1,7 +1,12 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "./composer";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("Composer", () => {
   it("starts as one line, expands on focus, and can be collapsed without losing the draft", async () => {
@@ -168,12 +173,12 @@ describe("Composer", () => {
     const onSend = vi.fn().mockResolvedValue(undefined);
     render(<Composer onSend={onSend} running={false} expanded />);
     const picker = screen.getByLabelText("添加图片");
-    const first = new File(["png"], "first.png", { type: "image/png" });
-    const second = new File(["jpg"], "second.jpg", { type: "image/jpeg" });
+    const first = pngFile("first.png", 400, 300);
+    const second = jpegFile("second.jpg", 400, 300);
 
     await userEvent.upload(picker, [first, second]);
-    expect(screen.getByText("first.png")).toBeVisible();
-    expect(screen.getByText("second.jpg")).toBeVisible();
+    expect(await screen.findByText("first.png")).toBeVisible();
+    expect(await screen.findByText("second.jpg")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
     expect(onSend).toHaveBeenCalledWith("", [first, second]);
@@ -183,8 +188,9 @@ describe("Composer", () => {
   it("keeps selected images when sending fails", async () => {
     const onSend = vi.fn().mockRejectedValue(new Error("upload failed"));
     render(<Composer onSend={onSend} running={false} expanded />);
-    const image = new File(["png"], "keep.png", { type: "image/png" });
+    const image = pngFile("keep.png", 400, 300);
     await userEvent.upload(screen.getByLabelText("添加图片"), image);
+    await screen.findByText("keep.png");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
     expect(screen.getByText("keep.png")).toBeVisible();
@@ -194,23 +200,161 @@ describe("Composer", () => {
   it("explains when an image selection exceeds the four-file limit", async () => {
     render(<Composer onSend={vi.fn()} running={false} expanded />);
     const images = Array.from({ length: 5 }, (_, index) =>
-      new File([`image-${index}`], `image-${index}.png`, { type: "image/png" })
+      pngFile(`image-${index}.png`, 400, 300)
     );
 
     await userEvent.upload(screen.getByLabelText("添加图片"), images);
 
-    expect(screen.getAllByRole("button", { name: /^移除 / })).toHaveLength(4);
+    expect(await screen.findAllByRole("button", { name: /^移除 / })).toHaveLength(4);
+    expect(screen.getByRole("alert")).toHaveTextContent(/最多.*4.*张/);
+  });
+
+  it("does not inspect an extra invalid file after filling the four preview slots", async () => {
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+    const files = [
+      ...Array.from({ length: 4 }, (_, index) => pngFile(`valid-${index}.png`, 400, 300)),
+      new File(["invalid"], "extra.bmp", { type: "image/bmp" }),
+    ];
+
+    fireEvent.change(screen.getByLabelText("添加图片"), { target: { files } });
+
+    expect(await screen.findAllByRole("button", { name: /^移除 / })).toHaveLength(4);
     expect(screen.getByRole("alert")).toHaveTextContent(/最多.*4.*张/);
   });
 
   it("accepts up to 50 MiB and explains that large or animated images use a static transfer copy", async () => {
     render(<Composer onSend={vi.fn()} running={false} expanded />);
-    const image = new File([new Uint8Array(10 * 1024 * 1024 + 1)], "large.gif", { type: "image/gif" });
+    const image = gifFile("large.gif", 400, 300, 10 * 1024 * 1024 + 1);
 
     await userEvent.upload(screen.getByLabelText("添加图片"), image);
 
-    expect(screen.getByText("large.gif")).toBeVisible();
+    expect(await screen.findByText("large.gif")).toBeVisible();
     expect(screen.getByText(/大于 1 MB.*静态传输副本.*GIF.*静态图/)).toBeVisible();
+  });
+
+  it("rejects an over-budget image before creating its preview URL", async () => {
+    const createObjectURL = vi.fn(() => "blob:preview");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+
+    await userEvent.upload(screen.getByLabelText("添加图片"), pngFile("huge.png", 8_000, 4_001));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("3200 万");
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(screen.queryByText("huge.png")).not.toBeInTheDocument();
+  });
+
+  it("applies the same pixel preflight to pasted images", async () => {
+    const createObjectURL = vi.fn(() => "blob:preview");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+    const image = pngFile("pasted-huge.png", 8_000, 4_001);
+
+    fireEvent.paste(screen.getByRole("textbox", { name: "Instruction" }), {
+      clipboardData: { items: [{ kind: "file", type: "image/png", getAsFile: () => image }] },
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("3200 万");
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("enforces a shared 32 million pixel budget across previews", async () => {
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+    const images = [
+      pngFile("one.png", 4_000, 3_000),
+      pngFile("two.png", 4_000, 3_000),
+      pngFile("three.png", 4_000, 3_000),
+    ];
+
+    await userEvent.upload(screen.getByLabelText("添加图片"), images);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("3200 万");
+    expect(screen.queryByText("one.png")).not.toBeInTheDocument();
+  });
+
+  it("does not let a repeated paste bypass a pending selection preflight", async () => {
+    const header = pngHeader(400, 300).buffer;
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.stubGlobal("FileReader", class {
+      result: string | ArrayBuffer | null = header;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      async readAsArrayBuffer() { await readGate; this.onload?.(); }
+    });
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+    fireEvent.change(screen.getByLabelText("添加图片"), { target: { files: [pngFile("first.png", 400, 300)] } });
+
+    fireEvent.paste(screen.getByRole("textbox", { name: "Instruction" }), {
+      clipboardData: { items: [{ kind: "file", type: "image/png", getAsFile: () => pngFile("second.png", 400, 300) }] },
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent("正在读取图片");
+    releaseRead();
+    expect(await screen.findByText("first.png")).toBeVisible();
+    expect(screen.queryByText("second.png")).not.toBeInTheDocument();
+  });
+
+  it("drops a pending preview when switching conversations", async () => {
+    const header = pngHeader(400, 300).buffer;
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.stubGlobal("FileReader", class {
+      result: string | ArrayBuffer | null = header;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      async readAsArrayBuffer() { await readGate; this.onload?.(); }
+    });
+    const props = { onSend: vi.fn(), running: false, expanded: true };
+    const { rerender } = render(<Composer {...props} draftKey="thread-a" />);
+    fireEvent.change(screen.getByLabelText("添加图片"), { target: { files: [pngFile("old.png", 400, 300)] } });
+
+    rerender(<Composer {...props} draftKey="thread-b" />);
+    releaseRead();
+    await waitFor(() => expect(screen.queryByText("old.png")).not.toBeInTheDocument());
+  });
+
+  it("does not resurrect a removed preview when another preflight finishes", async () => {
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+    await userEvent.upload(screen.getByLabelText("添加图片"), pngFile("remove.png", 400, 300));
+    await screen.findByText("remove.png");
+    const header = pngHeader(400, 300).buffer;
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.stubGlobal("FileReader", class {
+      result: string | ArrayBuffer | null = header;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      async readAsArrayBuffer() { await readGate; this.onload?.(); }
+    });
+    fireEvent.change(screen.getByLabelText("添加图片"), { target: { files: [pngFile("keep.png", 400, 300)] } });
+
+    await userEvent.click(screen.getByRole("button", { name: "移除 remove.png" }));
+    releaseRead();
+
+    expect(await screen.findByText("keep.png")).toBeVisible();
+    expect(screen.queryByText("remove.png")).not.toBeInTheDocument();
+  });
+
+  it("does not create a preview after unmounting during preflight", async () => {
+    const createObjectURL = vi.fn(() => "blob:preview");
+    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL: vi.fn() });
+    const header = pngHeader(400, 300).buffer;
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.stubGlobal("FileReader", class {
+      result: string | ArrayBuffer | null = header;
+      onerror: (() => void) | null = null;
+      onload: (() => void) | null = null;
+      async readAsArrayBuffer() { await readGate; this.onload?.(); }
+    });
+    const { unmount } = render(<Composer onSend={vi.fn()} running={false} expanded />);
+    fireEvent.change(screen.getByLabelText("添加图片"), { target: { files: [pngFile("late.png", 400, 300)] } });
+
+    unmount();
+    releaseRead();
+    await act(async () => undefined);
+
+    expect(createObjectURL).not.toHaveBeenCalled();
   });
 
   it("shows and updates the current model reasoning effort and permission", async () => {
@@ -297,3 +441,36 @@ describe("Composer", () => {
     });
   });
 });
+
+function pngFile(name: string, width: number, height: number, size = 24) {
+  const header = pngHeader(width, height);
+  return new File([header, new Uint8Array(Math.max(0, size - header.length))], name, { type: "image/png" });
+}
+
+function pngHeader(width: number, height: number) {
+  const bytes = new Uint8Array(24);
+  bytes.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  return bytes;
+}
+
+function jpegFile(name: string, width: number, height: number) {
+  const bytes = new Uint8Array(13);
+  bytes.set([0xff, 0xd8, 0xff, 0xc0, 0, 9, 8]);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(7, height);
+  view.setUint16(9, width);
+  bytes.set([1, 1], 11);
+  return new File([bytes], name, { type: "image/jpeg" });
+}
+
+function gifFile(name: string, width: number, height: number, size: number) {
+  const header = new Uint8Array(10);
+  header.set(new TextEncoder().encode("GIF89a"));
+  const view = new DataView(header.buffer);
+  view.setUint16(6, width, true);
+  view.setUint16(8, height, true);
+  return new File([header, new Uint8Array(Math.max(0, size - header.length))], name, { type: "image/gif" });
+}

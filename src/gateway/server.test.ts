@@ -1541,7 +1541,7 @@ describe("gateway server", () => {
       expect((await response.arrayBuffer()).byteLength).toBeLessThanOrEqual(MAX_TRANSFER_IMAGE_BYTES);
       const originals = (await readdir(uploadDir)).filter((name) => name.endsWith(".png"));
       expect(originals).toHaveLength(1);
-      expect(await readFile(join(uploadDir, originals[0]))).toEqual(original);
+      expect((await readFile(join(uploadDir, originals[0]))).equals(original)).toBe(true);
 
       const [cached] = await readdir(join(uploadDir, ".transfer-cache"));
       await rm(join(uploadDir, ".transfer-cache", cached));

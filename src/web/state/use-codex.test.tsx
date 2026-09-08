@@ -2656,7 +2656,7 @@ describe("useCodex", () => {
     });
     expect(result.current.desktopControlAvailable).toBe(true);
 
-    const image = new File(["image"], "screen.png", { type: "image/png" });
+    const image = validPngFile("screen.png", 400, 300);
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ id: "upload-1", name: "screen.png", mimeType: "image/png", size: 5 }),
@@ -3144,6 +3144,15 @@ describe("useCodex", () => {
     expect(result.current.connection).toBe("ready");
   });
 });
+
+function validPngFile(name: string, width: number, height: number) {
+  const bytes = new Uint8Array(24);
+  bytes.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  return new File([bytes], name, { type: "image/png" });
+}
 
 describe("optimistic steer reconciliation", () => {
   it.each([

@@ -11,7 +11,8 @@ import {
 } from "react";
 import type { ModelOption, PermissionOption } from "../state/use-codex";
 import type { MobileLanguage } from "../../mobile/settings-store";
-import { MAX_SELECTABLE_IMAGE_BYTES, MAX_TRANSFER_IMAGE_BYTES, SUPPORTED_TRANSFER_IMAGE_TYPES } from "../../protocol/image-transfer";
+import { MAX_TRANSFER_IMAGE_BYTES } from "../../protocol/image-transfer";
+import { inspectImageFile, MAX_BROWSER_IMAGE_PIXELS } from "../api/image-metadata";
 
 export type ComposerSettings = {
   model?: string;
@@ -36,6 +37,8 @@ type ComposerProps = {
   onExpandedChange?: (expanded: boolean) => void;
   language?: MobileLanguage;
 };
+
+type SelectedImage = { file: File; pixels: number };
 
 export function Composer({
   draftKey,
@@ -62,8 +65,12 @@ export function Composer({
   const [error, setError] = useState<string>();
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [internalExpanded, setInternalExpanded] = useState(false);
-  const [images, setImages] = useState<File[]>([]);
-  const previews = useMemo(() => images.map((file) => ({
+  const [images, setImages] = useState<SelectedImage[]>([]);
+  const imagesRef = useRef<SelectedImage[]>([]);
+  const selectingRef = useRef(false);
+  const selectionGeneration = useRef(0);
+  const [selectingImages, setSelectingImages] = useState(false);
+  const previews = useMemo(() => images.map(({ file }) => ({
     file,
     url: typeof URL.createObjectURL === "function" ? URL.createObjectURL(file) : "",
   })), [images]);
@@ -74,25 +81,32 @@ export function Composer({
     }
   }, [previews]);
 
+  useEffect(() => () => {
+    selectionGeneration.current += 1;
+  }, []);
+
   useEffect(() => {
     if (activeDraftKey.current === draftKey) return;
     activeDraftKey.current = draftKey;
+    selectionGeneration.current += 1;
+    selectingRef.current = false;
+    setSelectingImages(false);
     setText(readDraft(draftKey));
-    setImages([]);
+    replaceImages([]);
     setError(undefined);
   }, [draftKey]);
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const instruction = text.trim();
-    if ((!instruction && images.length === 0) || busy || disabled) return;
+    if ((!instruction && images.length === 0) || busy || selectingImages || disabled) return;
     setBusy(true);
     setError(undefined);
     try {
-      await onSend(instruction, images);
+      await onSend(instruction, images.map(({ file }) => file));
       setText("");
       writeDraft(draftKey, "");
-      setImages([]);
+      replaceImages([]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not send instruction");
     } finally {
@@ -100,28 +114,47 @@ export function Composer({
     }
   }
 
-  function addImages(files: File[]) {
-    const accepted = files.filter((file) =>
-      SUPPORTED_TRANSFER_IMAGE_TYPES.includes(file.type as typeof SUPPORTED_TRANSFER_IMAGE_TYPES[number])
-    );
-    if (accepted.length !== files.length) {
-      setError("仅支持 PNG、JPEG、GIF 和 WebP 图片");
+  async function addImages(files: File[]) {
+    if (selectingRef.current) {
+      setError("正在读取图片，请稍候");
       return;
     }
-    if (accepted.some((file) => file.size > MAX_SELECTABLE_IMAGE_BYTES)) {
-      setError("单张原图不能超过 50 MiB");
-      return;
+    selectingRef.current = true;
+    setSelectingImages(true);
+    const generation = selectionGeneration.current;
+    try {
+      const initial = imagesRef.current;
+      const overflow = initial.length + files.length > 4;
+      const filesToInspect = files.slice(0, Math.max(0, 4 - initial.length));
+      const inspected: SelectedImage[] = [];
+      for (const file of filesToInspect) {
+        const { pixels } = await inspectImageFile(file);
+        inspected.push({ file, pixels });
+      }
+      if (generation !== selectionGeneration.current) return;
+      const current = imagesRef.current;
+      const selected = inspected.slice(0, Math.max(0, 4 - current.length));
+      const previewPixels = [...current, ...selected].reduce((total, image) => total + image.pixels, 0);
+      if (previewPixels > MAX_BROWSER_IMAGE_PIXELS) {
+        setError("最多同时预览 3200 万像素的图片");
+        return;
+      }
+      if (selected.length > 0) replaceImages([...current, ...selected]);
+      setError(overflow || current.length + files.length > 4 ? "最多添加 4 张图片" : undefined);
+    } catch (cause) {
+      if (generation === selectionGeneration.current) {
+        setError(cause instanceof Error ? cause.message : "无法读取图片尺寸，请重新选择图片");
+      }
+    } finally {
+      if (generation === selectionGeneration.current) {
+        selectingRef.current = false;
+        setSelectingImages(false);
+      }
     }
-    if (images.length + accepted.length > 4) {
-      setError("最多添加 4 张图片");
-    } else {
-      setError(undefined);
-    }
-    setImages((current) => [...current, ...accepted].slice(0, 4));
   }
 
   function handleImageChange(event: ChangeEvent<HTMLInputElement>) {
-    addImages(Array.from(event.target.files ?? []));
+    void addImages(Array.from(event.target.files ?? []));
     event.target.value = "";
   }
 
@@ -130,7 +163,7 @@ export function Composer({
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
       .map((item) => item.getAsFile())
       .filter((file): file is File => file !== null);
-    if (pasted.length > 0) addImages(pasted);
+    if (pasted.length > 0) void addImages(pasted);
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -210,14 +243,14 @@ export function Composer({
                 <button
                   type="button"
                   aria-label={`移除 ${file.name}`}
-                  onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                  onClick={() => replaceImages(imagesRef.current.filter((_, itemIndex) => itemIndex !== index))}
                 >
                   ×
                 </button>
               </div>
             ))}
           </div>
-          {images.some((file) => file.size > MAX_TRANSFER_IMAGE_BYTES) ? (
+          {images.some(({ file }) => file.size > MAX_TRANSFER_IMAGE_BYTES) ? (
             <p className="composer-image-hint">大于 1 MB 的图片会自动生成静态传输副本，GIF 动图将变为静态图。</p>
           ) : null}
         </>
@@ -311,7 +344,7 @@ export function Composer({
             multiple
             aria-label="添加图片"
             onChange={handleImageChange}
-            disabled={disabled || busy || images.length >= 4}
+            disabled={disabled || busy || selectingImages || images.length >= 4}
           />
         </label> : null}
         {isExpanded ? <span className="composer-hint">⌘↵ to send</span> : <span className="composer-hint" />}
@@ -323,7 +356,7 @@ export function Composer({
         <button
           className="primary-button"
           type="submit"
-          disabled={(!text.trim() && images.length === 0) || busy || disabled}
+          disabled={(!text.trim() && images.length === 0) || busy || selectingImages || disabled}
         >
           {busy
             ? chinese ? "发送中…" : "Working…"
@@ -335,6 +368,11 @@ export function Composer({
       {isExpanded && error ? <p className="inline-error" role="alert">{error}</p> : null}
     </form>
   );
+
+  function replaceImages(next: SelectedImage[]) {
+    imagesRef.current = next;
+    setImages(next);
+  }
 }
 
 const DRAFT_STORAGE_PREFIX = "codex-remote:draft:v1:";

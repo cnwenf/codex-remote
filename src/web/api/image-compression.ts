@@ -1,27 +1,29 @@
 import {
-  MAX_SELECTABLE_IMAGE_BYTES,
   MAX_TRANSFER_IMAGE_BYTES,
-  SUPPORTED_TRANSFER_IMAGE_TYPES,
 } from "../../protocol/image-transfer";
+import { inspectImageFile } from "./image-metadata";
 
 const COMPRESSION_TIMEOUT_MS = 20_000;
 const MAX_IMAGE_EDGE = 2_048;
 const JPEG_QUALITIES = [0.9, 0.8, 0.7, 0.6];
 const MAX_RESIZE_STEPS = 6;
+let codecTail = Promise.resolve();
 
 export async function compressImageForUpload(file: File): Promise<File> {
-  if (!SUPPORTED_TRANSFER_IMAGE_TYPES.includes(file.type as typeof SUPPORTED_TRANSFER_IMAGE_TYPES[number])) {
-    throw new Error("仅支持 PNG、JPEG、GIF 和 WebP 图片");
-  }
-  if (file.size > MAX_SELECTABLE_IMAGE_BYTES) throw new Error("单张原图不能超过 50 MiB");
+  const deadline = Date.now() + COMPRESSION_TIMEOUT_MS;
+  await inspectImageFile(file);
   if (file.size <= MAX_TRANSFER_IMAGE_BYTES) return file;
+  return withCodecSlot(() => compressImage(file, deadline));
+}
 
+async function compressImage(file: File, deadline: number) {
   let url: string | undefined;
   let canvas: HTMLCanvasElement | undefined;
   let image: HTMLImageElement | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   try {
+    if (deadline <= Date.now()) throw new Error("图片压缩超过 20 秒，请重试");
     url = URL.createObjectURL(file);
     image = new Image();
     image.src = url;
@@ -49,13 +51,13 @@ export async function compressImageForUpload(file: File): Promise<File> {
       }
       throw new Error("图片压缩后仍超过 1 MB，请选择较小的图片");
     })();
-    const deadline = new Promise<never>((_resolve, reject) => {
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(() => {
         timedOut = true;
         reject(new Error("图片压缩超过 20 秒，请重试"));
-      }, COMPRESSION_TIMEOUT_MS);
+      }, Math.max(1, deadline - Date.now()));
     });
-    return await Promise.race([work, deadline]);
+    return await Promise.race([work, timeoutPromise]);
   } catch (cause) {
     if (cause instanceof Error && cause.message.startsWith("图片")) throw cause;
     throw new Error("图片压缩失败，请重新选择图片", { cause });
@@ -68,6 +70,12 @@ export async function compressImageForUpload(file: File): Promise<File> {
       canvas.height = 0;
     }
   }
+}
+
+function withCodecSlot<T>(work: () => Promise<T>) {
+  const result = codecTail.then(work);
+  codecTail = result.then(() => undefined, () => undefined);
+  return result;
 }
 
 function boundedDimensions(width: number, height: number, longestEdge: number) {

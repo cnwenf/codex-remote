@@ -61,6 +61,7 @@ export class GatewayImageCompressor {
     }
     if (this.closed) throw new GatewayImageCompressionError("image-compressor-closed", 503);
     const info = await stat(source.path);
+    if (this.closed) throw new GatewayImageCompressionError("image-compressor-closed", 503);
     const key = createHash("sha256")
       .update(source.path).update("\0").update(String(info.mtimeMs)).update("\0").update(String(info.size))
       .digest("hex");

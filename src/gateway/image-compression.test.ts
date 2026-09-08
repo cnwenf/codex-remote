@@ -29,7 +29,7 @@ describe("Gateway image transfer compression", () => {
     try {
       expect(transfer.mimeType).toBe("image/jpeg");
       expect(transfer.size).toBeLessThanOrEqual(MAX_TRANSFER_IMAGE_BYTES);
-      expect(await readFile(saved.path)).toEqual(original);
+      expect((await readFile(saved.path)).equals(original)).toBe(true);
       expect(transfer.path).not.toBe(saved.path);
       const { stdout } = await execFileAsync("/usr/bin/sips", ["-g", "pixelWidth", "-g", "pixelHeight", transfer.path], { encoding: "utf8" });
       const width = Number(/pixelWidth:\s*(\d+)/.exec(stdout)?.[1]);
@@ -73,7 +73,7 @@ describe("Gateway image transfer compression", () => {
     }
   }, 30_000);
 
-  it("keeps an EXIF-rotated camera JPEG portrait without stretching or mirroring", async () => {
+  it("keeps an EXIF-rotated camera JPEG portrait orientation and aspect ratio", async () => {
     const root = await temporaryDirectory();
     const png = join(root, "camera-source.png");
     const jpeg = join(root, "camera-source.jpg");
