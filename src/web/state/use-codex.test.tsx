@@ -712,6 +712,66 @@ describe("ConversationReconciler", () => {
   );
 });
 
+describe("start acknowledgement and history identity ordering", () => {
+  it.each([
+    ["ack", "live", "history"], ["ack", "history", "live"],
+    ["live", "ack", "history"], ["live", "history", "ack"],
+    ["history", "ack", "live"], ["history", "live", "ack"],
+  ])("shows one submission after %s, %s, %s and reconnect replay", async (...order) => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result, unmount } = renderHook(() => useCodex(socket));
+    const liveId = "01a0811a-d125-7b80-827d-c2e3ace32034";
+    const diskId = "msg_01a0811a-d123-7622-8539-ae36da0d8f2b";
+    const history = { thread: { id: "t1", status: "active", turns: [{ id: "turn-1", status: "inProgress", items: [
+      { id: diskId, type: "userMessage", text: "继续", itemIdAliases: [liveId] },
+    ] }] } };
+    const live = () => fake.serverSend({ type: "rpc", payload: { method: "item/completed", params: {
+      threadId: "t1", turnId: "turn-1", item: { id: liveId, type: "userMessage", text: "继续" },
+    } } });
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      let selection!: Promise<void>;
+      act(() => { selection = result.current.selectThread("t1"); });
+      const initial = JSON.parse(fake.sent.at(-1)!).payload;
+      act(() => fake.serverSend({ type: "rpc", payload: { id: initial.id, result: { thread: { id: "t1", turns: [] } } } }));
+      await act(() => selection);
+      let sending!: Promise<void>;
+      act(() => { sending = result.current.sendInstruction("继续"); });
+      const start = JSON.parse(fake.sent.at(-1)!).payload;
+      expect(start.method).toBe("turn/start");
+      for (const step of order) {
+        if (step === "live") act(live);
+        if (step === "ack") {
+          act(() => fake.serverSend({ type: "rpc", payload: { id: start.id, result: { turn: { id: "turn-1" } } } }));
+          await act(() => sending);
+        }
+        if (step === "history") {
+          act(() => { selection = result.current.selectThread("t1"); });
+          const read = JSON.parse(fake.sent.at(-1)!).payload;
+          act(() => fake.serverSend({ type: "rpc", payload: { id: read.id, result: history } }));
+          await act(() => selection);
+        }
+      }
+      act(() => {
+        fake.serverSend({ type: "session", state: "reconnecting" });
+        fake.serverSend({ type: "session", state: "ready" });
+        live();
+        fake.serverSend({ type: "rpc", payload: { method: "turn/completed", params: { threadId: "t1", turn: {
+          id: "turn-1", status: "completed", items: [
+            { id: liveId, type: "userMessage", text: "继续" },
+            { id: "final", type: "agentMessage", text: "DONE", phase: "final_answer" },
+          ],
+        } } } });
+      });
+      expect(result.current.selectedThread?.turnOrder).toEqual(["turn-1"]);
+      expect(result.current.selectedThread?.turns["turn-1"].itemOrder).toEqual([diskId, "final"]);
+      expect(result.current.selectedThread?.turns["turn-1"].items.final.text).toBe("DONE");
+      expect(result.current.selectedThread?.status).toBe("idle");
+    } finally { unmount(); }
+  });
+});
+
 describe("Desktop history gaps", () => {
   it("waits for the initial history read before polling or establishing another cursor", async () => {
     vi.useFakeTimers();

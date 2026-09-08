@@ -2,7 +2,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, s
 import { dirname, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { permissionStateFromProtocol } from "../protocol/permissions";
-import { displayUserInput } from "../protocol/user-message-identity";
+import { displayUserInput, userMessageAliases, userMessageHasIdentity } from "../protocol/user-message-identity";
 import { itemText, messageKind } from "../protocol/message-content";
 import { isToolActivity, MAX_PENDING_TOOL_OUTPUTS, MAX_TOOL_OUTPUT_IMAGES, TOOL_TEXT_LIMIT, toolDetailsFromProtocol, toolOutputFromProtocol, type ToolDetails, type PendingToolOutput } from "../protocol/tool-content";
 import { ImageUploadStore, MAX_IMAGE_BYTES } from "./image-upload-store";
@@ -62,6 +62,7 @@ type ParsedItem = ToolDetails & {
   phase?: string;
   status?: string;
   imageIds?: string[];
+  itemIdAliases?: string[];
   localImages?: Record<string, string>;
   sourceThreadId?: string;
   delegatedInputIsReplay?: boolean;
@@ -1173,6 +1174,11 @@ function parseRollout(raw: string, imageStore: ImageUploadStore) {
   let unassignedContextTurnId: string | undefined;
   const pendingToolOutputs = new Map<string, PendingToolOutput>();
   let toolOutputOverflow = false;
+  let precedingUser: { turnId: string; item: ParsedItem; content: string; firstRecord: boolean } | undefined;
+  let precedingRawUser = false;
+  const seenUserCompletions = new Set<string>();
+  let hasPrecedingRecord = false;
+  let needsUserPredecessor = false;
   const ensureTurn = (id: string, fromItem = false, historicalFragment = false) => {
     let turn = turns.get(id);
     if (!turn) {
@@ -1229,6 +1235,8 @@ function parseRollout(raw: string, imageStore: ImageUploadStore) {
     try {
       entry = asRecord(JSON.parse(line));
     } catch {
+      precedingUser = undefined;
+      precedingRawUser = false;
       if (currentTurnId) {
         const turn = turns.get(currentTurnId);
         if (turn) turn.completeFromTurnStart = false;
@@ -1236,6 +1244,12 @@ function parseRollout(raw: string, imageStore: ImageUploadStore) {
       continue;
     }
     const payload = asRecord(entry.payload);
+    const adjacentUser = precedingUser;
+    const consecutiveRawUser = precedingRawUser;
+    precedingUser = undefined;
+    precedingRawUser = false;
+    const firstRecord = !hasPrecedingRecord;
+    hasPrecedingRecord = true;
     if (entry.type === "turn_context") {
       const contextTurnId = stringValue(payload.turn_id);
       if (unassignedItems.length > 0 && contextTurnId) {
@@ -1255,6 +1269,23 @@ function parseRollout(raw: string, imageStore: ImageUploadStore) {
         // completion records carry their own turn and item identities.
         const value = asRecord(payload.item);
         const id = stringValue(value.id);
+        if (id && messageKind(stringValue(value.type) ?? "") === "user") {
+          // Only a consecutive raw/native pair proves this association. A
+          // replay cannot consume the next identical submission's raw record.
+          needsUserPredecessor ||= firstRecord;
+          const turn = turns.get(turnId);
+          const completionKey = JSON.stringify([turnId, id]);
+          if (adjacentUser?.turnId === turnId && turn &&
+            !seenUserCompletions.has(completionKey) &&
+            !turn.items.some(item => userMessageHasIdentity(item, id)) &&
+            adjacentUser.content === userCompletionContent(value.content, imageStore)) {
+            // A page starting at raw2 must recover raw1 before deciding this
+            // is a one-to-one pair. Existing bounded recovery supplies context.
+            needsUserPredecessor ||= adjacentUser.firstRecord;
+            adjacentUser.item.itemIdAliases = userMessageAliases(adjacentUser.item.id, adjacentUser.item, { id });
+          }
+          seenUserCompletions.add(completionKey);
+        }
         const delegated = delegatedInputFromProtocol(value);
         const nativeCommand = id && stringValue(value.type)?.replace(/[_-]/g, "").toLowerCase() === "commandexecution"
           ? { ...value, type: "commandExecution" }
@@ -1369,14 +1400,47 @@ function parseRollout(raw: string, imageStore: ImageUploadStore) {
     if (item.type === "userMessage") pendingUserImageIds = [];
     const turn = ensureTurn(itemTurnId, true);
     upsertItem(turn, item);
+    if (item.type === "userMessage") {
+      precedingRawUser = true;
+      const content = userCompletionContent(payload.content, imageStore);
+      if (!consecutiveRawUser && content !== undefined) precedingUser = { turnId: itemTurnId,
+        item: turn.items.find(candidate => candidate.id === item.id)!, content, firstRecord };
+    }
   }
   return {
     turns: order.map((id) => turns.get(id) as ParsedTurn)
       .filter((turn) => turn.items.length > 0 || turn.completeFromTurnStart === true),
-    hasUnassignedItems: unassignedItems.length > 0,
+    hasUnassignedItems: unassignedItems.length > 0 || needsUserPredecessor,
     pendingToolOutputs: [...pendingToolOutputs.values()],
     toolOutputOverflow,
   };
+}
+
+function userCompletionContent(value: unknown, imageStore: ImageUploadStore): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const parts: string[][] = [];
+  for (const entry of value) {
+    const part = asRecord(entry);
+    const type = stringValue(part.type);
+    if ((type === "input_text" || type === "text") && typeof part.text === "string") {
+      parts.push(["text", part.text]);
+    } else if ((type === "input_image" || type === "image") && typeof part.image_url === "string") {
+      const url = part.image_url;
+      try {
+        parts.push(["image", url.startsWith("data:image/") || url.startsWith(PROJECTED_IMAGE_URL_PREFIX)
+          ? restoreHistoryImage(imageStore, url) : url]);
+      } catch {
+        // The raw item may already have a valid uploaded-path image reference.
+        // An unreadable optional alias source must not discard that message.
+        return undefined;
+      }
+    } else {
+      // Unknown content shapes cannot establish identity, including text-only
+      // guesses for image messages. Keep the response_item compatibility path.
+      return undefined;
+    }
+  }
+  return JSON.stringify(parts);
 }
 
 function rolloutPlan(value: unknown) {

@@ -3,6 +3,21 @@ const standaloneImageTagPattern = /<image\b[^>]*>/gi;
 const standaloneImageClosingTagPattern = /<\/image>/gi;
 const requestMarkerPattern = /(?:^|\n)#{1,3}\s*My request:\s*/i;
 
+type UserItemIdentity = { id: string; itemIdAliases?: readonly string[]; clientMessageId?: string };
+
+// Aliases belong to one item in one turn, and only come from confirmed merges.
+export function userMessageAliases(id: string, ...items: UserItemIdentity[]) {
+  const aliases = [...new Set(items.flatMap(item => [...(item.itemIdAliases ?? []), item.id]))]
+    .filter(alias => alias !== id);
+  // ponytail: eight historical representations per item; no global identity cache.
+  return aliases.length ? aliases.slice(-8) : undefined;
+}
+
+export function userMessageHasIdentity(item: UserItemIdentity, id: string, clientMessageId?: string) {
+  return !(clientMessageId && item.clientMessageId && clientMessageId !== item.clientMessageId) &&
+    (item.id === id || item.itemIdAliases?.includes(id) === true);
+}
+
 export function sameUserInput(
   leftText: string,
   rightText: string,

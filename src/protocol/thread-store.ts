@@ -1,6 +1,6 @@
 import type { RpcMessage } from "./types";
 import { permissionStateFromProtocol, type PermissionState } from "./permissions";
-import { compatibleUserImages, displayUserInput, sameUserInput } from "./user-message-identity";
+import { compatibleUserImages, displayUserInput, sameUserInput, userMessageAliases, userMessageHasIdentity } from "./user-message-identity";
 import { appendAssistantText, itemText, localImagesFromProtocol, messageKind, visibleAssistantText } from "./message-content";
 import { mergeMessageOrder } from "./message-order";
 import { delegatedInputFromProtocol } from "./delegated-input";
@@ -30,6 +30,7 @@ export type CodexItem = ToolDetails & {
   sourceThreadId?: string;
   delegatedInputIsReplay?: boolean;
   clientMessageId?: string;
+  itemIdAliases?: string[];
   lifecycle?: "pending" | "queued" | "promoting" | "accepted" | "confirmed" | "failed";
   streamedText?: string;
   visibleText?: string;
@@ -348,8 +349,13 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
             error: turnErrorFromProtocol(turnValue.error) ?? turn.error,
             itemOrder: mergeMessageOrder(turn.itemOrder,
               (Array.isArray(turnValue.items) ? turnValue.items : []).flatMap((item) => {
-                const id = stringValue(asRecord(item).id);
-                return id ? [id] : [];
+                const record = asRecord(item);
+                const id = stringValue(record.id);
+                if (!id) return [];
+                const matches = isUserMessageType(stringValue(record.type))
+                  ? Object.values(turn.items).filter(candidate => isUserMessageType(candidate.type) &&
+                    userMessageHasIdentity(candidate, id, messageIdentity(record))) : [];
+                return [matches.length === 1 ? matches[0].id : id];
               }),
             ),
             completedAt: numberValue(turnValue.completedAt) ?? turn.completedAt,
@@ -402,14 +408,18 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
   const rawItem = asRecord(params.item);
   const item: Record<string, unknown> = delegatedInputFromProtocol(rawItem) ?? rawItem;
   if ((message.method === "item/started" || message.method === "item/completed") && threadId) {
-    const itemId = stringValue(item.id);
-    if (!itemId) return state;
+    const incomingItemId = stringValue(item.id);
+    if (!incomingItemId) return state;
     return updateThread(state, threadId, (thread) => {
       const turnId = resolveTurnId(thread, params);
+      const clientMessageId = messageIdentity(item);
+      const aliasMatches = Object.values(thread.turns[turnId]?.items ?? {}).filter(candidate =>
+        isUserMessageType(candidate.type) && userMessageHasIdentity(candidate, incomingItemId, clientMessageId));
+      const itemId = isUserMessageType(stringValue(item.type)) && aliasMatches.length === 1
+        ? aliasMatches[0].id : incomingItemId;
       const itemType = stringValue(item.type) ?? thread.turns[turnId]?.items[itemId]?.type ?? "item";
       const rawText = itemText(item);
       const text = isUserMessageType(itemType) ? displayUserInput(rawText) : rawText;
-      const clientMessageId = messageIdentity(item);
       const optimisticMatch = isUserMessageType(itemType)
         ? findMatchingOptimisticUserMessage(thread, text, turnId, itemId, stringArray(item.imageIds), clientMessageId)
         : undefined;
@@ -459,6 +469,11 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
           textSource: messageKind(itemType) === "agent" && completed && text ? "completed" : previous?.textSource,
           phase: stringValue(item.phase) ?? previous?.phase,
           clientMessageId: clientMessageId ?? previous?.clientMessageId ?? reconciledMatch?.item.clientMessageId,
+          ...(isUserMessageType(itemType) ? { itemIdAliases: userMessageAliases(itemId,
+            ...(previous ? [previous] : []),
+            ...(reconciledMatch?.turnId === turnId ? [reconciledMatch.item] : []),
+            { id: incomingItemId },
+          ) } : {}),
           lifecycle: isUserMessageType(itemType) ? "confirmed" : previous?.lifecycle,
           ...(imageIds.length > 0 ? { imageIds } : {}),
           status: message.method === "item/completed"

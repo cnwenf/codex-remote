@@ -67,6 +67,96 @@ describe("snapshot turn ordering", () => {
 });
 
 describe("user identity during history reconciliation", () => {
+  it.each(["snapshot", "prepend", "append"] as const)("keeps canonical history identity after old live IDs replay through %s", (placement) => {
+    // Real R32 start and steer IDs are unrelated to their response_item IDs.
+    const liveIds = ["01a0811a-d125-7b80-827d-c2e3ace32034", "01a0811b-8dc9-7bb0-9f81-096e7a692f47"];
+    const diskIds = ["msg_01a0811a-d123-7622-8539-ae36da0d8f2b", "msg_01a0811b-8dc5-7a30-8840-c93d7490cb75"];
+    const event = (id: string, method = "item/completed", turnId = "turn") => ({ method, params: {
+      threadId: "t", turnId, item: { id, type: "userMessage", text: "继续", imageIds: ["image"] },
+    } });
+    let state = reduceCodexState(initialCodexState, event(liveIds[0]));
+    state = reduceCodexState(state, { method: "item/completed", params: { threadId: "t", turnId: "turn",
+      item: { id: "tool", type: "commandExecution", text: "pwd" } } });
+    state = reduceCodexState(state, event(liveIds[1]));
+    const history = { thread: { id: "t", status: "idle", turns: [{ id: "turn", status: "completed",
+      completeFromTurnStart: true, items: [
+        user(diskIds[0], ["image"]), { id: "tool", type: "commandExecution", text: "pwd" },
+        user(diskIds[1], ["image"]), { id: "final", type: "agentMessage", text: "DONE", phase: "final_answer" },
+      ],
+    }] } };
+    state = hydrateThread(state, history, placement);
+    for (const id of [...liveIds].reverse()) {
+      state = reduceCodexState(state, event(id, "item/started"));
+      state = reduceCodexState(state, event(id));
+    }
+    state = hydrateThread(state, history, placement);
+    expect(state.threads.t.turns.turn.itemOrder).toEqual([diskIds[0], "tool", diskIds[1], "final"]);
+    state = reduceCodexState(state, { method: "turn/completed", params: { threadId: "t", turn: {
+      id: "turn", status: "completed", items: liveIds.map(id => event(id).params.item),
+    } } });
+    expect(state.threads.t.turns.turn.itemOrder).toEqual([diskIds[0], "tool", diskIds[1], "final"]);
+    expect(state.threads.t.turns.turn.items[diskIds[0]].imageIds).toEqual(["image"]);
+    expect(state.threads.t.turns.turn.items.final.text).toBe("DONE");
+    expect(state.threads.t.status).toBe("idle");
+    // A reused live ID in another turn is a separate submission.
+    state = reduceCodexState(state, event(liveIds[0], "item/completed", "second-turn"));
+    expect(state.threads.t.turns["second-turn"].itemOrder).toEqual([liveIds[0]]);
+    expect(state.threads.t.turns.turn.itemOrder).toHaveLength(4);
+  });
+
+  it.each(["snapshot", "prepend", "append"] as const)("retains a learned live alias across an older %s projection", (placement) => {
+    const live = { ...user("live"), lifecycle: "confirmed" as const };
+    const canonical = { ...user("disk"), lifecycle: "confirmed" as const };
+    let state = hydrateThread(stateWith([live]), { thread: { id: "t", turns: [{ id: "turn",
+      completeFromTurnStart: true, items: [canonical] }] } });
+    state = hydrateThread(state, snapshot(live), placement);
+    state = reduceCodexState(state, { method: "item/completed", params: {
+      threadId: "t", turnId: "turn", item: live,
+    } });
+    expect(state.threads.t.turns.turn.itemOrder).toEqual(["disk"]);
+  });
+
+  it("repairs a previously duplicated live/history projection when an exact alias arrives", () => {
+    const live = { ...user("live", ["image"]), lifecycle: "confirmed" as const };
+    const disk = { ...user("disk"), lifecycle: "confirmed" as const };
+    const next = hydrateThread(stateWith([disk, live]), snapshot({ ...disk, itemIdAliases: ["live"] }));
+    expect(next.threads.t.turns.turn.itemOrder).toEqual(["disk"]);
+    expect(next.threads.t.turns.turn.items.disk.imageIds).toEqual(["image"]);
+  });
+
+  it("does not consume another same-text pending steer when a learned live alias replays", () => {
+    const canonical = { ...user("disk", [], "first"), itemIdAliases: ["live"], lifecycle: "confirmed" as const };
+    const next = reduceCodexState(stateWith([canonical, user("web-steer-second", [], "second")]), {
+      method: "item/completed", params: { threadId: "t", turnId: "turn", item: {
+        id: "live", type: "userMessage", text: "继续",
+      } },
+    });
+    expect(next.threads.t.turns.turn.itemOrder).toEqual(["disk", "web-steer-second"]);
+    expect(next.threads.t.turns.turn.items["web-steer-second"].lifecycle).toBe("pending");
+  });
+
+  it("does not duplicate a canonical item when one snapshot contains both known representations", () => {
+    const canonical = { ...user("disk"), itemIdAliases: ["live"], lifecycle: "confirmed" as const };
+    const next = hydrateThread(stateWith([canonical]), { thread: { id: "t", turns: [{ id: "turn", items: [
+      canonical, { ...user("live", ["image"]), lifecycle: "confirmed" },
+    ] }] } });
+    expect(next.threads.t.turns.turn.itemOrder).toEqual(["disk"]);
+    expect(next.threads.t.turns.turn.items.disk.imageIds).toEqual(["image"]);
+  });
+
+  it("bounds confirmed aliases per item while retaining recent identities", () => {
+    let state = stateWith([{ ...user("first", [], "client"), lifecycle: "confirmed" }]);
+    for (let i = 0; i < 12; i++) state = hydrateThread(state, snapshot({
+      ...user(`representation-${i}`, [], "client"), lifecycle: "confirmed",
+    }));
+    const item = state.threads.t.turns.turn.items["representation-11"];
+    expect(item.itemIdAliases?.length).toBeLessThanOrEqual(8);
+    expect(item.itemIdAliases).toContain("representation-10");
+    state = reduceCodexState(state, { method: "item/completed", params: { threadId: "t", turnId: "turn",
+      item: { id: "representation-10", type: "userMessage", text: "继续" } } });
+    expect(state.threads.t.turns.turn.itemOrder).toEqual(["representation-11"]);
+  });
+
   it.each(["snapshot", "prepend", "append"] as const)("keeps a renamed image question before retained reasoning during %s", (placement) => {
     const state = stateWith([
       { ...user("native-user", ["image"]), lifecycle: "confirmed" },

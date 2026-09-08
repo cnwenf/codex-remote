@@ -1,5 +1,5 @@
 import { todoItems, turnErrorFromProtocol, type CodexState, type CodexThread, type CodexTurn, type ThreadStatus, type TurnStatus } from "../../protocol/thread-store";
-import { compatibleUserImages, sameUserInput } from "../../protocol/user-message-identity";
+import { compatibleUserImages, sameUserInput, userMessageHasIdentity } from "../../protocol/user-message-identity";
 import { itemText, localImagesFromProtocol, mergeMessageItem, messageKind } from "../../protocol/message-content";
 import { MAX_PENDING_TOOL_OUTPUTS, toolDetailsFromProtocol, type PendingToolOutput } from "../../protocol/tool-content";
 import { mergeMessageOrder } from "../../protocol/message-order";
@@ -49,9 +49,15 @@ export function hydrateThread(
     const snapshotItemOrder: string[] = [];
     for (const itemValue of Array.isArray(turnRecord.items) ? turnRecord.items : []) {
       const item: Record<string, unknown> = delegatedInputFromProtocol(asRecord(itemValue)) ?? asRecord(itemValue);
-      const itemId = stringValue(item.id);
-      if (!itemId) continue;
+      const incomingItemId = stringValue(item.id);
+      if (!incomingItemId) continue;
       const itemType = stringValue(item.type) ?? "item";
+      const clientMessageId = stringValue(item.clientMessageId) ??
+        stringValue(item.clientUserMessageId) ?? stringValue(item.client_message_id);
+      const aliasMatches = Object.values(existing?.items ?? {}).filter(candidate =>
+        isUserMessage(candidate) && userMessageHasIdentity(candidate, incomingItemId, clientMessageId));
+      const itemId = messageKind(itemType) === "user" && aliasMatches.length === 1
+        ? aliasMatches[0].id : incomingItemId;
       if (itemType === "todoList" || itemType === "todo-list") {
         const items = todoItems(item.plan);
         if (items.length > 0) {
@@ -76,9 +82,8 @@ export function hydrateThread(
           ? snapshotTerminal || item.status === "completed" ? "completed" : "snapshot"
           : undefined,
         phase: stringValue(item.phase),
-        clientMessageId: stringValue(item.clientMessageId) ??
-          stringValue(item.clientUserMessageId) ??
-          stringValue(item.client_message_id),
+        clientMessageId,
+        itemIdAliases: stringArray(item.itemIdAliases)?.filter(id => id !== itemId).slice(-8),
         lifecycle: itemType.toLocaleLowerCase().includes("user") ? "confirmed" : undefined,
         status: stringValue(item.status) ?? (snapshotTerminal ? "completed" : undefined),
         imageIds: stringArray(item.imageIds),
@@ -100,17 +105,18 @@ export function hydrateThread(
     const reconciledExistingIds = new Map<string, string>();
     for (const snapshotItemId of snapshotItemOrder) {
       const snapshotItem = snapshotItems[snapshotItemId];
-      if (!snapshotItem || existing?.items[snapshotItemId] || !isUserMessage(snapshotItem)) continue;
+      if (!snapshotItem || !isUserMessage(snapshotItem)) continue;
       const liveItemId = existing?.itemOrder.find((existingItemId) => {
         if (reconciledExistingIds.has(existingItemId) || snapshotItems[existingItemId]) return false;
         const liveItem = existing.items[existingItemId];
         const stableIdentity = Boolean(
           snapshotItem.clientMessageId &&
           liveItem?.clientMessageId === snapshotItem.clientMessageId,
-        );
+        ) || Boolean(liveItem && (userMessageHasIdentity(snapshotItem, liveItem.id, liveItem.clientMessageId) ||
+          userMessageHasIdentity(liveItem, snapshotItem.id, snapshotItem.clientMessageId)));
         return Boolean(liveItem) &&
           !isOptimisticUserMessage(existingItemId, liveItem) &&
-          (stableIdentity || snapshotTurnIsComplete) &&
+          (stableIdentity || snapshotTurnIsComplete && !existing.items[snapshotItemId]) &&
           sameUserMessage(snapshotItem, liveItem);
       });
       if (!liveItemId || !existing) continue;
@@ -124,7 +130,7 @@ export function hydrateThread(
     const retainedExistingOrder: string[] = [];
     for (const [itemId, existingItem] of Object.entries(existing?.items ?? {})) {
       if (reconciledExistingIds.has(itemId)) continue;
-      items[itemId] = mergeMessageItem(snapshotItems[itemId], existingItem, snapshotTerminal);
+      items[itemId] = mergeMessageItem(items[itemId], existingItem, snapshotTerminal);
       retainedExistingOrder.push(itemId);
     }
     const existingTerminal = existing ? isTerminalTurnStatus(existing.status) : false;
@@ -140,10 +146,10 @@ export function hydrateThread(
           : snapshotStatus,
       error: turnErrorFromProtocol(turnRecord.error) ?? existing?.error,
       itemOrder: mergeMessageOrder(
-        (existing?.itemOrder ?? []).filter((id) => (reconciledExistingIds.has(id) || retainedExistingOrder.includes(id)) && !(
+        [...new Set((existing?.itemOrder ?? []).filter((id) => (reconciledExistingIds.has(id) || retainedExistingOrder.includes(id)) && !(
           placement === "prepend" && existing?.items[id]?.delegatedInputIsReplay === true &&
           snapshotItems[id]?.delegatedInputIsReplay === false
-        )).map((id) => reconciledExistingIds.get(id) ?? id),
+        )).map((id) => reconciledExistingIds.get(id) ?? id))],
         withHistoryAnchors(snapshotItemOrder,
           historyAnchor.turnId === turnId ? stringValue(historyAnchor.itemId) : undefined,
           historyAfterAnchor.turnId === turnId ? stringValue(historyAfterAnchor.itemId) : undefined,

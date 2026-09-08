@@ -128,6 +128,121 @@ function syntheticPng(size: number) {
   return image;
 }
 
+describe("native user completion identities", () => {
+  const liveIds = ["01a0811a-d125-7b80-827d-c2e3ace32034", "01a0811b-8dc9-7bb0-9f81-096e7a692f47"];
+  const diskIds = ["msg_01a0811a-d123-7622-8539-ae36da0d8f2b", "msg_01a0811b-8dc5-7a30-8840-c93d7490cb75"];
+  const raw = (index: number, content: unknown[], turnId = "turn-1") => ({ type: "response_item", payload: {
+    type: "message", id: diskIds[index], role: "user", content,
+    internal_chat_message_metadata_passthrough: { turn_id: turnId, content_item_kinds: ["user.text"] },
+  } });
+  const native = (index: number, content: unknown[], turnId = "turn-1") => ({ type: "event_msg", payload: {
+    type: "item_completed", thread_id: "thread-1", turn_id: turnId,
+    item: { type: "UserMessage", id: liveIds[index], content },
+  } });
+
+  it.each(["text", "same-text-images", "pure-images"])("pairs adjacent %s submissions once and preserves canonical question IDs", (mode) => {
+    const { databasePath, rolloutPath } = fixture();
+    const images = [syntheticPng(128), syntheticPng(129)].map(image => `data:image/png;base64,${image.toString("base64")}`);
+    const records = [0, 1].flatMap(index => {
+      const rawContent = [
+        ...(mode !== "pure-images" ? [{ type: "input_text", text: "继续" }] : []),
+        ...(mode !== "text" ? [{ type: "input_image", image_url: images[index] }] : []),
+      ];
+      const nativeContent = [
+        ...(mode !== "pure-images" ? [{ type: "text", text: "继续", text_elements: [] }] : []),
+        ...(mode !== "text" ? [{ type: "image", image_url: images[index] }] : []),
+      ];
+      return [raw(index, rawContent), native(index, nativeContent), native(index, nativeContent)];
+    });
+    records.push({ type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1" } } as any);
+    writeFileSync(rolloutPath, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const history = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      expect(history.thread.turns[0].items.map((item: any) => item.id)).toEqual(diskIds);
+      expect(history.thread.turns[0].items.map((item: any) => item.itemIdAliases)).toEqual(liveIds.map(id => [id]));
+      let state = hydrateThread(initialCodexState, history);
+      for (const index of [1, 0, 1]) state = reduceCodexState(state, { method: "item/completed", params: {
+        threadId: "thread-1", turnId: "turn-1", item: { id: liveIds[index], type: "userMessage", text: mode === "pure-images" ? "" : "继续" },
+      } });
+      const turn = state.threads["thread-1"].turns["turn-1"];
+      expect(turn.itemOrder).toEqual(diskIds);
+      if (mode !== "text") {
+        expect(turn.items[diskIds[0]].imageIds).toHaveLength(1);
+        expect(turn.items[diskIds[1]].imageIds).toHaveLength(1);
+        expect(turn.items[diskIds[0]].imageIds).not.toEqual(turn.items[diskIds[1]].imageIds);
+      }
+    } finally { desktop.close(); }
+  });
+
+  it.each(["different-turn", "different-text", "intervening-record", "replayed-completion"])("does not invent an alias for %s", (scenario) => {
+    const { databasePath, rolloutPath } = fixture();
+    const text = [{ type: "input_text", text: "继续" }];
+    const completed = [{ type: "text", text: "继续", text_elements: [] }];
+    const records = [
+      ...(scenario === "replayed-completion" ? [raw(0, text), native(0, completed)] : []),
+      raw(1, text),
+      ...(scenario === "intervening-record" ? [{ type: "event_msg", payload: { type: "token_count" } }] : []),
+      native(scenario === "replayed-completion" ? 0 : 1,
+        scenario === "different-text" ? [{ type: "text", text: "另一次发送" }] : completed,
+        scenario === "different-turn" ? "turn-2" : "turn-1"),
+    ];
+    writeFileSync(rolloutPath, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const history = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      const items = history.thread.turns.flatMap((turn: any) => turn.items);
+      expect(items.find((item: any) => item.id === diskIds[1]).itemIdAliases).toBeUndefined();
+      expect(items).toHaveLength(scenario === "replayed-completion" ? 2 : 1);
+    } finally { desktop.close(); }
+  });
+
+  it.each(["unresolved-raw-run", "unpaired-replay"])("keeps identity unknown for %s", (scenario) => {
+    const { databasePath, rolloutPath } = fixture();
+    const text = [{ type: "input_text", text: "继续" }];
+    const completed = [{ type: "text", text: "继续", text_elements: [] }];
+    const records = scenario === "unresolved-raw-run"
+      ? [raw(0, text), raw(1, text), native(0, completed), native(1, completed)]
+      : [native(0, completed), raw(1, text), native(0, completed)];
+    writeFileSync(rolloutPath, records.map(record => JSON.stringify(record)).join("\n") + "\n");
+    const desktop = new DesktopState(databasePath);
+    try {
+      const history = desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any;
+      const items = history.thread.turns.flatMap((turn: any) => turn.items);
+      expect(items.map((item: any) => item.id)).toEqual(scenario === "unresolved-raw-run" ? diskIds : [diskIds[1]]);
+      expect(items.every((item: any) => !item.itemIdAliases?.length)).toBe(true);
+    } finally { desktop.close(); }
+  });
+
+  it.each([false, true])("recovers the predecessor of a paginated raw/native pair (ambiguous: %s)", (ambiguous) => {
+    const { databasePath, rolloutPath } = fixture();
+    const records = [
+      raw(0, [{ type: "input_text", text: "继续" }]),
+      ...(ambiguous ? [raw(1, [{ type: "input_text", text: "继续" }])] : []),
+      native(0, [{ type: "text", text: "继续", text_elements: [] }]),
+      { type: "response_item", payload: { id: "final", type: "message", role: "assistant", phase: "final_answer",
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+        content: [{ type: "output_text", text: "DONE" + "x".repeat(65_000) }] } },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "turn-1" } },
+    ];
+    const lines = records.map(record => JSON.stringify(record) + "\n");
+    // Tail aligns inside the raw record; its first complete line is native.
+    const maxBytes = Buffer.byteLength(lines.slice(1).join("")) + 16;
+    writeFileSync(rolloutPath, lines.join(""));
+    const desktop = new DesktopState(databasePath);
+    try {
+      const history = desktop.request("desktopState/readThread", { threadId: "thread-1", history: { maxBytes } }) as any;
+      expect(history.thread.turns[0].items[0]).toMatchObject({ id: diskIds[0] });
+      if (ambiguous) {
+        expect(history.thread.turns[0].items.filter((item: any) => item.type === "userMessage").map((item: any) => item.id)).toEqual(diskIds);
+        expect(history.thread.turns[0].items.every((item: any) => !item.itemIdAliases?.length)).toBe(true);
+      } else expect(history.thread.turns[0].items[0].itemIdAliases).toEqual([liveIds[0]]);
+      expect(history.thread.turns[0].items.at(-1).id).toBe("final");
+      expect(history.history.hasMoreBefore).toBe(false);
+    } finally { desktop.close(); }
+  });
+});
+
 describe("DesktopState", () => {
   it("reads anchored question context outside the visible history page without accepting a client path", async () => {
     const { databasePath, rolloutPath } = fixture();

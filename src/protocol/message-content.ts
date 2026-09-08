@@ -1,4 +1,5 @@
 import type { CodexItem } from "./thread-store";
+import { userMessageAliases } from "./user-message-identity";
 
 export function localImagesFromProtocol(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -90,6 +91,7 @@ export function mergeMessageItem(snapshot: CodexItem | undefined, live: CodexIte
       (live.status !== "completed" && snapshot.toolOutput.length > live.toolOutput.length)) ? snapshot : live;
   return {
     ...snapshot, ...live, text, textSource,
+    ...(messageKind(live.type) === "user" ? { itemIdAliases: userMessageAliases(snapshot.id, live, snapshot) } : {}),
     localImages: { ...snapshot.localImages, ...live.localImages },
     ...(toolOutputSource.toolOutput !== undefined ? {
       toolOutput: toolOutputSource.toolOutput,
