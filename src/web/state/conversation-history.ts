@@ -14,6 +14,8 @@ export function hydrateThread(
   closeRetainedTurns = true,
 ): CodexState {
   const outer = asRecord(value);
+  const historyAnchor = placement === "prepend" ? asRecord(outer.historyAnchor) : {};
+  const historyAfterAnchor = placement === "prepend" ? asRecord(outer.historyAfterAnchor) : {};
   const record = asRecord(outer.thread ?? value);
   const id = stringValue(record.id);
   if (!id) return state;
@@ -142,7 +144,10 @@ export function hydrateThread(
           placement === "prepend" && existing?.items[id]?.delegatedInputIsReplay === true &&
           snapshotItems[id]?.delegatedInputIsReplay === false
         )),
-        snapshotItemOrder,
+        withHistoryAnchors(snapshotItemOrder,
+          historyAnchor.turnId === turnId ? stringValue(historyAnchor.itemId) : undefined,
+          historyAfterAnchor.turnId === turnId ? stringValue(historyAfterAnchor.itemId) : undefined,
+          existing?.itemOrder ?? []),
         placement === "prepend" || snapshotTurnIsComplete,
       ),
       items,
@@ -158,13 +163,14 @@ export function hydrateThread(
       ? completeRetainedItems(hydratedTurn)
       : hydratedTurn;
   }
-  const initialTurnOrder = mergeMessageOrder(current.turnOrder, snapshotTurnOrder, placement !== "append");
+  const initialTurnOrder = mergeMessageOrder(current.turnOrder,
+    withHistoryAnchors(snapshotTurnOrder, stringValue(historyAnchor.turnId), stringValue(historyAfterAnchor.turnId), current.turnOrder), placement !== "append");
   const snapshotStatus = normalizeStatus(record.status, current.status);
   if (
     placement !== "prepend" &&
     closeRetainedTurns &&
-    outer.desktopMirror === true &&
-    snapshotStatus === "idle" &&
+    (outer.desktopMirror === true || outer.latestTurnMetadata === true) &&
+    (snapshotStatus === "idle" || (outer.latestTurnMetadata === true && snapshotStatus === "error")) &&
     !snapshotHasInProgressTurn
   ) {
     const latestTerminalSnapshotTurnId = [...snapshotTurnOrder].reverse()
@@ -481,6 +487,20 @@ function stringArray(value: unknown) {
     : undefined;
 }
 
+
+function withHistoryAnchors(incoming: string[], before: string | undefined, after: string | undefined, existing: string[]) {
+  const beforeIndex = before ? existing.indexOf(before) : -1;
+  const afterIndex = after ? existing.indexOf(after) : -1;
+  // Older replays still update their item bodies, but cannot reorder history
+  // that lies before the byte gap's known left boundary.
+  const order = afterIndex >= 0 ? incoming.filter(id => {
+    const index = existing.indexOf(id);
+    return index < 0 || index >= afterIndex;
+  }) : incoming;
+  // A late old-tool fragment is not a valid right boundary for newer turns.
+  if (before && beforeIndex > afterIndex && !order.includes(before)) return [...order, before];
+  return after && afterIndex >= 0 && !order.includes(after) ? [after, ...order] : order;
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};

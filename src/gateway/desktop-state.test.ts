@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -1423,6 +1423,7 @@ describe("DesktopState", () => {
     expect(latest.thread.turns.every((turn: any) => turn.completeFromTurnStart === true)).toBe(true);
     expect(latest.history).toMatchObject({ hasMoreBefore: true });
     expect(latest.history.beforeCursor).toEqual(expect.any(String));
+    expect(latest.historyRange).toEqual({ start: Number(latest.history.beforeCursor), end: statSync(rolloutPath).size });
 
     const older = state.request("desktopState/readThread", {
       threadId: "thread-1",
@@ -1437,6 +1438,7 @@ describe("DesktopState", () => {
       "turn-1", "turn-2", "turn-3", "turn-4",
     ]);
     expect(older.history).toEqual({ hasMoreBefore: false });
+    expect(older.historyRange).toEqual({ start: 0, end: Number(latest.history.beforeCursor) });
     state.close();
   });
 

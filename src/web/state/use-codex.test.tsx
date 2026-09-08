@@ -30,6 +30,15 @@ function taskListRequests(fake: FakeBrowserSocket, start = 0) {
   };
 }
 
+function latestTurnResponse(socket: CodexSocket, turn: { id: string; status: string }) {
+  const request = socket.request.bind(socket);
+  vi.spyOn(socket, "request").mockImplementation((method, params, options) => {
+    if (method !== "thread/turns/list") return request(method, params, options);
+    expect(params).toEqual({ threadId: "t1", limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+    return Promise.resolve({ data: [{ ...turn, items: [], itemsView: "notLoaded" }], nextCursor: null });
+  });
+}
+
 function runningCommandState(): CodexState {
   return { stale: false, threadOrder: ["t1"], threads: { t1: {
     id: "t1", title: "Task", status: "running", activeTurnId: "turn-1", turnOrder: ["turn-1"],
@@ -703,6 +712,98 @@ describe("ConversationReconciler", () => {
   );
 });
 
+describe("Desktop history gaps", () => {
+  it("places a missing whole turn and partial-turn items before their right-hand history anchors", () => {
+    const reconciler = new ConversationReconciler();
+    const turn = (id: string, ids: string[]) => ({ id, status: "completed", items: ids.map(id => ({ id, type: "agentMessage", text: id })) });
+    const state = reconciler.hydrate(initialCodexState, { thread: { id: "t", turns: [turn("a", ["a"]), turn("b", ["first", "last"]), { ...turn("d", ["d"]), status: "inProgress" }] } });
+    const withTurn = reconciler.hydrate(state, { historyAnchor: { turnId: "d", itemId: "d" }, thread: { id: "t", turns: [turn("c", ["c"])] } }, "prepend");
+    expect(withTurn.threads.t.turnOrder).toEqual(["a", "b", "c", "d"]);
+    const withItem = reconciler.hydrate(withTurn, { historyAnchor: { turnId: "b", itemId: "last" }, thread: { id: "t", turns: [turn("b", ["middle"])] } }, "prepend");
+    expect(withItem.threads.t.turns.b.itemOrder).toEqual(["first", "middle", "last"]);
+    for (const historyAnchor of [undefined, { turnId: "a", itemId: "a" }]) {
+      const after = reconciler.hydrate(state, { historyAnchor, historyAfterAnchor: { turnId: "b", itemId: "first" },
+        thread: { id: "t", turns: [turn("c", ["c"])] } }, "prepend");
+      expect(after.threads.t.turnOrder).toEqual(["a", "b", "c", "d"]);
+      expect(after.threads.t.activeTurnId).toBe("d");
+    }
+    const afterItem = reconciler.hydrate(state, { historyAfterAnchor: { turnId: "b", itemId: "first" },
+      thread: { id: "t", turns: [turn("b", ["middle"])] } }, "prepend");
+    expect(afterItem.threads.t.turns.b.itemOrder).toEqual(["first", "middle", "last"]);
+    const replay = reconciler.hydrate(state, { historyAnchor: { turnId: "a" }, historyAfterAnchor: { turnId: "b" },
+      thread: { id: "t", turns: [turn("a", ["late-tool"]), turn("c", ["c"])] } }, "prepend");
+    expect(replay.threads.t.turnOrder).toEqual(["a", "b", "c", "d"]);
+    expect(replay.threads.t.turns.a.items["late-tool"].text).toBe("late-tool");
+  });
+  it.each(["back", "archive", "delete"])("recovers a new paginated image and cancels late gap pages on %s", async (exitAction) => {
+    vi.useFakeTimers();
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const page = (start: number, end: number, turns: unknown[]) => ({
+      desktopMirror: true, historyRange: { start, end },
+      history: start ? { hasMoreBefore: true, beforeCursor: String(start) } : { hasMoreBefore: false },
+      thread: { id: "t1", status: "idle", turns },
+    });
+    const turn = (id: string, items: unknown[]) => ({ id, status: "completed", items });
+    let latest = page(0, 100, [turn("old", [{ id: "old-final", type: "agentMessage", text: "Earlier" }])]);
+    let resolveLateGap: ((value: unknown) => void) | undefined;
+    const gaps: string[] = [];
+    vi.spyOn(socket, "request").mockImplementation(async (method, params) => {
+      if (method === "thread/list" || method === "desktopState/listThreads") return { data: [{ id: "t1", status: "idle" }] };
+      if (method === "desktopState/readThread") {
+        const cursor = (params as any).history.beforeCursor;
+        if (!cursor) return latest;
+        gaps.push(cursor);
+        if (cursor === "2000") return new Promise(resolve => { resolveLateGap = resolve; });
+        if (cursor === "300") return page(150, 300, [turn("new", [{ id: "tool", type: "commandExecution", text: "echo ok" }])]);
+        if (cursor === "150") return page(50, 150, [turn("new", [{ id: "question", type: "userMessage", text: "Picture", imageIds: ["image-a"] }])]);
+        if (Number(cursor) > 400) return page(Number(cursor) - 100, Number(cursor), [turn(`turn-${cursor}`, [])]);
+        throw new Error("Unexpected history cursor");
+      }
+      return {};
+    });
+    const { result, unmount } = renderHook(() => useCodex(socket));
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      await act(() => result.current.refreshThreads());
+      await act(() => result.current.selectThread("t1"));
+      latest = page(300, 400, [turn("new", [{ id: "final", type: "agentMessage", text: "Image received", phase: "final_answer" }])]);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(gaps).toEqual(["300"]);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(gaps).toEqual(["300", "150"]);
+      expect(result.current.selectedThread?.turns.new.items.question.imageIds).toEqual(["image-a"]);
+      expect(result.current.selectedThread?.turns.new.items.final.text).toBe("Image received");
+      expect(result.current.selectedThread?.status).toBe("idle");
+      expect(result.current.selectedThreadHistory.hasMoreBefore).toBe(false);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(gaps).toHaveLength(2);
+      latest = page(1_400, 1_500, [turn("after-offline", [{ id: "last-final", type: "agentMessage", text: "Last" }])]);
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(gaps).toHaveLength(10); // Two original pages plus eight automatic recovery pages.
+      expect(result.current.selectedThreadHistory).toMatchObject({ hasMoreBefore: true, beforeCursor: "600" });
+      await act(() => result.current.loadEarlierThreadHistory(true));
+      expect(gaps).toHaveLength(10);
+      await act(() => result.current.loadEarlierThreadHistory());
+      expect(gaps.at(-1)).toBe("600");
+      await act(() => result.current.loadEarlierThreadHistory());
+      expect(gaps.at(-1)).toBe("500");
+      expect(result.current.selectedThreadHistory.hasMoreBefore).toBe(false);
+      latest = page(2_000, 2_100, [turn("after-switch", [])]);
+      await act(() => vi.advanceTimersByTimeAsync(2_000));
+      expect(resolveLateGap).toBeTypeOf("function");
+      expect(result.current.selectedThreadHistory.loading).toBe(true);
+      await act(async () => {
+        if (exitAction === "back") result.current.clearSelection();
+        else if (exitAction === "archive") await result.current.archiveThread("t1");
+        else await result.current.deleteThread("t1");
+      });
+      await act(async () => resolveLateGap?.(page(1_500, 2_000, [turn("late-gap", [{ id: "late", type: "agentMessage", text: "Late page" }])])));
+      expect(result.current.state.threads.t1?.turns["late-gap"]).toBeUndefined();
+    } finally { unmount(); vi.useRealTimers(); }
+  });
+});
+
 describe("useCodex", () => {
   it("applies a deadline only to the read-only question RPC", async () => {
     const fake = new FakeBrowserSocket();
@@ -1018,9 +1119,65 @@ describe("useCodex", () => {
     });
   });
 
+  it.each([
+    ["active", "unknown", "running"],
+    ["active", "idle", "running"],
+    ["idle", "active", "idle"],
+    ["systemError", "idle", "error"],
+    ["notLoaded", "active", "running"],
+    [undefined, "active", "running"],
+  ])("uses live list status %s with history fallback %s", async (liveStatus, historyStatus, expected) => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    let refresh: Promise<void>;
+    act(() => { refresh = result.current.refreshThreads(); });
+    const { live, desktop } = taskListRequests(fake);
+    fake.serverSend({ type: "rpc", payload: { id: live.id, result: {
+      data: [{ id: "t1", name: "Live title", status: { type: liveStatus } }],
+    } } });
+    fake.serverSend({ type: "rpc", payload: { id: desktop.id, result: {
+      data: [{ id: "t1", title: "Desktop title", isPinned: true, status: { type: historyStatus } }],
+    } } });
+    await act(() => refresh);
+    expect(result.current.state.threads.t1).toMatchObject({
+      status: expected, title: "Desktop title", sectionName: "Pinned",
+    });
+  });
+
+  it("recovers a new Desktop turn from the list after missing its start event", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    act(() => {
+      fake.serverSend({ type: "rpc", payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "old" } } } });
+      fake.serverSend({ type: "rpc", payload: { method: "turn/completed", params: { threadId: "t1", turn: { id: "old", status: "completed" } } } });
+    });
+    // Only the transport is doubled: the hook, event reducer and list merge are real.
+    const request = socket.request.bind(socket);
+    vi.spyOn(socket, "request").mockImplementation((method, params, options) => {
+      if (method === "thread/turns/list") {
+        expect(params).toEqual({ threadId: "t1", limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+        return Promise.resolve({ data: [{ id: "new", status: "inProgress", items: [], itemsView: "notLoaded" }], nextCursor: "older" }) as ReturnType<typeof request>;
+      }
+      return request(method, params, options);
+    });
+    let refresh: Promise<void>;
+    act(() => { refresh = result.current.refreshThreads(); });
+    const { live, desktop } = taskListRequests(fake);
+    fake.serverSend({ type: "rpc", payload: { id: live.id, result: { data: [{ id: "t1", status: { type: "active" } }] } } });
+    fake.serverSend({ type: "rpc", payload: { id: desktop.id, result: { data: [{ id: "t1", status: { type: "active" } }] } } });
+    await act(() => refresh);
+    expect(result.current.state.threads.t1).toMatchObject({ status: "running", activeTurnId: "new" });
+    expect(result.current.state.threads.t1.turns.old.status).toBe("completed");
+  });
+
   it("does not let a stale idle list snapshot overwrite an active turn", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);
+    latestTurnResponse(socket, { id: "live-turn", status: "inProgress" });
     const { result } = renderHook(() => useCodex(socket));
     await act(() => result.current.connect("secret", "ws://local/rpc"));
 
@@ -1062,9 +1219,55 @@ describe("useCodex", () => {
     expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined });
   });
 
+  it.each([
+    { name: "missed completion", known: "inProgress", listed: "idle", turnId: "old", turnStatus: "completed", expected: "idle", active: undefined },
+    { name: "missed failure", known: "inProgress", listed: "systemError", turnId: "old", turnStatus: "failed", expected: "error", active: undefined },
+    { name: "missed whole later turn", known: "inProgress", listed: "idle", turnId: "new", turnStatus: "completed", expected: "idle", active: undefined },
+    { name: "missed whole later failed turn", known: "inProgress", listed: "systemError", turnId: "new", turnStatus: "failed", expected: "error", active: undefined },
+    { name: "stale same-turn activity", known: "completed", listed: "active", turnId: "old", turnStatus: "inProgress", expected: "idle", active: undefined },
+    { name: "completion during read", known: "completed", listed: "active", turnId: "new", turnStatus: "inProgress", event: "complete", expected: "idle", active: undefined },
+    { name: "failure during read", known: "completed", listed: "active", turnId: "new", turnStatus: "inProgress", event: "fail", expected: "error", active: undefined },
+    { name: "failed terminal with unavailable metadata", known: "failed", listed: "active", turnId: "new", turnStatus: "inProgress", event: "reject", expected: "error", active: undefined },
+    { name: "failed terminal with unverified idle", known: "failed", listed: "idle", turnId: "new", turnStatus: "completed", event: "reject", expected: "error", active: undefined },
+    { name: "newer start during read", known: "completed", listed: "active", turnId: "new", turnStatus: "inProgress", event: "start", expected: "running", active: "newer" },
+    { name: "unavailable metadata", known: "completed", listed: "active", turnId: "new", turnStatus: "inProgress", event: "reject", expected: "idle", active: undefined },
+  ])("reconciles list conflicts without losing messages: $name", async (scenario) => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    const event = (method: string, params: unknown) => fake.serverSend({ type: "rpc", payload: { method, params } });
+    act(() => {
+      event("turn/started", { threadId: "t1", turn: { id: "old" } });
+      event("item/completed", { threadId: "t1", turnId: "old", item: { id: "answer", type: "agentMessage", text: "Keep this answer", phase: "final_answer" } });
+      if (scenario.known !== "inProgress") event("turn/completed", { threadId: "t1", turn: { id: "old", status: scenario.known } });
+    });
+    const request = socket.request.bind(socket);
+    vi.spyOn(socket, "request").mockImplementation((method, params, options) => {
+      if (method !== "thread/turns/list") return request(method, params, options);
+      expect(params).toEqual({ threadId: "t1", limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
+      if (scenario.event === "reject") return Promise.reject(new Error("bridge unavailable"));
+      if (scenario.event === "start") event("turn/started", { threadId: "t1", turn: { id: "newer" } });
+      if (scenario.event === "complete" || scenario.event === "fail") {
+        event("turn/started", { threadId: "t1", turn: { id: "new" } });
+        event("turn/completed", { threadId: "t1", turn: { id: "new", status: scenario.event === "fail" ? "failed" : "completed" } });
+      }
+      return Promise.resolve({ data: [{ id: scenario.turnId, status: scenario.turnStatus, items: [], itemsView: "notLoaded" }] });
+    });
+    let refresh: Promise<void>;
+    act(() => { refresh = result.current.refreshThreads(); });
+    const { live, desktop } = taskListRequests(fake);
+    fake.serverSend({ type: "rpc", payload: { id: live.id, result: { data: [{ id: "t1", status: { type: scenario.listed } }] } } });
+    fake.serverSend({ type: "rpc", payload: { id: desktop.id, result: { data: [{ id: "t1", status: { type: "unknown" } }] } } });
+    await act(() => refresh);
+    expect(result.current.state.threads.t1).toMatchObject({ status: scenario.expected, activeTurnId: scenario.active });
+    expect(result.current.state.threads.t1.turns.old.items.answer).toMatchObject({ text: "Keep this answer", phase: "final_answer" });
+  });
+
   it("does not let a stale active list restart a completed turn", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);
+    latestTurnResponse(socket, { id: "turn-1", status: "completed" });
     const { result } = renderHook(() => useCodex(socket));
     await act(() => result.current.connect("secret", "ws://local/rpc"));
 
@@ -1100,6 +1303,38 @@ describe("useCodex", () => {
     await act(() => refresh);
 
     expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined });
+  });
+
+  it.each(["inProgress", "completed"])("keeps a newer history snapshot when older %s status metadata arrives late", async (status) => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    act(() => {
+      fake.serverSend({ type: "rpc", payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "old" } } } });
+      fake.serverSend({ type: "rpc", payload: { method: "turn/completed", params: { threadId: "t1", turn: { id: "old", status: "completed" } } } });
+    });
+    let refresh: Promise<void>;
+    act(() => { refresh = result.current.refreshThreads(); });
+    const { live, desktop } = taskListRequests(fake);
+    fake.serverSend({ type: "rpc", payload: { id: live.id, result: { data: [{ id: "t1", status: "active" }] } } });
+    fake.serverSend({ type: "rpc", payload: { id: desktop.id, result: { data: [{ id: "t1", status: "unknown" }] } } });
+    await waitFor(() => expect(fake.sent.map(raw => JSON.parse(raw).payload.method)).toContain("thread/turns/list"));
+    const metadata = fake.sent.map(raw => JSON.parse(raw).payload).find(r => r.method === "thread/turns/list");
+    let selection: Promise<void>;
+    act(() => { selection = result.current.selectThread("t1"); });
+    const resume = fake.sent.map(raw => JSON.parse(raw).payload).find(r => r.method === "desktopState/readThread");
+    fake.serverSend({ type: "rpc", payload: { id: resume.id, result: { thread: {
+      id: "t1", status: "active", turns: [{ id: "old", status: "completed", items: [] }, { id: "newest", status: "inProgress", items: [
+        { id: "progress", type: "agentMessage", text: "Newest progress", phase: "commentary" },
+      ] }],
+    } } } });
+    await act(() => selection);
+    expect(result.current.state.threads.t1).toMatchObject({ status: "running", activeTurnId: "newest", turnOrder: ["old", "newest"] });
+    fake.serverSend({ type: "rpc", payload: { id: metadata.id, result: { data: [{ id: "middle", status, items: [] }] } } });
+    await act(() => refresh);
+    expect(result.current.state.threads.t1).toMatchObject({ status: "running", activeTurnId: "newest", turnOrder: ["old", "newest"] });
+    expect(result.current.state.threads.t1.turns.newest.items.progress.text).toBe("Newest progress");
   });
 
   it("recovers the active turn identity before stopping a running task", async () => {
@@ -1146,6 +1381,65 @@ describe("useCodex", () => {
     await act(() => stopping);
 
     expect(result.current.selectedThread).toMatchObject({ status: "running", activeTurnId: "live-turn" });
+  });
+
+  it("times out a conflicting metadata read without accepting its late response", async () => {
+    vi.useFakeTimers();
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result, unmount } = renderHook(() => useCodex(socket));
+    try {
+      await act(() => result.current.connect("secret", "ws://local/rpc"));
+      act(() => {
+        fake.serverSend({ type: "rpc", payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "old" } } } });
+        fake.serverSend({ type: "rpc", payload: { method: "turn/completed", params: { threadId: "t1", turn: { id: "old", status: "completed" } } } });
+      });
+      let refresh: Promise<void>;
+      act(() => { refresh = result.current.refreshThreads(); });
+      const { live, desktop } = taskListRequests(fake);
+      fake.serverSend({ type: "rpc", payload: { id: live.id, result: { data: [{ id: "t1", status: "active" }] } } });
+      fake.serverSend({ type: "rpc", payload: { id: desktop.id, result: { data: [{ id: "t1", status: "unknown" }] } } });
+      await act(async () => {});
+      const metadata = fake.sent.map(raw => JSON.parse(raw).payload).find(r => r.method === "thread/turns/list");
+      expect(metadata.params).toMatchObject({ limit: 1, itemsView: "notLoaded" });
+      await act(() => vi.advanceTimersByTimeAsync(5_001));
+      await act(() => refresh);
+      act(() => fake.serverSend({ type: "rpc", payload: { id: metadata.id, result: { data: [{ id: "late", status: "inProgress" }] } } }));
+      expect(result.current.threadsLoading).toBe(false);
+      expect(result.current.state.threads.t1).toMatchObject({ status: "idle", activeTurnId: undefined, turnOrder: ["old"] });
+    } finally {
+      unmount();
+      socket.disconnect();
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores old status metadata after a newer list refresh has settled", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    act(() => {
+      fake.serverSend({ type: "rpc", payload: { method: "turn/started", params: { threadId: "t1", turn: { id: "old" } } } });
+      fake.serverSend({ type: "rpc", payload: { method: "turn/completed", params: { threadId: "t1", turn: { id: "old", status: "completed" } } } });
+    });
+    let older: Promise<void>;
+    act(() => { older = result.current.refreshThreads(); });
+    const first = taskListRequests(fake);
+    fake.serverSend({ type: "rpc", payload: { id: first.live.id, result: { data: [{ id: "t1", status: "active" }] } } });
+    fake.serverSend({ type: "rpc", payload: { id: first.desktop.id, result: { data: [{ id: "t1", status: "unknown" }] } } });
+    await waitFor(() => expect(fake.sent.map(raw => JSON.parse(raw).payload.method)).toContain("thread/turns/list"));
+    const metadata = fake.sent.map(raw => JSON.parse(raw).payload).find(r => r.method === "thread/turns/list");
+    let newer: Promise<void>;
+    const start = fake.sent.length;
+    act(() => { newer = result.current.refreshThreads(); });
+    const second = taskListRequests(fake, start);
+    fake.serverSend({ type: "rpc", payload: { id: second.live.id, result: { data: [{ id: "t1", status: "idle" }] } } });
+    fake.serverSend({ type: "rpc", payload: { id: second.desktop.id, result: { data: [{ id: "t1", title: "Newest title" }] } } });
+    await act(() => newer);
+    fake.serverSend({ type: "rpc", payload: { id: metadata.id, result: { data: [{ id: "late", status: "inProgress" }] } } });
+    await act(() => older);
+    expect(result.current.state.threads.t1).toMatchObject({ status: "idle", title: "Newest title", activeTurnId: undefined, turnOrder: ["old"] });
   });
 
   it("treats a stop request that raced with turn completion as already stopped", async () => {

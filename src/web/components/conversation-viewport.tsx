@@ -11,7 +11,7 @@ type ConversationViewportProps = {
   history: ThreadHistoryState;
   connection?: ConnectionState;
   readQuestionContext?: ReadQuestionContext;
-  onLoadEarlier: () => Promise<void>;
+  onLoadEarlier: (automatic?: boolean) => Promise<void>;
   onInteract?: () => void;
   children: ReactNode;
 };
@@ -144,16 +144,17 @@ export function ConversationViewport({
   }
   syncVisibleAnchorRef.current = syncVisibleAnchor;
 
-  function requestEarlierIfNeeded(viewport: HTMLDivElement, requireShortViewport = false) {
+  function requestEarlierIfNeeded(viewport: HTMLDivElement, requireShortViewport = false, manual = false) {
     if (
       (requireShortViewport && viewport.scrollHeight > viewport.clientHeight) ||
+      (history.gapRecoveryPaused && !manual) ||
       !history.hasMoreBefore || history.loading || prependAnchor.current
     ) return;
     prependAnchor.current = {
       scrollHeight: viewport.scrollHeight,
       scrollTop: viewport.scrollTop,
     };
-    void onLoadEarlier().catch(() => {
+    void onLoadEarlier(!manual).catch(() => {
       prependAnchor.current = undefined;
     });
   }
@@ -231,6 +232,10 @@ export function ConversationViewport({
       {!initialHistoryPending ? <div className="history-sentinel" role="status" aria-live="polite">
         {history.loading
           ? "正在加载更早内容…"
+          : history.gapRecoveryPaused
+            ? <button type="button" className="secondary-button" onClick={() => {
+              if (viewportRef.current) requestEarlierIfNeeded(viewportRef.current, false, true);
+            }}>继续加载遗漏内容</button>
           : history.hasMoreBefore
             ? "继续向上滚动可加载更早内容"
             : "已显示最早内容"}

@@ -11,6 +11,7 @@ import {
 import { displayUserInput, sameUserInput } from "../../protocol/user-message-identity";
 import { itemText } from "../../protocol/message-content";
 import { hydrateThread, sameUserMessage } from "./conversation-history";
+import { addHistoryRange, latestHistoryGap, type HistoryRange } from "./history-coverage";
 import { isRpcRequest, type RpcRequest } from "../../protocol/types";
 import {
   permissionModeOptions,
@@ -187,6 +188,7 @@ export type ThreadHistoryState = {
   beforeCursor?: string;
   hasMoreBefore: boolean;
   loading: boolean;
+  gapRecoveryPaused?: boolean;
 };
 
 const HISTORY_PAGE = { limitTurns: 8, maxBytes: 2 * 1024 * 1024 } as const;
@@ -204,6 +206,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const [socket] = useState(() => socketOverride ?? new CodexSocket());
   const [reconciler] = useState(() => new ConversationReconciler());
   const [state, setState] = useState<CodexState>(initialCodexState);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
   const [threadsLoading, setThreadsLoading] = useState(true);
   const [threadsError, setThreadsError] = useState<string>();
@@ -231,6 +235,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const selectionRequestVersion = useRef(0);
   const liveRevisions = useRef(new Map<string, number>());
   const historyLoads = useRef(new Set<string>());
+  const historyCoverage = useRef(new Map<string, HistoryRange[]>());
+  const automaticGapPages = useRef(new Map<string, number>());
   const desktopHistoryThreads = useRef(new Set<string>());
   const optimisticItemSequence = useRef(0);
   const turnStartedWaiters = useRef(new Map<string, Set<() => void>>());
@@ -241,6 +247,11 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     requestedRevision?: number,
   ) => {
     const threadId = stringValue(asRecord(asRecord(value).thread ?? value).id);
+    if (threadId) {
+      const ranges = addHistoryRange(historyCoverage.current.get(threadId) ?? [], value);
+      historyCoverage.current.set(threadId, ranges);
+      if (!latestHistoryGap(ranges)) automaticGapPages.current.delete(threadId);
+    }
     setState((current) => reconciler.hydrate(current, value, placement,
       requestedRevision === undefined || requestedRevision === (liveRevisions.current.get(threadId ?? "") ?? 0),
     ));
@@ -320,6 +331,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
 
   const refreshThreads = useCallback(async () => {
     const version = ++threadListRequestVersion.current;
+    const requestedRevisions = new Map(liveRevisions.current);
     const liveList = boundedRequest(socket.request("thread/list", {
       limit: 100,
       sortKey: "updated_at",
@@ -337,8 +349,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     });
     const [result, desktopList] = await Promise.all([liveList, desktopListRequest]);
     if (version <= threadListSettledVersion.current) return;
-    threadListSettledVersion.current = version;
     if (result === undefined && desktopList === undefined) {
+      threadListSettledVersion.current = version;
       const message = "读取对话列表失败";
       if (initialThreadsPending.current) {
         setThreadsError(message);
@@ -347,17 +359,50 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       }
       throw new Error(message);
     }
-    setState((current) => replaceThreadList(
-      current,
-      mergeDesktopThreadList(result ?? { data: [] }, desktopList),
-      desktopList,
-    ));
+    const merged = mergeDesktopThreadList(result ?? { data: [] }, desktopList);
+    const data = asRecord(merged).data;
+    // A list has no turn identity. Resolve conflicts using one metadata-only
+    // turn, not conversation contents or timestamps from unrelated clocks.
+    const activities = await Promise.all((Array.isArray(data) ? data : []).map(async (value) => {
+      const record = asRecord(value);
+      const id = stringValue(record.id);
+      const known = id ? stateRef.current.threads[id] : undefined;
+      const status = normalizeStatus(record.status);
+      if (!id || !known?.turnOrder.length || status === "unknown" || status === known.status) return undefined;
+      try {
+        const response = asRecord(await socket.request("thread/turns/list", {
+          threadId: id, limit: 1, sortDirection: "desc", itemsView: "notLoaded",
+        }, { timeoutMs: THREAD_LIST_REQUEST_TIMEOUT_MS }));
+        const turn = asRecord(Array.isArray(response.data) ? response.data[0] : undefined);
+        if (!stringValue(turn.id) || (turn.status !== "inProgress" && !isTerminalTurnStatus(turn.status as TurnStatus))) return undefined;
+        return { id, turnsAtRead: known.turns, turn: { id: turn.id, status: turn.status, error: turn.error, items: [] } };
+      } catch {
+        // Offline/older bridges keep the event-derived state and retry next poll.
+        return undefined;
+      }
+    }));
+    if (version <= threadListSettledVersion.current) return;
+    threadListSettledVersion.current = version;
+    setState((current) => {
+      let next = replaceThreadList(current, merged, desktopList);
+      for (const activity of activities) {
+        if (!activity || requestedRevisions.get(activity.id) !== liveRevisions.current.get(activity.id) ||
+          current.threads[activity.id]?.turns !== activity.turnsAtRead) continue;
+        next = reconciler.hydrate(next, {
+          desktopMirror: current.threads[activity.id]?.desktopMirror,
+          latestTurnMetadata: true,
+          thread: { id: activity.id, turns: [activity.turn], status: activity.turn.status === "inProgress"
+            ? "active" : activity.turn.status === "failed" ? "error" : "idle" },
+        }, "append");
+      }
+      return next;
+    });
     setThreadsError(undefined);
     if (initialThreadsPending.current) {
       initialThreadsPending.current = false;
       setThreadsLoading(false);
     }
-  }, [socket]);
+  }, [reconciler, socket]);
 
   const refreshArchivedThreads = useCallback(async () => {
     setArchivedThreadsLoading(true);
@@ -455,6 +500,11 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     await refreshThreads();
   }, [desktopControlAvailable, pinnedSectionId, refreshThreads, socket, state.threadOrder, state.threads]);
 
+  const clearSelection = useCallback(() => {
+    selectionRequestVersion.current += 1;
+    setSelectedThreadId(undefined);
+  }, []);
+
   const archiveThread = useCallback(async (threadId: string) => {
     const archivedThread = state.threads[threadId];
     await socket.request("thread/archive", { threadId });
@@ -465,11 +515,11 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       ]);
     }
     if (selectedThreadId === threadId) {
-      setSelectedThreadId(undefined);
+      clearSelection();
       setThreadLoadError(undefined);
     }
     await refreshThreads();
-  }, [refreshThreads, selectedThreadId, socket, state.threads]);
+  }, [clearSelection, refreshThreads, selectedThreadId, socket, state.threads]);
 
   const renameThread = useCallback(async (threadId: string, name: string) => {
     const normalizedName = name.trim();
@@ -496,10 +546,10 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     setState((current) => removeThread(current, threadId));
     setArchivedThreads((current) => current.filter((thread) => thread.id !== threadId));
     if (selectedThreadId === threadId) {
-      setSelectedThreadId(undefined);
+      clearSelection();
       setThreadLoadError(undefined);
     }
-  }, [selectedThreadId, socket]);
+  }, [clearSelection, selectedThreadId, socket]);
 
   const refreshCreationOptions = useCallback(async (cwd?: string) => {
     const version = ++catalogRequestVersion.current;
@@ -613,8 +663,40 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     [desktopControlAvailable, desktopStateAvailable, reconcileSnapshot, socket],
   );
 
-  const loadEarlierThreadHistory = useCallback(async () => {
+  const recoverHistoryGap = useCallback(async (threadId: string, automatic = true) => {
+    const gap = latestHistoryGap(historyCoverage.current.get(threadId) ?? []);
+    if (!gap || historyLoads.current.has(threadId)) return;
+    const pages = automaticGapPages.current.get(threadId) ?? 0;
+    // ponytail: auto-fill at most eight bounded pages; larger offline gaps
+    // remain available through the existing load-earlier action.
+    if (automatic && pages >= 8) return;
+    if (automatic) automaticGapPages.current.set(threadId, pages + 1);
+    historyLoads.current.add(threadId);
+    setThreadHistory((current) => ({
+      ...current, [threadId]: { ...(current[threadId] ?? emptyThreadHistory), loading: true },
+    }));
+    const selection = selectionRequestVersion.current;
+    try {
+      const value = asRecord(await socket.request("desktopState/readThread", {
+        threadId, history: { ...HISTORY_PAGE, beforeCursor: gap.beforeCursor },
+      }, { timeoutMs: THREAD_LIST_REQUEST_TIMEOUT_MS }));
+      if (selection === selectionRequestVersion.current) {
+        reconcileSnapshot({ ...value, historyAnchor: gap.anchor, historyAfterAnchor: gap.afterAnchor }, "prepend");
+      }
+    } finally {
+      historyLoads.current.delete(threadId);
+      setThreadHistory((current) => ({
+        ...current, [threadId]: { ...(current[threadId] ?? emptyThreadHistory), loading: false },
+      }));
+    }
+  }, [reconcileSnapshot, socket]);
+
+  const loadEarlierThreadHistory = useCallback(async (automatic = false) => {
     if (!selectedThreadId || historyLoads.current.has(selectedThreadId)) return;
+    if (latestHistoryGap(historyCoverage.current.get(selectedThreadId) ?? [])) {
+      await recoverHistoryGap(selectedThreadId, automatic);
+      return;
+    }
     const currentHistory = threadHistory[selectedThreadId];
     if (!currentHistory?.hasMoreBefore || !currentHistory.beforeCursor) return;
     historyLoads.current.add(selectedThreadId);
@@ -639,7 +721,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         [selectedThreadId]: { ...(current[selectedThreadId] ?? emptyThreadHistory), loading: false },
       }));
     }
-  }, [reconcileSnapshot, selectedThreadId, socket, threadHistory]);
+  }, [reconcileSnapshot, recoverHistoryGap, selectedThreadId, socket, threadHistory]);
 
   const selectedDesktopMirror = selectedThreadId
     ? state.threads[selectedThreadId]?.desktopMirror === true
@@ -658,16 +740,17 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         threadId: selectedThreadId,
         history: { ...HISTORY_PAGE, limitTurns: 1 },
       })
-        .then((value) => {
-          if (!cancelled) reconcileSnapshot(value, "append", requestedRevision);
+        .then(async (value) => {
+          if (!cancelled) {
+            reconcileSnapshot(value, "append", requestedRevision);
+            await recoverHistoryGap(selectedThreadId);
+          }
         })
         .catch(() => undefined)
         .finally(() => { pending = false; });
     }, 2_000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [connection, reconcileSnapshot, selectedDesktopMirror, selectedThreadId, socket]);
-
-  const clearSelection = useCallback(() => setSelectedThreadId(undefined), []);
+  }, [connection, reconcileSnapshot, recoverHistoryGap, selectedDesktopMirror, selectedThreadId, socket]);
 
   const refreshQueuedMessages = useCallback(async (threadId: string) => {
     if (!desktopControlAvailable) return;
@@ -1003,7 +1086,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       selectedThread: selectedThreadId ? state.threads[selectedThreadId] : undefined,
       selectedQueuedMessages: selectedThreadId ? queuedByThread[selectedThreadId] ?? [] : [],
       selectedThreadHistory: selectedThreadId
-        ? threadHistory[selectedThreadId] ?? emptyThreadHistory
+        ? visibleHistoryState(threadHistory[selectedThreadId] ?? emptyThreadHistory, historyCoverage.current.get(selectedThreadId) ?? [], automaticGapPages.current.get(selectedThreadId) ?? 0)
         : emptyThreadHistory,
       pendingRequests,
       connect,
@@ -1280,12 +1363,12 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
         numberValue(desktop?.updatedAt) ??
         numberValue(record.updatedAt) ??
         numberValue(record.updated_at),
-      // thread/list can lag behind the live event stream. Keep an acknowledged
-      // active turn running until turn/completed clears activeTurnId.
+      // Lists have no turn identity. Preserve known lifecycle state until a
+      // live event or the metadata-only reconciliation verifies a newer turn.
       status: current?.activeTurnId
         ? "running"
-        : current?.status === "idle" && incomingStatus === "running" && latestKnownTurnIsTerminal(current)
-          ? "idle"
+        : current && latestKnownTurnIsTerminal(current)
+          ? current.status
           : incomingStatus,
       turnOrder: current?.turnOrder ?? [],
       turns: current?.turns ?? {},
@@ -1387,6 +1470,11 @@ function historyState(value: unknown): ThreadHistoryState {
   };
 }
 
+function visibleHistoryState(history: ThreadHistoryState, ranges: HistoryRange[], automaticPages: number): ThreadHistoryState {
+  const gap = latestHistoryGap(ranges);
+  return gap ? { ...history, hasMoreBefore: true, beforeCursor: gap.beforeCursor, gapRecoveryPaused: automaticPages >= 8 } : history;
+}
+
 function boundedRequest<T>(request: Promise<T>, timeoutMs: number) {
   let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -1411,7 +1499,13 @@ function mergeDesktopThreadList(appServerValue: unknown, desktopValue: unknown) 
     data: desktopData.map((value) => {
       const desktop = asRecord(value);
       const id = stringValue(desktop.id);
-      return { ...(id ? appById.get(id) : undefined), ...desktop };
+      const live = id ? appById.get(id) : undefined;
+      const liveStatus = live?.status;
+      const rawStatus = typeof liveStatus === "string" ? liveStatus : asRecord(liveStatus).type;
+      return { ...live, ...desktop,
+        status: rawStatus !== "notLoaded" && normalizeStatus(liveStatus) !== "unknown"
+          ? liveStatus : desktop.status ?? liveStatus,
+      };
     }),
   };
 }

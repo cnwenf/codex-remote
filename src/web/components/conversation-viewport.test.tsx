@@ -370,6 +370,12 @@ describe("ConversationViewport", () => {
     fireEvent.scroll(viewport);
     expect(onLoadEarlier).toHaveBeenCalledTimes(1);
 
+    rerender(
+      <ConversationViewport threadId="thread-1" history={{ hasMoreBefore: true, loading: true }} onLoadEarlier={onLoadEarlier}>
+        <div>Latest page, unrelated live update while the gap is loading</div>
+      </ConversationViewport>,
+    );
+    expect(viewport.scrollTop).toBe(50);
     scrollHeight = 1_400;
     rerender(
       <ConversationViewport
@@ -383,6 +389,18 @@ describe("ConversationViewport", () => {
     );
 
     expect(viewport.scrollTop).toBe(450);
+  });
+
+  it("requires an explicit action when automatic gap recovery is paused", () => {
+    scrollHeight = 200;
+    clientHeight = 300;
+    const onLoadEarlier = vi.fn().mockResolvedValue(undefined);
+    render(<ConversationViewport threadId="paused" history={{ hasMoreBefore: true, loading: false, gapRecoveryPaused: true }} onLoadEarlier={onLoadEarlier}>
+      <div>Short recovered fragment</div>
+    </ConversationViewport>);
+    expect(onLoadEarlier).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "继续加载遗漏内容" }));
+    expect(onLoadEarlier).toHaveBeenCalledWith(false);
   });
 
   it("follows live output only while the reader remains near the bottom", () => {

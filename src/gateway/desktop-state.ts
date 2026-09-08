@@ -267,6 +267,7 @@ export class DesktopState {
         page.pendingToolOutputs,
         page.toolOutputOverflow,
       ),
+      historyRange: { start: page.start, end: stat.size },
       history: page.start > 0
         ? { hasMoreBefore: true, beforeCursor: String(page.start) }
         : { hasMoreBefore: false },
@@ -310,6 +311,7 @@ export class DesktopState {
         page.pendingToolOutputs,
         page.toolOutputOverflow,
       ),
+      historyRange: { start: page.start, end: before },
       history: page.start > 0
         ? { hasMoreBefore: true, beforeCursor: String(page.start) }
         : { hasMoreBefore: false },
