@@ -68,7 +68,7 @@ export function hydrateThread(
           };
         }
       }
-      snapshotItemOrder.push(itemId);
+      if (!snapshotItems[itemId]) snapshotItemOrder.push(itemId);
       const snapshotItem: CodexTurn["items"][string] = {
         id: itemId,
         type: itemType,
@@ -88,7 +88,9 @@ export function hydrateThread(
         status: stringValue(item.status) ?? (snapshotTerminal ? "completed" : undefined),
         imageIds: stringArray(item.imageIds),
       };
-      snapshotItems[itemId] = snapshotItem;
+      snapshotItems[itemId] = snapshotItems[itemId]
+        ? mergeMessageItem(snapshotItem, snapshotItems[itemId], snapshotTerminal)
+        : snapshotItem;
       const previousItem = existing?.items[itemId];
       if (
         placement !== "prepend" &&
@@ -103,22 +105,37 @@ export function hydrateThread(
     const items = { ...snapshotItems };
     const snapshotTurnIsComplete = turnRecord.completeFromTurnStart === true;
     const reconciledExistingIds = new Map<string, string>();
+    const exactCandidates = new Map<string, string[]>();
+    const exactOwners = new Map<string, number>();
     for (const snapshotItemId of snapshotItemOrder) {
       const snapshotItem = snapshotItems[snapshotItemId];
       if (!snapshotItem || !isUserMessage(snapshotItem)) continue;
-      const liveItemId = existing?.itemOrder.find((existingItemId) => {
-        if (reconciledExistingIds.has(existingItemId) || snapshotItems[existingItemId]) return false;
+      const candidates = (existing?.itemOrder ?? []).filter((existingItemId) => {
+        if (snapshotItems[existingItemId]) return false;
         const liveItem = existing.items[existingItemId];
-        const stableIdentity = Boolean(
+        return liveItem && isUserMessage(liveItem) && !isOptimisticUserMessage(existingItemId, liveItem) && (Boolean(
           snapshotItem.clientMessageId &&
-          liveItem?.clientMessageId === snapshotItem.clientMessageId,
-        ) || Boolean(liveItem && (userMessageHasIdentity(snapshotItem, liveItem.id, liveItem.clientMessageId) ||
-          userMessageHasIdentity(liveItem, snapshotItem.id, snapshotItem.clientMessageId)));
-        return Boolean(liveItem) &&
-          !isOptimisticUserMessage(existingItemId, liveItem) &&
-          (stableIdentity || snapshotTurnIsComplete && !existing.items[snapshotItemId]) &&
-          sameUserMessage(snapshotItem, liveItem);
+          liveItem.clientMessageId === snapshotItem.clientMessageId,
+        ) || userMessageHasIdentity(snapshotItem, liveItem.id, liveItem.clientMessageId) ||
+          userMessageHasIdentity(liveItem, snapshotItem.id, snapshotItem.clientMessageId));
       });
+      exactCandidates.set(snapshotItemId, candidates);
+      for (const id of candidates) exactOwners.set(id, (exactOwners.get(id) ?? 0) + 1);
+    }
+    // Reserve every exact candidate before any body fallback, including
+    // ambiguous or content-conflicting identities that cannot safely merge.
+    for (const exact of [true, false]) for (const snapshotItemId of snapshotItemOrder) {
+      const snapshotItem = snapshotItems[snapshotItemId];
+      const candidates = exactCandidates.get(snapshotItemId);
+      if (!candidates || !existing) continue;
+      const liveItemId = exact
+        ? candidates.length === 1 && exactOwners.get(candidates[0]) === 1 &&
+          sameUserMessage(snapshotItem, existing.items[candidates[0]]) ? candidates[0] : undefined
+        : candidates.length === 0 && snapshotTurnIsComplete && !existing.items[snapshotItemId]
+          ? existing.itemOrder.find((id) => !reconciledExistingIds.has(id) && !exactOwners.has(id) &&
+            !snapshotItems[id] && !isOptimisticUserMessage(id, existing.items[id]) &&
+            sameUserMessage(snapshotItem, existing.items[id]))
+          : undefined;
       if (!liveItemId || !existing) continue;
       reconciledExistingIds.set(liveItemId, snapshotItemId);
       items[snapshotItemId] = {

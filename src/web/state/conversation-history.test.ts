@@ -67,6 +67,74 @@ describe("snapshot turn ordering", () => {
 });
 
 describe("user identity during history reconciliation", () => {
+  it.each(["snapshot", "prepend", "append"] as const)("resolves exact aliases before same-text fallback during %s", (placement) => {
+    let state = stateWith([
+      { ...user("live-b"), lifecycle: "confirmed" },
+      { ...user("live-a"), lifecycle: "confirmed" },
+    ]);
+    const history = { thread: { id: "t", turns: [{ id: "turn", status: "completed", completeFromTurnStart: true, items: [
+      { ...user("disk-a"), itemIdAliases: ["live-a"] },
+      { ...user("disk-b"), itemIdAliases: ["live-b"] },
+    ] }] } };
+    state = hydrateThread(state, history, placement);
+    expect(state.threads.t.turns.turn.items["disk-a"].itemIdAliases).toEqual(["live-a"]);
+    expect(state.threads.t.turns.turn.items["disk-b"].itemIdAliases).toEqual(["live-b"]);
+    for (const id of ["live-b", "live-a", "live-b"]) {
+      for (const method of ["item/started", "item/completed"]) state = reduceCodexState(state, { method, params: {
+        threadId: "t", turnId: "turn", item: { id, type: "userMessage", text: "继续" },
+      } });
+    }
+    expect(state.threads.t.turns.turn.itemOrder).toEqual(["disk-a", "disk-b"]);
+  });
+
+  it.each(["snapshot", "prepend", "append"] as const)("reserves a later exact match from an earlier fallback during %s", (placement) => {
+    const state = stateWith([
+      { ...user("live-b", ["image-b"]), lifecycle: "confirmed" },
+      { ...user("live-a", ["image-a"]), lifecycle: "confirmed" },
+    ]);
+    const next = hydrateThread(state, { thread: { id: "t", turns: [{ id: "turn", completeFromTurnStart: true, items: [
+      user("disk-a"), { ...user("disk-b"), itemIdAliases: ["live-b"] },
+    ] }] } }, placement);
+    expect(next.threads.t.turns.turn.itemOrder).toEqual(["disk-a", "disk-b"]);
+    expect(next.threads.t.turns.turn.items["disk-a"]).toMatchObject({ itemIdAliases: ["live-a"], imageIds: ["image-a"] });
+    expect(next.threads.t.turns.turn.items["disk-b"]).toMatchObject({ itemIdAliases: ["live-b"], imageIds: ["image-b"] });
+  });
+
+  it.each(["shared-live", "multiple-live"])("keeps ambiguous exact identities reserved: %s", (ambiguity) => {
+    const live = [
+      { ...user("live-a"), lifecycle: "confirmed" as const },
+      ...(ambiguity === "multiple-live" ? [{ ...user("live-b"), lifecycle: "confirmed" as const }] : []),
+    ];
+    const exact = ambiguity === "multiple-live"
+      ? [{ ...user("disk-a"), itemIdAliases: ["live-a", "live-b"] }]
+      : [{ ...user("disk-a"), itemIdAliases: ["live-a"] }, { ...user("disk-b"), itemIdAliases: ["live-a"] }];
+    const next = hydrateThread(stateWith(live), { thread: { id: "t", turns: [{ id: "turn", completeFromTurnStart: true,
+      items: [user("unrelated-fallback"), ...exact],
+    }] } });
+    for (const item of live) expect(next.threads.t.turns.turn.items[item.id]).toEqual(item);
+    expect(next.threads.t.turns.turn.items["unrelated-fallback"].itemIdAliases).toBeUndefined();
+    expect(next.threads.t.turns.turn.itemOrder).toHaveLength(live.length + exact.length + 1);
+  });
+
+  it.each(["snapshot", "prepend", "append", "completed"] as const)("merges duplicate canonical representations without hiding later items during %s", (placement) => {
+    for (const reverse of [false, true]) {
+      const canonical = { ...user("disk"), itemIdAliases: ["live"], lifecycle: "confirmed" as const };
+      const tool = { id: "tool", type: "commandExecution", text: "pwd" };
+      const final = { id: "final", type: "agentMessage", text: "DONE", phase: "final_answer" };
+      const state = stateWith([canonical, tool, final]);
+      const pair = reverse ? [user("live"), canonical] : [canonical, user("live")];
+      const items = [{ ...pair[0], imageIds: ["image"] }, pair[1], tool, final];
+      const next = placement === "completed"
+        ? reduceCodexState(state, { method: "turn/completed", params: { threadId: "t", turn: {
+          id: "turn", status: "completed", items,
+        } } })
+        : hydrateThread(state, { thread: { id: "t", turns: [{ id: "turn", status: "completed", items }] } }, placement);
+      expect(next.threads.t.turns.turn.itemOrder).toEqual(["disk", "tool", "final"]);
+      expect(next.threads.t.turns.turn.items.disk).toMatchObject({ text: "继续", imageIds: ["image"], itemIdAliases: ["live"] });
+      expect(next.threads.t.turns.turn.items.final.text).toBe("DONE");
+    }
+  });
+
   it.each(["snapshot", "prepend", "append"] as const)("keeps canonical history identity after old live IDs replay through %s", (placement) => {
     // Real R32 start and steer IDs are unrelated to their response_item IDs.
     const liveIds = ["01a0811a-d125-7b80-827d-c2e3ace32034", "01a0811b-8dc9-7bb0-9f81-096e7a692f47"];

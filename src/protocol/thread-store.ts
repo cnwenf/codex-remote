@@ -348,7 +348,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
             status: normalizeTurnStatus(turnValue.status, "completed"),
             error: turnErrorFromProtocol(turnValue.error) ?? turn.error,
             itemOrder: mergeMessageOrder(turn.itemOrder,
-              (Array.isArray(turnValue.items) ? turnValue.items : []).flatMap((item) => {
+              [...new Set((Array.isArray(turnValue.items) ? turnValue.items : []).flatMap((item) => {
                 const record = asRecord(item);
                 const id = stringValue(record.id);
                 if (!id) return [];
@@ -356,7 +356,7 @@ export function reduceCodexState(state: CodexState, message: RpcMessage): CodexS
                   ? Object.values(turn.items).filter(candidate => isUserMessageType(candidate.type) &&
                     userMessageHasIdentity(candidate, id, messageIdentity(record))) : [];
                 return [matches.length === 1 ? matches[0].id : id];
-              }),
+              }))],
             ),
             completedAt: numberValue(turnValue.completedAt) ?? turn.completedAt,
             durationMs: numberValue(turnValue.durationMs) ?? turn.durationMs,
