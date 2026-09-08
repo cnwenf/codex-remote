@@ -460,9 +460,11 @@ function ActivityItem({ item, imageRequest, onPreviewImage }: {
 }) {
   const running = item.status === "running" || item.status === "inProgress";
   const imageView = item.type.replace(/[_-]/g, "").toLowerCase() === "imageview";
+  const outputDescription = item.toolOutput === "" ? "结果正文为空"
+    : item.toolOutput ?? (running ? "等待结果…" : "未收到结果正文");
   const description = imageView
     ? running ? "正在查看图片" : item.status === "completed" ? "已查看图片" : item.status === "failed" ? "查看图片失败" : "查看图片"
-    : item.text || (running ? "等待结果…" : "未收到结果正文");
+    : item.text || (item.toolOutput ? "已收到结果，展开查看" : outputDescription);
   return (
     <li data-item-id={item.id}>
       <span className="activity-icon" aria-hidden="true">{iconForType(item.type)}</span>
@@ -475,7 +477,7 @@ function ActivityItem({ item, imageRequest, onPreviewImage }: {
           <pre>{item.toolInput ?? "未收到输入正文"}</pre>
           {item.toolInputTruncated ? <p>已截断：显示前 {item.toolInput?.length ?? 0} 个字符{item.toolInputLength !== undefined ? `，原文 ${item.toolInputLength} 个字符` : ""}</p> : null}
           <strong>结果</strong>
-          <pre>{item.toolOutput === "" ? "结果正文为空" : item.toolOutput ?? (running ? "等待结果…" : "未收到结果正文")}</pre>
+          <pre>{outputDescription}</pre>
           {item.toolOutputImageIds?.length ? <div className="message-images">
             {item.toolOutputImageIds.map((imageId, index) => <AuthenticatedImage key={imageId} imageId={imageId}
               request={imageRequest} alt={`工具返回图片 ${index + 1}`} onPreview={onPreviewImage} />)}

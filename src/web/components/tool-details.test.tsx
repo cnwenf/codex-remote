@@ -9,6 +9,23 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("tool result disclosure", () => {
   it.each([
+    ["completed", "/\n", "已收到结果，展开查看"],
+    ["completed", "", "结果正文为空"],
+    ["completed", undefined, "未收到结果正文"],
+    ["running", undefined, "等待结果…"],
+  ])("summarizes normalized command output honestly for %s / %s", async (status, toolOutput, summary) => {
+    const thread = hydrateThread(initialCodexState, { thread: { id: "t", turns: [{ id: "turn", items: [
+      { id: "command", type: "commandExecution", status, toolInput: '["/bin/zsh","-lc","pwd"]', toolOutput },
+    ] }] } }).threads.t;
+    const { container } = render(<Timeline thread={thread} />);
+    await userEvent.click(screen.getByText("执行过程（1 项）"));
+    expect(container.querySelector(".activity-copy > span")).toHaveTextContent(summary);
+    await userEvent.click(screen.getByText("查看输入与结果"));
+    const output = container.querySelectorAll(".tool-details > pre")[1];
+    expect(output?.textContent).toBe(toolOutput === "" ? "结果正文为空" : toolOutput ?? summary);
+  });
+
+  it.each([
     ["completed", "已查看图片"], ["running", "正在查看图片"],
     ["inProgress", "正在查看图片"], ["unknown", "查看图片"], ["failed", "查看图片失败"],
   ])("describes the ImageView reference action honestly when %s", (status, text) => {
