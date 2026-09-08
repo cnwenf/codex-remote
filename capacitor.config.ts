@@ -5,6 +5,8 @@ const config: CapacitorConfig = {
   appId: "com.cnwenf.codexremote",
   appName: "Codex Remote",
   webDir: "dist",
+  // Bridge arguments contain connection credentials and image bytes, including in QA builds.
+  loggingBehavior: "none",
   backgroundColor: "#17130f",
   android: {
     allowMixedContent: true,

@@ -13,6 +13,13 @@ const gatewayLauncher = readFileSync(join(root, "scripts/launch-bundled-gateway.
 const macosUpdater = readFileSync(join(root, "scripts/perform-macos-update.sh"), "utf8");
 
 describe("native installer contract", () => {
+  it("does not log native bridge credentials or image payloads even in QA builds", async () => {
+    const { default: config } = await import("../capacitor.config");
+    expect(config.loggingBehavior).toBe("none");
+    expect(config.android?.loggingBehavior ?? config.loggingBehavior).toBe("none");
+    expect(config.ios?.loggingBehavior ?? config.loggingBehavior).toBe("none");
+  });
+
   it("lets the CSS viewport own iOS safe-area insets without native focus offsets", async () => {
     const { default: config } = await import("../capacitor.config");
     expect(config.ios?.contentInset).toBe("never");
