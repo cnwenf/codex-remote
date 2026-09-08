@@ -93,7 +93,23 @@ public class NotificationDeliveryTest {
             awaitCondition(() -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
             assertEquals("Service restart must not re-post the same completed turn", deliveredAt, Arrays.stream(manager.getActiveNotifications()).filter(n -> "Migrated completion".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))).findFirst().get().getPostTime());
 
-            // The scenarios above accelerate several 15-second polls into two seconds.
+            Thread.sleep(2_000); // Avoid notification-rate throttling from the accelerated polls above.
+            seedLegacyState(context, manager, server.getLocalPort());
+            body.set("{\"generatedAt\":" + System.currentTimeMillis() + ",\"threads\":[{\"id\":\"legacy\",\"title\":\"Failure fallback\",\"status\":\"error\",\"turnId\":\"current\"}],\"completions\":[{\"threadId\":\"legacy\",\"turnId\":\"current\",\"status\":\"error\",\"title\":\"Failed completion event\",\"completedAt\":1}]}");
+            ContextCompat.startForegroundService(context, start);
+            awaitCondition(() -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
+            awaitCondition(() -> Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "Failed completion event".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))));
+            var failed = Arrays.stream(manager.getActiveNotifications()).filter(n -> "Failed completion event".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))).findFirst().get();
+            assertEquals("An error completion must use the failure title", "对话执行失败", failed.getNotification().extras.getCharSequence("android.title").toString());
+            assertFalse("The same turn's state fallback must not replace the completion event", Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "Failure fallback".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))));
+            long failedDeliveredAt = failed.getPostTime();
+            long checkedAt = context.getSharedPreferences("codex_remote_monitor", Context.MODE_PRIVATE).getLong("lastAttemptAt", 0);
+            ContextCompat.startForegroundService(context, start);
+            awaitCondition(() -> context.getSharedPreferences("codex_remote_monitor", Context.MODE_PRIVATE).getLong("lastAttemptAt", 0) > checkedAt
+                && "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
+            assertEquals("Replaying an error completion must not re-post the same turn", failedDeliveredAt, Arrays.stream(manager.getActiveNotifications()).filter(n -> n.getId() == failed.getId()).findFirst().get().getPostTime());
+
+            // The scenarios above accelerate several 15-second polls into a short window.
             // Let Android's notification update rate limit settle before checking error UI.
             Thread.sleep(2_000);
             responseCode.set(401);

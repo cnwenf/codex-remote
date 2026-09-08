@@ -578,14 +578,14 @@ export function createGateway(options: GatewayOptions) {
     if (message.method === "turn/completed") {
       const turn = recordValue(params.turn);
       const completedTurnId = optionalString(turn.id) ?? optionalString(params.turnId);
+      const active = liveThreadActivity.get(threadId);
+      const repeatsFailedTurn = active?.status === "error" && (completedTurnId ?? active.turnId) === active.turnId;
+      const completedStatus = optionalString(turn.status) === "failed" || repeatsFailedTurn ? "error" : "idle";
       if (completedTurnId && turn.status !== "interrupted") {
-        mobileCompletions.record(threadId, completedTurnId, turn.status === "failed" ? "error" : "idle",
+        mobileCompletions.record(threadId, completedTurnId, completedStatus,
           syncedMobileThreads.get(threadId)?.title ?? "Untitled task");
       }
-      const active = liveThreadActivity.get(threadId);
       if (!active?.turnId || !completedTurnId || active.turnId === completedTurnId) {
-        const repeatsFailedTurn = active?.status === "error" && (completedTurnId ?? active.turnId) === active.turnId;
-        const completedStatus = optionalString(turn.status) === "failed" || repeatsFailedTurn ? "error" : "idle";
         liveThreadActivity.set(threadId, {
           status: completedStatus,
           turnId: completedTurnId ?? active?.turnId,

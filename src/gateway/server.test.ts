@@ -858,6 +858,76 @@ describe("gateway server", () => {
     } finally { await gateway.stop(); }
   });
 
+  it.each(["systemError", { type: "systemError" }])("keeps a confirmed %j failure in mobile completions when the same turn completes", async (status) => {
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({ port: 0, token: "test-token", transport,
+      desktopState: { request: () => ({ data: [{ id: "t", title: "Notification QA", status: "idle" }] }), close() {} },
+    });
+    const address = await gateway.start();
+    const snapshot = async () => (await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+      headers: { authorization: "Bearer test-token" },
+    })).json();
+    try {
+      transport.emit({ method: "turn/started", params: { threadId: "t", turn: { id: "one" } } });
+      transport.emit({ method: "thread/status/changed", params: { threadId: "t", status } });
+      for (let replay = 0; replay < 2; replay++) {
+        transport.emit({ method: "turn/completed", params: { threadId: "t", turn: {
+          id: "one", status: "completed", items: [{ text: "private output must not leak" }],
+        } } });
+        const result = await snapshot();
+        expect(result.threads).toMatchObject([{ id: "t", turnId: "one", status: "error" }]);
+        expect(result.completions).toHaveLength(1);
+        expect(result.completions[0]).toMatchObject({ threadId: "t", turnId: "one", status: "error" });
+        expect(JSON.stringify(result.completions)).not.toContain("private output");
+      }
+    } finally { await gateway.stop(); }
+  });
+
+  it("does not carry a prior turn failure into a new successful mobile completion", async () => {
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({ port: 0, token: "test-token", transport,
+      desktopState: { request: () => ({ data: [{ id: "t", status: "idle" }] }), close() {} },
+    });
+    const address = await gateway.start();
+    try {
+      transport.emit({ method: "turn/started", params: { threadId: "t", turn: { id: "one" } } });
+      transport.emit({ method: "thread/status/changed", params: { threadId: "t", status: "systemError" } });
+      transport.emit({ method: "turn/completed", params: { threadId: "t", turn: { id: "one", status: "completed" } } });
+      transport.emit({ method: "turn/started", params: { threadId: "t", turn: { id: "two" } } });
+      transport.emit({ method: "turn/completed", params: { threadId: "t", turn: { id: "two", status: "completed" } } });
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: "Bearer test-token" },
+      });
+      const result = await response.json();
+      expect(result.threads).toMatchObject([{ id: "t", turnId: "two", status: "idle" }]);
+      expect(result.completions).toMatchObject([
+        { threadId: "t", turnId: "one", status: "error" },
+        { threadId: "t", turnId: "two", status: "idle" },
+      ]);
+      expect(result.completions).toHaveLength(2);
+    } finally { await gateway.stop(); }
+  });
+
+  it.each([["completed", "idle"], ["failed", "error"]] as const)("retains a first late %s mobile completion without ending the newer running turn", async (status, expected) => {
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({ port: 0, token: "test-token", transport,
+      desktopState: { request: () => ({ data: [{ id: "t", status: "idle" }] }), close() {} },
+    });
+    const address = await gateway.start();
+    try {
+      transport.emit({ method: "turn/started", params: { threadId: "t", turn: { id: "one" } } });
+      transport.emit({ method: "turn/started", params: { threadId: "t", turn: { id: "two" } } });
+      transport.emit({ method: "turn/completed", params: { threadId: "t", turn: { id: "one", status } } });
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: "Bearer test-token" },
+      });
+      const result = await response.json();
+      expect(result.threads).toMatchObject([{ id: "t", turnId: "two", status: "running" }]);
+      expect(result.completions).toHaveLength(1);
+      expect(result.completions[0]).toMatchObject({ threadId: "t", turnId: "one", status: expected });
+    } finally { await gateway.stop(); }
+  });
+
   it("does not assign a completed turn ID to a new running turn inferred from status", async () => {
     const transport = new AlreadyInitializedTransport();
     const gateway = createGateway({ port: 0, token: "test-token", transport,
