@@ -291,6 +291,9 @@ function ImagePreviewDialog({ preview, onClose }: { preview: ImagePreview; onClo
       role="dialog"
       aria-modal="true"
       aria-label={preview.alt}
+      // Portal events still bubble through React's timeline parent. Preview
+      // controls must not cancel following or collapse the underlying composer.
+      onPointerDown={(event) => event.stopPropagation()}
       onClick={onClose}
     >
       <div className="image-preview-content" onClick={(event) => event.stopPropagation()}>

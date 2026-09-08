@@ -22,6 +22,84 @@ function snapshot(item: CodexItem) {
 }
 
 describe("user identity during history reconciliation", () => {
+  it.each(["snapshot", "prepend", "append"] as const)("keeps a renamed image question before retained reasoning during %s", (placement) => {
+    const state = stateWith([
+      { ...user("native-user", ["image"]), lifecycle: "confirmed" },
+      { id: "reasoning", type: "reasoning", text: "" },
+      { id: "final", type: "agentMessage", text: "IMAGE-OK", phase: "final_answer" },
+    ]);
+    const history = { desktopMirror: true, thread: { id: "t", status: "idle", turns: [
+      { id: "turn", status: "completed", completeFromTurnStart: true, items: [
+        { ...user("rollout-user", ["image"]), lifecycle: "confirmed" },
+        { id: "final", type: "agentMessage", text: "IMAGE-OK", phase: "final_answer" },
+      ] },
+    ] } };
+    const next = hydrateThread(state, history, placement);
+    expect(next.threads.t.turns.turn.itemOrder).toEqual(["rollout-user", "reasoning", "final"]);
+    expect(next.threads.t.turns.turn.items["native-user"]).toBeUndefined();
+    expect(next.threads.t.turns.turn.items["rollout-user"].imageIds).toEqual(["image"]);
+    expect(hydrateThread(next, history, placement).threads.t.turns.turn.itemOrder)
+      .toEqual(["rollout-user", "reasoning", "final"]);
+  });
+
+  it.each(["snapshot", "prepend", "append"] as const)("renames repeated live questions in place around tools and commentary during %s", (placement) => {
+    const state = stateWith([
+      { id: "earlier", type: "agentMessage", text: "Earlier response" },
+      { ...user("native-one", [], "one"), lifecycle: "confirmed" },
+      { id: "reasoning-one", type: "reasoning", text: "" },
+      { id: "begin", type: "agentMessage", text: "TOOLS-BEGIN", phase: "commentary" },
+      { id: "pwd", type: "commandExecution", text: "pwd" },
+      { id: "middle", type: "agentMessage", text: "TOOLS-MIDDLE", phase: "commentary" },
+      { ...user("native-two", [], "two"), lifecycle: "confirmed" },
+      { id: "reasoning-two", type: "reasoning", text: "" },
+      { id: "sleep", type: "commandExecution", text: "sleep 1" },
+      { id: "final", type: "agentMessage", text: "TOOLS-END", phase: "final_answer" },
+    ]);
+    const history = { desktopMirror: true, thread: { id: "t", status: "idle", turns: [
+      { id: "turn", status: "completed", completeFromTurnStart: true, items: [
+        { ...user("rollout-one", [], "one"), lifecycle: "confirmed" },
+        { id: "begin", type: "agentMessage", text: "TOOLS-BEGIN", phase: "commentary" },
+        { id: "middle", type: "agentMessage", text: "TOOLS-MIDDLE", phase: "commentary" },
+        { ...user("rollout-two", [], "two"), lifecycle: "confirmed" },
+        { id: "final", type: "agentMessage", text: "TOOLS-END", phase: "final_answer" },
+      ] },
+    ] } };
+    const next = hydrateThread(state, history, placement);
+    expect(next.threads.t.turns.turn.itemOrder).toEqual([
+      "earlier", "rollout-one", "reasoning-one", "begin", "pwd", "middle", "rollout-two", "reasoning-two", "sleep", "final",
+    ]);
+    expect(Object.keys(next.threads.t.turns.turn.items)).toHaveLength(10);
+    expect(next.threads.t.turns.turn.items.begin.text).toBe("TOOLS-BEGIN");
+    expect(next.threads.t.turns.turn.items.middle.text).toBe("TOOLS-MIDDLE");
+    expect(next.threads.t.turns.turn.items.final.text).toBe("TOOLS-END");
+    expect(hydrateThread(next, history, placement).threads.t.turns.turn.itemOrder).toEqual(next.threads.t.turns.turn.itemOrder);
+  });
+
+  it("does not rename an unconfirmed same-text live question from an incomplete snapshot", () => {
+    const state = stateWith([{ ...user("native-user"), lifecycle: "confirmed" }]);
+    const next = hydrateThread(state, snapshot({ ...user("rollout-user"), lifecycle: "confirmed" }));
+    expect(next.threads.t.turns.turn.itemOrder).toEqual(["native-user", "rollout-user"]);
+  });
+
+  it("keeps identical questions in other turns when renaming a live question", () => {
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", turns: [
+      { id: "older", status: "completed", items: [{ id: "older-user", type: "userMessage", text: "继续" }] },
+      { id: "turn", status: "completed", items: [
+        { id: "native-user", type: "userMessage", text: "继续" },
+        { id: "reasoning", type: "reasoning", text: "" },
+        { id: "final", type: "agentMessage", text: "Done" },
+      ] },
+    ] } });
+    const next = hydrateThread(state, { desktopMirror: true, thread: { id: "t", turns: [
+      { id: "turn", status: "completed", completeFromTurnStart: true, items: [
+        { id: "rollout-user", type: "userMessage", text: "继续" },
+        { id: "final", type: "agentMessage", text: "Done" },
+      ] },
+    ] } });
+    expect(next.threads.t.turns.older.itemOrder).toEqual(["older-user"]);
+    expect(next.threads.t.turns.turn.itemOrder).toEqual(["rollout-user", "reasoning", "final"]);
+  });
+
   it.each(["snapshot", "prepend", "append"] as const)("restores native interrupted over raw completed during %s without losing final text", (placement) => {
     const state = hydrateThread(initialCodexState, { thread: { id: "t", status: "idle", turns: [
       { id: "old", status: "completed", items: [{ id: "final", type: "agentMessage", text: "Retained final" }] },

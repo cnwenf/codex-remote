@@ -612,7 +612,9 @@ export function createGateway(options: GatewayOptions) {
         source: "event",
         updatedAt: Date.now(),
       });
-    } else if (status === "idle" || status === "completed" || status === "notLoaded") {
+    } else if (status === "notLoaded") {
+      clearUnknownThreadActivity(threadId, Date.now());
+    } else if (status === "idle" || status === "completed") {
       if (liveThreadActivity.get(threadId)?.status === "error") return;
       liveThreadActivity.set(threadId, {
         status: "idle",
@@ -623,6 +625,16 @@ export function createGateway(options: GatewayOptions) {
     }
   }
 
+  function clearUnknownThreadActivity(threadId: string, now: number) {
+    const current = liveThreadActivity.get(threadId);
+    // Unloaded threads have no live status; retain terminal events and recent activity.
+    if (current?.source === "event" && (
+      current.status !== "running" || now - current.updatedAt < LIVE_EVENT_GRACE_MS
+    )) return;
+    liveThreadActivity.delete(threadId);
+    syncedMobileThreads.delete(threadId);
+  }
+
   async function refreshLiveThreadActivity() {
     try {
       const value = await requestTransport("thread/list", { limit: 100, sortKey: "updated_at" });
@@ -630,9 +642,16 @@ export function createGateway(options: GatewayOptions) {
       const projected = projectMobileStatus(value, now).threads;
       const seen = new Set(projected.map((thread) => thread.id));
       for (const thread of projected) {
-        if (thread.status === "unknown") continue;
+        if (thread.status === "unknown") {
+          clearUnknownThreadActivity(thread.id, now);
+          continue;
+        }
         const current = liveThreadActivity.get(thread.id);
         if (current?.status === "error" && thread.status === "idle") continue;
+        if (current?.source === "event" && current.status !== "running" && current.status === thread.status) {
+          syncedMobileThreads.set(thread.id, thread);
+          continue;
+        }
         const staleRunningListAfterTerminalEvent =
           current?.source === "event" &&
           current.status !== "running" &&

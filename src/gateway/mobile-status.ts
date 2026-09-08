@@ -34,7 +34,7 @@ export function projectMobileStatus(
 function normalizeMobileStatus(value: unknown): MobileTaskStatus {
   const raw = typeof value === "string" ? value : stringValue(asRecord(value).type);
   if (raw === "running" || raw === "active") return "running";
-  if (raw === "idle" || raw === "completed" || raw === "notLoaded") return "idle";
+  if (raw === "idle" || raw === "completed") return "idle";
   if (raw === "error" || raw === "failed" || raw === "systemError") return "error";
   return "unknown";
 }

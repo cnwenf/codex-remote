@@ -871,6 +871,174 @@ describe("gateway server", () => {
     }
   });
 
+  it.each([
+    ["list", "error", "error"], ["event", "error", "error"],
+    ["list", "active", "running"], ["event", "active", "running"],
+  ] as const)("preserves Desktop evidence through notLoaded %s status in mobile snapshots (%s)", async (source, desktopStatus, expected) => {
+    const transport = new PeriodicStatusTransport();
+    transport.threads = [{ id: "restored", status: { type: "notLoaded" } }];
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      transport,
+      desktopState: {
+        request: () => ({ data: [{ id: "restored", title: "Restored task", status: { type: desktopStatus } }] }),
+        close() {},
+      },
+    });
+    const address = await gateway.start();
+    try {
+      if (source === "event") transport.emit({
+        method: "thread/status/changed",
+        params: { threadId: "restored", status: { type: "notLoaded" } },
+      });
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: "Bearer test-token" },
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json() as any).threads).toEqual([
+        { id: "restored", title: "Restored task", status: expected },
+      ]);
+    } finally {
+      await gateway.stop();
+    }
+  });
+
+  it.each([
+    ["list", "notLoaded", "error"], ["list", "unknown", "error"],
+    ["list", "notLoaded", "idle"], ["list", "unknown", "idle"],
+    ["event", "notLoaded", "error"], ["event", "notLoaded", "idle"],
+    ["old-live-event", "notLoaded", "error"], ["old-live-event", "unknown", "idle"],
+  ] as const)("clears stale running overrides after %s becomes %s so mobile shows Desktop %s", async (source, unloadedStatus, desktopStatus) => {
+    const transport = new PeriodicStatusTransport();
+    transport.threads = [{ id: "t", status: { type: "active" } }];
+    const gateway = createGateway({
+      port: 0,
+      token: "test-token",
+      transport,
+      mobileStatusSyncIntervalMs: source === "event" ? 60_000 : 10,
+      desktopState: {
+        request: () => ({ data: [{ id: "t", title: "Task", status: { type: desktopStatus } }] }),
+        close() {},
+      },
+    });
+    const address = await gateway.start();
+    const status = async () => {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: "Bearer test-token" },
+      });
+      return (await response.json() as any).threads[0].status;
+    };
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      expect(await status()).toBe("running");
+      if (source === "old-live-event") {
+        transport.emit({ method: "turn/started", params: { threadId: "t", turn: { id: "turn" } } });
+        transport.emit({ method: "thread/status/changed", params: { threadId: "t", status: { type: "notLoaded" } } });
+        expect(await status()).toBe("running");
+        clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_000);
+      }
+      transport.threads = [{ id: "t", status: { type: unloadedStatus } }];
+      if (source === "event") transport.emit({
+        method: "thread/status/changed", params: { threadId: "t", status: { type: unloadedStatus } },
+      });
+      await vi.waitFor(async () => expect(await status()).toBe(desktopStatus));
+    } finally {
+      clock?.mockRestore();
+      await gateway.stop();
+    }
+  });
+
+  it.each([
+    ["failed", "error", "list"], ["failed", "error", "event"],
+    ["completed", "idle", "list"], ["completed", "idle", "event"],
+  ] as const)("retains %s turn evidence after a matching %s poll and notLoaded %s", async (turnStatus, terminalStatus, source) => {
+    const transport = new PeriodicStatusTransport();
+    transport.threads = [{ id: "t", status: { type: "active" } }];
+    const origin = "http://127.0.0.1:4310";
+    const gateway = createGateway({
+      port: 0, token: "test-token", allowedOrigins: [origin], transport, mobileStatusSyncIntervalMs: 10,
+      desktopState: {
+        request: (method) => method === "desktopState/listThreads"
+          ? { data: [{ id: "t", status: { type: turnStatus === "failed" ? "idle" : "error" } }] }
+          : { desktopMirror: true, thread: { id: "t", status: "idle", turns: [
+            { id: "turn", status: "completed", items: [] },
+          ] } },
+        close() {},
+      },
+    });
+    const poll = async () => {
+      const count = transport.sent.filter((message) => "method" in message && message.method === "thread/list").length;
+      await vi.waitFor(() => expect(transport.sent.filter((message) => "method" in message && message.method === "thread/list").length).toBeGreaterThan(count));
+    };
+    const address = await gateway.start();
+    transport.emit({ method: "turn/completed", params: { threadId: "t", turn: {
+      id: "turn", status: turnStatus, ...(turnStatus === "failed" ? { error: { message: "Bad Request" } } : {}),
+    } } });
+    const socket = await connect(address, "test-token", origin);
+    await nextJson(socket);
+    try {
+      transport.threads = [{ id: "t", status: { type: terminalStatus } }];
+      await poll();
+      transport.threads = [{ id: "t", status: { type: "notLoaded" } }];
+      if (source === "event") transport.emit({
+        method: "thread/status/changed", params: { threadId: "t", status: { type: "notLoaded" } },
+      });
+      else await poll();
+      if (source === "event") await nextJson(socket);
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: "Bearer test-token" },
+      });
+      expect.soft((await response.json() as any).threads[0].status).toBe(terminalStatus);
+      socket.send(JSON.stringify({ type: "rpc", payload: {
+        id: 91, method: "gateway/threadActivity/read", params: { threadId: "t" },
+      } }));
+      expect.soft((await nextJson(socket)).payload.result).toMatchObject({ status: terminalStatus, turnId: "turn" });
+      socket.send(JSON.stringify({ type: "rpc", payload: {
+        id: 92, method: "desktopState/readThread", params: { threadId: "t" },
+      } }));
+      expect((await nextJson(socket)).payload.result.thread.turns[0]).toMatchObject({
+        id: "turn", status: turnStatus, ...(turnStatus === "failed" ? { error: { message: "Bad Request" } } : {}),
+      });
+    } finally {
+      socket.close();
+      await once(socket, "close");
+      await gateway.stop();
+    }
+  });
+
+  it.each([["failed", "error"], ["completed", "idle"]] as const)("does not renew a %s event's grace period after a matching %s poll", async (turnStatus, terminalStatus) => {
+    const transport = new PeriodicStatusTransport();
+    transport.threads = [{ id: "t", status: { type: "active" } }];
+    const gateway = createGateway({
+      port: 0, token: "test-token", transport, mobileStatusSyncIntervalMs: 10,
+      desktopState: { request: () => ({ data: [{ id: "t", status: { type: "active" } }] }), close() {} },
+    });
+    const poll = async () => {
+      const count = transport.sent.filter((message) => "method" in message && message.method === "thread/list").length;
+      await vi.waitFor(() => expect(transport.sent.filter((message) => "method" in message && message.method === "thread/list").length).toBeGreaterThan(count));
+    };
+    const address = await gateway.start();
+    const eventAt = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(eventAt);
+    try {
+      transport.emit({ method: "turn/completed", params: { threadId: "t", turn: { id: "turn", status: turnStatus } } });
+      transport.threads = [{ id: "t", status: { type: terminalStatus } }];
+      clock.mockReturnValue(eventAt + 19_000);
+      await poll();
+      transport.threads = [];
+      clock.mockReturnValue(eventAt + 21_000);
+      await poll();
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+        headers: { authorization: "Bearer test-token" },
+      });
+      expect((await response.json() as any).threads[0].status).toBe("running");
+    } finally {
+      clock.mockRestore();
+      await gateway.stop();
+    }
+  });
+
   it("periodically reconciles mobile running state with Desktop thread/list", async () => {
     const token = "test-token";
     const transport = new PeriodicStatusTransport();

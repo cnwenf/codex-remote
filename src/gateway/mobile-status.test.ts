@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 import { projectMobileStatus } from "./mobile-status";
 
 describe("mobile status projection", () => {
+  it.each(["notLoaded", { type: "notLoaded" }])("does not report an unloaded task as completed (%j)", (status) => {
+    expect(projectMobileStatus({ data: [{ id: "unloaded", status }] }).threads)
+      .toMatchObject([{ id: "unloaded", status: "unknown" }]);
+  });
+
   it("returns bounded task metadata and drops content, paths, settings, and unknown records", () => {
     const result = projectMobileStatus({
       data: [

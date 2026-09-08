@@ -1,7 +1,9 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { QuestionContextRequest } from "../../protocol/question-context";
+import type { CodexThread } from "../../protocol/thread-store";
 import { ConversationViewport, selectVisibleQuestionAnchor } from "./conversation-viewport";
+import { Timeline } from "./timeline";
 
 let scrollHeight = 1_000;
 let clientHeight = 300;
@@ -320,6 +322,65 @@ describe("ConversationViewport", () => {
     </ConversationViewport>);
     fireEvent.pointerDown(screen.getByText("执行过程"));
     expect(onInteract).not.toHaveBeenCalled();
+  });
+
+  it.each(["close button", "backdrop", "Escape"])("preserves reading intent after image preview closes by %s", (closeMethod) => {
+    let resize: (() => void) | undefined;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    const thread: CodexThread = {
+      id: "images", title: "Images", status: "idle", turnOrder: ["turn-1"],
+      turns: {
+        "turn-1": {
+          id: "turn-1", status: "completed", itemOrder: ["user", "answer"],
+          items: {
+            user: { id: "user", type: "userMessage", text: "看这张图", imageIds: ["test-image"] },
+            answer: { id: "answer", type: "agentMessage", text: "图片回复" },
+          },
+        },
+      },
+    };
+    const onInteract = vi.fn();
+    render(<ConversationViewport threadId={thread.id} history={{ hasMoreBefore: false, loading: false }}
+      onLoadEarlier={vi.fn()} onInteract={onInteract}>
+      <Timeline thread={thread} />
+    </ConversationViewport>);
+    const viewport = screen.getByTestId("timeline-scroll");
+
+    function previewAndClose() {
+      const thumbnail = screen.getByRole("button", { name: "预览用户上传的图片 1" });
+      fireEvent.pointerDown(thumbnail);
+      fireEvent.click(thumbnail);
+      // Interactions inside the portal must not reach the timeline either.
+      fireEvent.pointerDown(screen.getByRole("img", { name: "用户上传的图片 1 预览" }));
+      if (closeMethod === "Escape") {
+        fireEvent.keyDown(document, { key: "Escape" });
+      } else {
+        const target = closeMethod === "close button"
+          ? screen.getByRole("button", { name: "关闭图片预览" })
+          : screen.getByRole("dialog");
+        fireEvent.pointerDown(target);
+        fireEvent.click(target);
+      }
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    }
+
+    previewAndClose();
+    scrollHeight = 1_500;
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(1_200);
+    expect(onInteract).not.toHaveBeenCalled();
+
+    // Previewing while reading history must not opt back into following.
+    viewport.scrollTop = 200;
+    fireEvent.scroll(viewport);
+    previewAndClose();
+    scrollHeight = 2_000;
+    act(() => resize?.());
+    expect(viewport.scrollTop).toBe(200);
   });
   it("opens a conversation at its newest content", () => {
     render(

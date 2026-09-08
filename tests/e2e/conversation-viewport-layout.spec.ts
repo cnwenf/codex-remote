@@ -1,6 +1,57 @@
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import { build } from "esbuild";
 import { expect, test } from "@playwright/test";
+
+test("follows the next answer after closing an image preview", async ({ page }) => {
+  const fixture = await build({
+    stdin: {
+      resolveDir: process.cwd(), loader: "tsx",
+      contents: `
+        import React, { useState } from "react";
+        import { createRoot } from "react-dom/client";
+        import { ConversationViewport } from "./src/web/components/conversation-viewport";
+        import { Timeline } from "./src/web/components/timeline";
+        function Fixture() {
+          const [sent, setSent] = useState(false);
+          const turns = {
+            image: { id: "image", status: "completed", itemOrder: ["user"],
+              items: { user: { id: "user", type: "userMessage", text: "Preview this image",
+                imageIds: ["00000000-0000-4000-8000-000000000001"] } } },
+            next: { id: "next", status: "completed", itemOrder: ["question", "answer"], items: {
+              question: { id: "question", type: "userMessage", text: "Continue after preview" },
+              answer: { id: "answer", type: "agentMessage", text: Array(25).fill("A paragraph in the next answer.").join("\\n\\n") + "\\n\\nPREVIEW-FINAL-OK" }
+            } }
+          };
+          return <main style={{ height: "640px", display: "flex", flexDirection: "column" }}>
+            <ConversationViewport threadId="fixture" history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={async () => {}}>
+              <Timeline thread={{ id: "fixture", title: "Preview", status: "idle",
+                turnOrder: sent ? ["image", "next"] : ["image"], turns }} />
+            </ConversationViewport>
+            <button onClick={() => setSent(true)}>Send next question</button>
+          </main>;
+        }
+        createRoot(document.getElementById("root")).render(<Fixture />);`,
+    },
+    bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic",
+    define: { "process.env.NODE_ENV": '"test"' },
+  });
+  await page.route("**/__preview-follow", (route) => route.fulfill({
+    contentType: "text/html", body: '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="root"></div>',
+  }));
+  await page.route("**/api/images/00000000-0000-4000-8000-000000000001", (route) => route.fulfill({
+    contentType: "image/png", body: readFileSync(resolve("assets/app-icon.png")),
+  }));
+  await page.goto("/__preview-follow");
+  await page.addStyleTag({ path: resolve("src/web/styles.css") });
+  await page.addScriptTag({ content: fixture.outputFiles[0].text });
+  await page.getByRole("button", { name: "预览用户上传的图片 1" }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "关闭图片预览" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "Send next question" }).click();
+  await expect(page.getByText("PREVIEW-FINAL-OK", { exact: true })).toBeInViewport();
+});
 
 test("keeps the pinned question out of the conversation flow while paging upward", async ({ page }) => {
   const fixture = await build({

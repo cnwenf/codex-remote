@@ -97,7 +97,7 @@ export function hydrateThread(
     }
     const items = { ...snapshotItems };
     const snapshotTurnIsComplete = turnRecord.completeFromTurnStart === true;
-    const reconciledExistingIds = new Set<string>();
+    const reconciledExistingIds = new Map<string, string>();
     for (const snapshotItemId of snapshotItemOrder) {
       const snapshotItem = snapshotItems[snapshotItemId];
       if (!snapshotItem || existing?.items[snapshotItemId] || !isUserMessage(snapshotItem)) continue;
@@ -114,7 +114,7 @@ export function hydrateThread(
           sameUserMessage(snapshotItem, liveItem);
       });
       if (!liveItemId || !existing) continue;
-      reconciledExistingIds.add(liveItemId);
+      reconciledExistingIds.set(liveItemId, snapshotItemId);
       items[snapshotItemId] = {
         ...mergeMessageItem(snapshotItem, existing.items[liveItemId], snapshotTerminal),
         id: snapshotItemId,
@@ -140,10 +140,10 @@ export function hydrateThread(
           : snapshotStatus,
       error: turnErrorFromProtocol(turnRecord.error) ?? existing?.error,
       itemOrder: mergeMessageOrder(
-        (existing?.itemOrder ?? []).filter((id) => retainedExistingOrder.includes(id) && !(
+        (existing?.itemOrder ?? []).filter((id) => (reconciledExistingIds.has(id) || retainedExistingOrder.includes(id)) && !(
           placement === "prepend" && existing?.items[id]?.delegatedInputIsReplay === true &&
           snapshotItems[id]?.delegatedInputIsReplay === false
-        )),
+        )).map((id) => reconciledExistingIds.get(id) ?? id),
         withHistoryAnchors(snapshotItemOrder,
           historyAnchor.turnId === turnId ? stringValue(historyAnchor.itemId) : undefined,
           historyAfterAnchor.turnId === turnId ? stringValue(historyAfterAnchor.itemId) : undefined,
