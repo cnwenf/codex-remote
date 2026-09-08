@@ -23,7 +23,8 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm check
+      # Process-spawning integration tests share the runner's CPU and I/O budget.
+      - run: pnpm check --maxWorkers=1
 
   macos:
     needs: verify

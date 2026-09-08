@@ -67,9 +67,10 @@ describe("structured tool result images", () => {
       expect(item.toolOutputImageIds).toHaveLength(sibling ? 2 : 1);
       expect(item.toolOutput).toBe(sibling ? "Before\n[非文本结果]\n[非文本结果]\nAfter" : "Before\n[非文本结果]\nAfter");
       expect(JSON.stringify(page)).not.toContain(image.toString("base64").slice(0, 1024));
-      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`))).toEqual(image);
+      // Native comparison checks every byte without enumerating millions of object properties.
+      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`)).equals(image)).toBe(true);
       expect(readdirSync(join(dir, "codex-remote", "uploads")).filter((name) => name.endsWith(".png"))).toHaveLength(sibling ? 2 : 1);
-      if (sibling) expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![1]}.png`))).toEqual(smallImage);
+      if (sibling) expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![1]}.png`)).equals(smallImage)).toBe(true);
     } finally { desktop.close(); }
   });
 
@@ -198,7 +199,7 @@ describe("structured tool result images", () => {
       });
       expect(item.toolOutput).toContain("Before nested image");
       expect(item.toolOutput).toContain("After nested image");
-      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`))).toEqual(image);
+      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`)).equals(image)).toBe(true);
     } finally { desktop.close(); }
   });
 
@@ -224,7 +225,7 @@ describe("structured tool result images", () => {
       expect(item.toolOutput).toContain("Before image");
       expect(item.toolOutput).toContain("After image");
       expect(JSON.stringify(page)).not.toContain(data.slice(0, 1024));
-      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`))).toEqual(image);
+      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`)).equals(image)).toBe(true);
     } finally { desktop.close(); }
   });
 
@@ -301,7 +302,7 @@ describe("structured tool result images", () => {
       expect(item.toolOutput).toContain("[非文本结果]");
       expect(item.toolOutput).toContain("After mixed content");
       expect(item.toolOutputImageIds).toHaveLength(1);
-      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`))).toEqual(image);
+      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`)).equals(image)).toBe(true);
     } finally { desktop.close(); }
   });
 
@@ -332,7 +333,7 @@ describe("structured tool result images", () => {
       const item = hydrateThread(initialCodexState,
         desktop.request("desktopState/readThread", { threadId: "t" })).threads.t.turns.turn.items.call;
       expect(item).toMatchObject({ toolOutputImageIds: [expect.any(String)], toolOutputImagesIncomplete: false });
-      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`))).toEqual(image);
+      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`)).equals(image)).toBe(true);
     } finally { desktop.close(); }
   });
 
@@ -352,7 +353,7 @@ describe("structured tool result images", () => {
       const item = hydrateThread(initialCodexState,
         desktop.request("desktopState/readThread", { threadId: "t" })).threads.t.turns.turn.items.call;
       expect(item).toMatchObject({ toolOutputImageIds: [expect.any(String)], toolOutputImagesIncomplete: false });
-      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`))).toEqual(image);
+      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`)).equals(image)).toBe(true);
     } finally { desktop.close(); }
   });
 
@@ -388,7 +389,7 @@ describe("structured tool result images", () => {
       expect(item.toolOutput).toContain("Trailing text");
       expect(item.toolInput).toBe("view_image(reference)");
       expect(JSON.stringify(page)).not.toContain("base64");
-      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`))).toEqual(image);
+      expect(readFileSync(join(dir, "codex-remote", "uploads", `${item.toolOutputImageIds![0]}.png`)).equals(image)).toBe(true);
       const replay = hydrateThread(initialCodexState, desktop.request("desktopState/readThread", { threadId: "t", history: { maxBytes } }));
       expect(replay.threads.t.turns.turn.items.call.toolOutputImageIds).toEqual(item.toolOutputImageIds);
     } finally { desktop.close(); }

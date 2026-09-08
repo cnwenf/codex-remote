@@ -12,6 +12,7 @@
 
 ## Execution status
 
+- Release gate follow-up (2026-09-08): v0.5.28 failed verification before building or publishing. Twelve image tests exceeded their unchanged five-second deadlines because generic deep equality enumerated large Buffers; native byte equality preserves full-content validation and reduced the same 24-case suite from 41.62 to 3.06 seconds. A separate process-spawning integration timeout under parallel load led to single-worker execution of the complete CI suite, not larger deadlines or skipped cases. The aligned 0.5.29 / Android 38 / iOS 36 candidate passes all 856 tests across 63 files with that exact command; independent review approved the test and workflow changes. The existing v0.5.28 tag is retained. Public artifacts and formal-package acceptance are still pending.
 - Task 1 completed in `532ae11`; independent review and 3 GiB bounded-memory benchmark passed.
 - Task 2 completed through `83208bd`, including index cache repair in `a58f9ec`; startup-state, native command identity, raw output and nested image semantic-count regressions are covered. Independent scoped review approved. Source-adapter comparisons passed for 17 question contexts, 3 cold tool histories and 3 native-origin images.
 - Task 3 completed in `f3a169b`, with the final full-source-identity visibility repair in `0e4891a`. Whole-feature review and scoped re-review findings are closed; the new collision regressions and existing expansion behavior pass.
