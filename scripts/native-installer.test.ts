@@ -122,7 +122,7 @@ touch "$target"
     expect(signingVerifier).toContain("android/release-signing-cert.sha256");
   });
 
-  it("passes the annotated release notes to GitHub instead of omitting known limitations", () => {
+  it("passes checked-in release notes with an explicit repository to GitHub", () => {
     const workflow = readFileSync(join(root, ".github/workflows/release.yml"), "utf8");
     const publish = workflow.split("      - name: Publish GitHub Release\n")[1]!
       .split("\n      - name:")[0]!.split("        run: |\n")[1]!;
@@ -133,7 +133,9 @@ touch "$target"
       encoding: "utf8",
       env: { ...process.env, GITHUB_REF_NAME: "v0.0.0-test", GITHUB_REPOSITORY: "example/repo" },
     }).split("\n");
-    expect(args).toContain("--notes-from-tag");
+    expect(args).toContain("--repo");
+    expect(args[args.indexOf("--notes-file") + 1]).toBe("docs/releases/v0.0.0-test.md");
+    expect(args).not.toContain("--notes-from-tag");
     expect(args).not.toContain("--generate-notes");
   });
 
