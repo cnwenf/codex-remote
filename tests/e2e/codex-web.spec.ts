@@ -336,7 +336,10 @@ test("uploads an image and sends it with the conversation", async ({ page }) => 
     mimeType: "image/png",
     buffer: PNG_1X1,
   });
-  await page.getByRole("button", { name: "Steer" }).dispatchEvent("click");
+  await expect(page.getByText("running-only.png")).toBeVisible();
+  const steer = page.getByRole("button", { name: "Steer" });
+  await expect(steer).toBeEnabled();
+  await steer.click();
   await expect(page.getByText("running-only.png")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /预览用户上传的图片/ })).toHaveCount(2);
   await expect(page.getByText("等待输入…")).toHaveCount(0);
