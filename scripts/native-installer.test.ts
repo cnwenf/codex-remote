@@ -122,6 +122,21 @@ touch "$target"
     expect(signingVerifier).toContain("android/release-signing-cert.sha256");
   });
 
+  it("passes the annotated release notes to GitHub instead of omitting known limitations", () => {
+    const workflow = readFileSync(join(root, ".github/workflows/release.yml"), "utf8");
+    const publish = workflow.split("      - name: Publish GitHub Release\n")[1]!
+      .split("\n      - name:")[0]!.split("        run: |\n")[1]!;
+    const args = execFileSync("/bin/bash", ["-c", `
+      gh() { if [[ "$1 $2" == "release view" ]]; then return 1; fi; printf '%s\\n' "$@"; }
+      ${publish}
+    `], {
+      encoding: "utf8",
+      env: { ...process.env, GITHUB_REF_NAME: "v0.0.0-test", GITHUB_REPOSITORY: "example/repo" },
+    }).split("\n");
+    expect(args).toContain("--notes-from-tag");
+    expect(args).not.toContain("--generate-notes");
+  });
+
   it("grants the system package installer access to the verified APK on OEM Android builds", () => {
     const nativePlugin = readFileSync(join(root, "android/app/src/main/java/com/cnwenf/codexremote/CodexRemoteNativePlugin.java"), "utf8");
     expect(nativePlugin).toContain("ClipData.newRawUri");

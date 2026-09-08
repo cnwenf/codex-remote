@@ -222,7 +222,7 @@ jobs:
             gh release create "$GITHUB_REF_NAME" release-assets/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "Codex Remote $GITHUB_REF_NAME" \
-              --generate-notes
+              --notes-from-tag
           fi
       - name: Publish Android update manifest
         env:
