@@ -31,7 +31,7 @@ import {
   ImageUploadStore,
   MAX_IMAGE_BYTES,
 } from "./image-upload-store";
-import { projectMobileStatus } from "./mobile-status";
+import { MobileCompletions, projectMobileStatus } from "./mobile-status";
 import { PairingStore } from "./pairing-store";
 import { ActiveMessageReplay } from "./active-message-replay";
 import { registerAssistantImages } from "./assistant-images";
@@ -91,6 +91,7 @@ export function createGateway(options: GatewayOptions) {
   const port = options.port ?? 4321;
   const router = new RpcRouter();
   const activeMessages = new ActiveMessageReplay();
+  const mobileCompletions = new MobileCompletions();
   const controllers = new Map<string, WebSocket>();
   let nextControllerId = 1;
   const sessionCredential = createSessionCredential(options.token);
@@ -576,6 +577,10 @@ export function createGateway(options: GatewayOptions) {
     if (message.method === "turn/completed") {
       const turn = recordValue(params.turn);
       const completedTurnId = optionalString(turn.id) ?? optionalString(params.turnId);
+      if (completedTurnId && turn.status !== "interrupted") {
+        mobileCompletions.record(threadId, completedTurnId, turn.status === "failed" ? "error" : "idle",
+          syncedMobileThreads.get(threadId)?.title ?? "Untitled task");
+      }
       const active = liveThreadActivity.get(threadId);
       if (!active?.turnId || !completedTurnId || active.turnId === completedTurnId) {
         const repeatsFailedTurn = active?.status === "error" && (completedTurnId ?? active.turnId) === active.turnId;
@@ -598,9 +603,10 @@ export function createGateway(options: GatewayOptions) {
       ? rawStatus
       : optionalString(recordValue(rawStatus).type);
     if (status === "active" || status === "running") {
+      const prior = liveThreadActivity.get(threadId);
       liveThreadActivity.set(threadId, {
         status: "running",
-        turnId: liveThreadActivity.get(threadId)?.turnId,
+        turnId: prior?.status === "running" ? prior.turnId : undefined,
         source: "event",
         updatedAt: Date.now(),
       });
@@ -665,7 +671,7 @@ export function createGateway(options: GatewayOptions) {
         ) continue;
         liveThreadActivity.set(thread.id, {
           status: thread.status,
-          turnId: thread.status === "running" || thread.status === current?.status ? current?.turnId : undefined,
+          turnId: thread.status === current?.status ? current?.turnId : undefined,
           error: thread.status === "error" ? current?.error : undefined,
           source: "sync",
           updatedAt: now,
@@ -844,7 +850,11 @@ export function createGateway(options: GatewayOptions) {
         version: desktop.version,
         generatedAt,
         bridge,
-        threads: [...threadsById.values()].slice(0, 100),
+        threads: [...threadsById.values()].slice(0, 100).map((thread) => ({
+          ...thread,
+          turnId: liveThreadActivity.get(thread.id)?.turnId,
+        })),
+        completions: mobileCompletions.snapshot(threadsById),
       }));
     } catch {
       response.writeHead(503).end();

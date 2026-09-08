@@ -29,6 +29,7 @@ import {
   type MobileUpdateStatus,
 } from "./app-update";
 import { mobileCopy } from "./mobile-copy";
+import { NotificationHealthPanel } from "./notification-health";
 
 type MobileView = "connections" | "form" | "remote" | "settings";
 const CONNECTION_STATUS_TIMEOUT_MS = 8_000;
@@ -413,7 +414,8 @@ export function MobileShell({
   if (view === "remote" && active) {
     return (
       <>
-        <App key={`${active.connectionId}:${active.requestedThreadId ?? ""}`} remote={active} />
+        <App key={`${active.connectionId}:${active.requestedThreadId ?? ""}`} remote={active}
+          nativeNotice={<NotificationHealthPanel language={settings.language} compact />} />
         {error ? <p className="mobile-remote-error" role="alert">{error}</p> : null}
       </>
     );
@@ -477,8 +479,8 @@ async function initializeNotificationPermission() {
     if (current.display !== "prompt") return;
     const requested = await Preferences.get({ key: NOTIFICATION_PERMISSION_REQUESTED_KEY });
     if (requested.value === "true") return;
-    await Preferences.set({ key: NOTIFICATION_PERMISSION_REQUESTED_KEY, value: "true" });
     await LocalNotifications.requestPermissions();
+    await Preferences.set({ key: NOTIFICATION_PERMISSION_REQUESTED_KEY, value: "true" });
   } catch {
     // The remote remains usable when notifications are unavailable or denied.
   }

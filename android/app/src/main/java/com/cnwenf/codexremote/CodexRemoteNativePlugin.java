@@ -118,6 +118,7 @@ public class CodexRemoteNativePlugin extends Plugin {
             ContextCompat.startForegroundService(getContext(), intent);
             call.resolve();
         } catch (Exception error) {
+            CodexRemoteMonitorService.recordHealth(getContext(), "start-failed");
             call.reject("monitor-start-failed", error);
         }
     }
@@ -127,6 +128,38 @@ public class CodexRemoteNativePlugin extends Plugin {
         CodexRemoteMonitorService.clearSavedMonitor(getContext());
         getContext().stopService(new Intent(getContext(), CodexRemoteMonitorService.class));
         call.resolve();
+    }
+
+    @PluginMethod
+    public void getNotificationStatus(PluginCall call) {
+        call.resolve(CodexRemoteMonitorService.notificationStatus(getContext()));
+    }
+
+    @PluginMethod
+    public void openNotificationSettings(PluginCall call) {
+        String channel = call.getString("channel");
+        if (channel != null && !channel.equals("running") && !channel.equals("completed")) {
+            call.reject("notification-channel-invalid"); return;
+        }
+        Intent intent = new Intent(channel == null ? Settings.ACTION_APP_NOTIFICATION_SETTINGS : Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName());
+        if (channel != null) intent.putExtra(Settings.EXTRA_CHANNEL_ID,
+            channel.equals("running") ? CodexRemoteMonitorService.CHANNEL_RUNNING : CodexRemoteMonitorService.CHANNEL_COMPLETED);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:" + getContext().getPackageName()));
+        try { getActivity().startActivity(intent); call.resolve(); }
+        catch (Exception error) { call.reject("notification-settings-unavailable"); }
+    }
+
+    @PluginMethod
+    public void retryMonitoring(PluginCall call) {
+        try {
+            ContextCompat.startForegroundService(getContext(), new Intent(getContext(), CodexRemoteMonitorService.class));
+            call.resolve();
+        } catch (Exception error) {
+            CodexRemoteMonitorService.recordHealth(getContext(), "start-failed");
+            call.reject("monitor-start-failed");
+        }
     }
 
     @PluginMethod

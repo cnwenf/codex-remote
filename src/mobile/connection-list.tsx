@@ -2,6 +2,7 @@ import type { RemoteConnection } from "./types";
 import type { MobileUpdateStatus } from "./app-update";
 import { mobileCopy } from "./mobile-copy";
 import type { MobileLanguage } from "./settings-store";
+import { NotificationHealthPanel } from "./notification-health";
 
 export function ConnectionList({
   connections,
@@ -72,6 +73,7 @@ export function ConnectionList({
         </button>
       </div>
       <section className="connection-list-stage">
+        <NotificationHealthPanel language={language} compact />
         <p className="eyebrow">{copy.devices}</p>
         <h2>{copy.chooseMac}</h2>
         {connections.length === 0 ? (

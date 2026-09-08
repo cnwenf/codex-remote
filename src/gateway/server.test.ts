@@ -822,6 +822,57 @@ describe("gateway server", () => {
     }
   });
 
+  it("retains bounded, deduplicated completions between mobile polls without message bodies", async () => {
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({ port: 0, token: "test-token", transport,
+      desktopState: { request: () => ({ data: [{ id: "t", title: "Notification QA", status: "idle" }] }), close() {} },
+    });
+    const address = await gateway.start();
+    const snapshot = async () => (await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, {
+      headers: { authorization: "Bearer test-token" },
+    })).json();
+    try {
+      expect((await snapshot()).completions).toEqual([]);
+      const finish = (id: string, status = "completed") => transport.emit({ method: "turn/completed", params: {
+        threadId: "t", turn: { id, status, items: [{ text: "private output must not leak" }] },
+      } });
+      finish("one");
+      finish("one");
+      finish("stopped", "interrupted");
+      finish("two", "failed");
+      const result = await snapshot();
+      expect(result.completions).toMatchObject([
+        { threadId: "t", title: "Notification QA", turnId: "one", status: "idle" },
+        { threadId: "t", title: "Notification QA", turnId: "two", status: "error" },
+      ]);
+      expect(result.completions).toHaveLength(2);
+      expect(JSON.stringify(result.completions)).not.toContain("private output");
+      for (let i = 0; i < 150; i++) finish(`turn-${i}`);
+      const bounded = (await snapshot()).completions;
+      expect(bounded).toHaveLength(100);
+      expect(bounded[0].turnId).toBe("turn-50");
+      expect(bounded.at(-1).turnId).toBe("turn-149");
+    } finally { await gateway.stop(); }
+  });
+
+  it("does not assign a completed turn ID to a new running turn inferred from status", async () => {
+    const transport = new AlreadyInitializedTransport();
+    const gateway = createGateway({ port: 0, token: "test-token", transport,
+      desktopState: { request: () => ({ data: [{ id: "t", status: "idle" }] }), close() {} },
+    });
+    const address = await gateway.start();
+    const snapshot = async () => (await fetch(`http://127.0.0.1:${address.port}/api/mobile/status`, { headers: { authorization: "Bearer test-token" } })).json();
+    try {
+      transport.emit({ method: "turn/started", params: { threadId: "t", turn: { id: "one" } } });
+      expect((await snapshot()).threads[0]).toMatchObject({ status: "running", turnId: "one" });
+      transport.emit({ method: "turn/completed", params: { threadId: "t", turn: { id: "one" } } });
+      transport.emit({ method: "thread/status/changed", params: { threadId: "t", status: "active" } });
+      const next = (await snapshot()).threads[0];
+      expect(next.status).toBe("running");
+      expect(next.turnId).toBeUndefined();
+    } finally { await gateway.stop(); }
+  });
+
   it("merges live turn activity into the mobile notification snapshot", async () => {
     const token = "test-token";
     const transport = new AlreadyInitializedTransport();

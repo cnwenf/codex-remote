@@ -1,7 +1,27 @@
-import type { MobileStatusResponse, MobileTask, MobileTaskStatus } from "../mobile/types";
+import type { MobileCompletion, MobileStatusResponse, MobileTask, MobileTaskStatus } from "../mobile/types";
 
 const MAX_MOBILE_THREADS = 100;
 const MAX_MOBILE_TITLE = 160;
+
+// Metadata only; survives client polling gaps, not a gateway restart.
+export class MobileCompletions {
+  private readonly entries = new Map<string, MobileCompletion>();
+
+  record(threadId: string, turnId: string, status: "idle" | "error", title: string) {
+    if (threadId.length > 512 || turnId.length > 512) return;
+    const id = JSON.stringify([threadId, turnId]);
+    if (this.entries.has(id)) return;
+    this.entries.set(id, { id, threadId, turnId, status, title: title.slice(0, MAX_MOBILE_TITLE), completedAt: Date.now() });
+    if (this.entries.size > MAX_MOBILE_THREADS) this.entries.delete(this.entries.keys().next().value!);
+  }
+
+  snapshot(threads: ReadonlyMap<string, MobileTask>): MobileCompletion[] {
+    return [...this.entries.values()].map((entry) => ({
+      ...entry,
+      title: threads.get(entry.threadId)?.title.slice(0, MAX_MOBILE_TITLE) ?? entry.title,
+    }));
+  }
+}
 
 export function projectMobileStatus(
   value: unknown,

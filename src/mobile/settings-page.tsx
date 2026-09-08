@@ -2,6 +2,7 @@ import { useRef, type ReactNode, type TouchEvent } from "react";
 import type { MobileUpdateArtifact, MobileUpdateStatus } from "./app-update";
 import { mobileCopy } from "./mobile-copy";
 import type { MobileSettings } from "./settings-store";
+import { NotificationHealthPanel } from "./notification-health";
 
 export function SettingsPage({
   settings,
@@ -46,6 +47,7 @@ export function SettingsPage({
         <span aria-hidden="true" />
       </header>
       <div className="mobile-settings-content">
+        <NotificationHealthPanel language={settings.language} />
         <PreferenceGroup title={copy.appearance} description={copy.appearanceDescription}>
           <PreferenceOption
             name="theme"

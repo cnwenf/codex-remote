@@ -19,12 +19,23 @@ export type NativeImageUploadResult = {
   data: unknown;
 };
 
+export type NotificationStatus = {
+  enabled: boolean;
+  runningEnabled: boolean;
+  completedEnabled: boolean;
+  state: "idle" | "starting" | "healthy" | "error" | "stopped";
+  error?: string;
+};
+
 export interface CodexRemoteNativePlugin {
   readSecret(options: { id: string }): Promise<{ value?: string }>;
   writeSecret(options: { id: string; value: string }): Promise<void>;
   removeSecret(options: { id: string }): Promise<void>;
   startMonitoring(options: MonitorConnection): Promise<void>;
   stopMonitoring(options: { connectionId?: string }): Promise<void>;
+  getNotificationStatus(): Promise<NotificationStatus>;
+  openNotificationSettings(options: { channel?: "running" | "completed" }): Promise<void>;
+  retryMonitoring(): Promise<void>;
   getLaunchTarget(): Promise<MobileThreadTarget | Record<string, never>>;
   scanConnection(): Promise<{ value: string }>;
   openExternalUrl(options: { url: string }): Promise<void>;

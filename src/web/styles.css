@@ -535,6 +535,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .mobile-header-update:disabled { cursor: wait; opacity: 0.62; }
 .mobile-update-feedback { width: min(calc(100% - 36px), 680px); margin: 4px auto -8px; color: var(--ink-muted); font-size: 0.72rem; text-align: right; }
 .mobile-update-error { color: var(--danger); }
+.mobile-notification-health { padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); }
+.mobile-notification-health h2 { margin: 0 0 8px; font-size: 1rem; }
+.mobile-notification-health p { margin: 0 0 8px; font-size: 0.8rem; line-height: 1.45; }
+.mobile-notification-health > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.mobile-notification-health small { display: block; margin-top: 8px; color: var(--ink-muted); }
+.native-notice-slot { max-height: 28dvh; overflow-y: auto; }
+.native-notice-slot .mobile-notification-health { border-radius: 0; }
+.app-root.has-native-notice { grid-template-rows: calc(58px + env(safe-area-inset-top)) auto minmax(0, 1fr); }
 .mobile-header-progress-ring { border: 0; background: conic-gradient(var(--action) 0 var(--download-progress), var(--surface-muted) var(--download-progress) 360deg); }
 .mobile-header-progress-ring::before { content: ""; position: absolute; inset: 3px; border: 1px solid var(--line); border-radius: inherit; background: var(--floating-surface); }
 .mobile-header-update.is-complete { border-color: color-mix(in oklch, var(--success) 65%, var(--line)); color: var(--success); }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createBrowserSession, remoteSocketUrl, type UploadedImage } from "./api/socket";
 import { ApprovalSheet, type ApprovalResolution } from "./components/approval-sheet";
 import { BrandMark } from "./components/brand-mark";
@@ -33,7 +33,7 @@ export type NativeRemoteSession = {
   onOpenExternalUrl?(url: string): void;
 };
 
-export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
+export function App({ remote, nativeNotice }: { remote?: NativeRemoteSession; nativeNotice?: ReactNode } = {}) {
   const language = remote?.language ?? "zh-CN";
   const copy = appCopy(language);
   const separator = language === "en" ? ", " : "，";
@@ -247,7 +247,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
   }
 
   return (
-    <main className="app-root" onTouchStart={beginRemoteListSwipe} onTouchEnd={finishRemoteListSwipe}>
+    <main className={`app-root${nativeNotice ? " has-native-notice" : ""}`} onTouchStart={beginRemoteListSwipe} onTouchEnd={finishRemoteListSwipe}>
       <header className={`topbar ${remote ? "topbar-native" : ""} ${remote && codex.selectedThread ? "topbar-native-thread" : ""}`}>
         <div className="brand-lockup">
           {codex.selectedThread ? (
@@ -311,6 +311,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
             : "Offline"}
         </div>
       </header>
+
+      {nativeNotice ? <div className="native-notice-slot">{nativeNotice}</div> : null}
 
       {codex.connection !== "ready" && codex.connection !== "reconnecting" ? (
         <div className="connect-stage">
