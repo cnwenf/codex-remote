@@ -377,6 +377,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .composer-image img { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; }
 .composer-image span { overflow: hidden; color: var(--ink-muted); font-size: 0.66rem; text-overflow: ellipsis; white-space: nowrap; }
 .composer-image button { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 999px; color: var(--ink-muted); background: transparent; font-size: 1rem; }
+.composer-image-hint { margin: -3px 8px 7px; color: var(--ink-muted); font-size: 0.66rem; line-height: 1.35; }
 .composer-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 4px 7px; overflow: visible; }
 .composer-settings::-webkit-scrollbar { display: none; }
 .composer-settings label { position: relative; flex: 0 0 auto; }
@@ -692,6 +693,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
     padding-block: 6px;
   }
   .composer-expanded .composer-images,
+  .composer-expanded .composer-image-hint,
   .composer-expanded .inline-error { grid-column: 1 / -1; }
   .composer-expanded .composer-settings {
     min-width: 0;

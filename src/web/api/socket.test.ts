@@ -126,6 +126,46 @@ describe("CodexSocket", () => {
     expect(webFetch).not.toHaveBeenCalled();
   });
 
+  it("compresses a large image before invoking the native uploader", async () => {
+    const original = new File([new Uint8Array(1_000_001)], "large.png", { type: "image/png" });
+    const imageUploader = vi.fn(async (transmitted: File) => ({
+      id: "upload-1", name: transmitted.name, mimeType: transmitted.type, size: transmitted.size,
+    }));
+    const webFetch = vi.fn(() => Promise.reject(new Error("webview-fetch-blocked")));
+    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:large"), revokeObjectURL: vi.fn() });
+    vi.stubGlobal("Image", class {
+      naturalWidth = 2_400;
+      naturalHeight = 1_200;
+      decode = vi.fn().mockResolvedValue(undefined);
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      set fillStyle(_value: string | CanvasGradient | CanvasPattern) {}, fillRect: vi.fn(), drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => {
+      callback(new Blob([new Uint8Array(750_000)], { type: "image/jpeg" }));
+    });
+
+    await uploadImage(original, webFetch as typeof fetch, { imageUploader });
+
+    expect(imageUploader).toHaveBeenCalledOnce();
+    const transmitted = imageUploader.mock.calls[0][0];
+    expect(transmitted.size).toBeLessThanOrEqual(1_000_000);
+    expect(transmitted.type).toBe("image/jpeg");
+    expect(webFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects an original above 50 MiB before invoking any uploader", async () => {
+    const original = new File([new Uint8Array(50 * 1024 * 1024 + 1)], "too-large.png", { type: "image/png" });
+    const imageUploader = vi.fn();
+    const webFetch = vi.fn();
+
+    await expect(uploadImage(original, webFetch as typeof fetch, { imageUploader }))
+      .rejects.toThrow("50 MiB");
+
+    expect(imageUploader).not.toHaveBeenCalled();
+    expect(webFetch).not.toHaveBeenCalled();
+  });
+
   it("shows a clear format error when image bytes do not match the claimed PNG type", async () => {
     const image = new File(["not a png"], "screen.png", { type: "image/png" });
     const webFetch = vi.fn(async () => new Response(null, { status: 415 }));

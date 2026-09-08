@@ -502,6 +502,7 @@ export function createGateway(options: GatewayOptions) {
       await closeHttpServers([httpServer, ...additionalHttpServers]);
       await options.transport.stop();
       options.desktopState?.close();
+      await imageStore.close();
     },
   };
 
@@ -953,14 +954,39 @@ export function createGateway(options: GatewayOptions) {
       return;
     }
     try {
-      const image = await imageStore.open(imageId);
-      response.writeHead(200, {
-        "content-type": image.mimeType,
-        "content-length": String(image.size),
+      const image = await imageStore.openTransfer(imageId);
+      if (request.destroyed || response.destroyed || response.writableEnded) {
+        image.release?.();
+        return;
+      }
+      const stream = createReadStream(image.path);
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        image.release?.();
+      };
+      stream.once("close", release);
+      response.once("close", () => stream.destroy());
+      stream.once("error", () => {
+        if (!response.headersSent && !response.destroyed) response.writeHead(500).end();
+        else if (!response.destroyed) response.destroy();
       });
-      createReadStream(image.path).pipe(response);
+      stream.once("open", () => {
+        if (response.destroyed || response.writableEnded) {
+          stream.destroy();
+          return;
+        }
+        response.writeHead(200, {
+          "content-type": image.mimeType,
+          "content-length": String(image.size),
+        });
+        stream.pipe(response);
+      });
     } catch (cause) {
+      if (request.destroyed || response.destroyed || response.writableEnded) return;
       const status = cause instanceof ImageUploadError ? cause.status : 404;
+      if (status === 503) response.setHeader("Retry-After", "1");
       response.writeHead(status).end();
     }
   }

@@ -1,4 +1,5 @@
 import type { GatewayEnvelope, RpcId, RpcMessage } from "../../protocol/types";
+import { compressImageForUpload } from "./image-compression";
 
 export interface BrowserSocket {
   readonly OPEN: number;
@@ -312,16 +313,17 @@ export async function uploadImage(
   fetcher: typeof fetch = fetch,
   options: RemoteApiOptions = {},
 ): Promise<UploadedImage> {
-  if (options.imageUploader) return options.imageUploader(file);
+  const transmitted = await compressImageForUpload(file);
+  if (options.imageUploader) return options.imageUploader(transmitted);
   const response = await fetcher(`${options.baseUrl ?? ""}/api/images`, {
     method: "POST",
     credentials: options.baseUrl ? "omit" : "same-origin",
     headers: {
-      "content-type": file.type,
-      "x-file-name": encodeURIComponent(file.name),
+      "content-type": transmitted.type,
+      "x-file-name": encodeURIComponent(transmitted.name),
       ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
     },
-    body: file,
+    body: transmitted,
   });
   const value = response.ok ? await response.json() as unknown : undefined;
   return uploadedImageFromResponse(response.status, value);

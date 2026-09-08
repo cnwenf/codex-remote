@@ -11,6 +11,7 @@ import {
 } from "react";
 import type { ModelOption, PermissionOption } from "../state/use-codex";
 import type { MobileLanguage } from "../../mobile/settings-store";
+import { MAX_SELECTABLE_IMAGE_BYTES, MAX_TRANSFER_IMAGE_BYTES, SUPPORTED_TRANSFER_IMAGE_TYPES } from "../../protocol/image-transfer";
 
 export type ComposerSettings = {
   model?: string;
@@ -101,14 +102,14 @@ export function Composer({
 
   function addImages(files: File[]) {
     const accepted = files.filter((file) =>
-      ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type)
+      SUPPORTED_TRANSFER_IMAGE_TYPES.includes(file.type as typeof SUPPORTED_TRANSFER_IMAGE_TYPES[number])
     );
     if (accepted.length !== files.length) {
       setError("仅支持 PNG、JPEG、GIF 和 WebP 图片");
       return;
     }
-    if (accepted.some((file) => file.size > 10 * 1024 * 1024)) {
-      setError("单张图片不能超过 10 MB");
+    if (accepted.some((file) => file.size > MAX_SELECTABLE_IMAGE_BYTES)) {
+      setError("单张原图不能超过 50 MiB");
       return;
     }
     if (images.length + accepted.length > 4) {
@@ -200,21 +201,26 @@ export function Composer({
         disabled={disabled}
       />
       {isExpanded && previews.length > 0 ? (
-        <div className="composer-images" aria-label="待发送图片">
-          {previews.map(({ file, url }, index) => (
-            <div className="composer-image" key={`${file.name}-${file.size}-${index}`}>
-              {url ? <img src={url} alt="" /> : null}
-              <span title={file.name}>{file.name}</span>
-              <button
-                type="button"
-                aria-label={`移除 ${file.name}`}
-                onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
+        <>
+          <div className="composer-images" aria-label="待发送图片">
+            {previews.map(({ file, url }, index) => (
+              <div className="composer-image" key={`${file.name}-${file.size}-${index}`}>
+                {url ? <img src={url} alt="" /> : null}
+                <span title={file.name}>{file.name}</span>
+                <button
+                  type="button"
+                  aria-label={`移除 ${file.name}`}
+                  onClick={() => setImages((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+          {images.some((file) => file.size > MAX_TRANSFER_IMAGE_BYTES) ? (
+            <p className="composer-image-hint">大于 1 MB 的图片会自动生成静态传输副本，GIF 动图将变为静态图。</p>
+          ) : null}
+        </>
       ) : null}
       {isExpanded && (models.length > 0 || permissions.length > 0 || model || permission) ? (
         <div className="composer-settings" aria-label="对话设置">

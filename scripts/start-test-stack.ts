@@ -1,5 +1,7 @@
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { AppServerTransport } from "../src/gateway/app-server-transport";
 import { createGateway } from "../src/gateway/server";
 import type { RpcMessage } from "../src/protocol/types";
@@ -13,6 +15,7 @@ const fixtureLongQuestion = "甲".repeat(4096) + "分页尾页";
 const fixtureQuestions = new Map<string, { id: string; text: string; revision: string }>();
 let fixtureQuestionRevision = 0;
 await verifyAndroidTestGateway({ host: "127.0.0.1", port });
+const imageUploadDir = await mkdtemp(join(tmpdir(), "codex-remote-e2e-images-"));
 const transport = new AppServerTransport({
   binary: process.execPath,
   argsPrefix: [resolve(root, "tests/fixtures/fake-codex.mjs")],
@@ -68,6 +71,7 @@ const gateway = createGateway({
   token: "e2e-token",
   allowedOrigins: [`http://127.0.0.1:${port}`],
   staticDir: resolve(root, "dist"),
+  uploadDir: imageUploadDir,
   defaultCwd: "/tmp/direct-conversation",
   transport,
   desktopState,
@@ -84,7 +88,11 @@ let stopping = false;
 async function stop() {
   if (stopping) return;
   stopping = true;
-  await gateway.stop();
+  try {
+    await gateway.stop();
+  } finally {
+    await rm(imageUploadDir, { recursive: true, force: true });
+  }
   process.exitCode = 0;
 }
 

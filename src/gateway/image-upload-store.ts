@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { chmod, lstat, mkdir, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { GatewayImageCompressor, GatewayImageCompressionError, type GatewayTransferImage } from "./image-compression";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -59,8 +60,11 @@ function matchesPng(buffer: Buffer) {
 
 export class ImageUploadStore {
   private readonly images = new Map<string, StoredImage>();
+  private readonly compressor: GatewayImageCompressor;
 
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string) {
+    this.compressor = new GatewayImageCompressor(join(root, ".transfer-cache"));
+  }
 
   async save(buffer: Buffer, declaredMimeType: string, originalName?: string): Promise<StoredImage> {
     if (buffer.byteLength === 0) throw new ImageUploadError("image-empty", 400);
@@ -213,6 +217,19 @@ export class ImageUploadStore {
       }
     }
     throw new ImageUploadError("image-upload-not-found", 404);
+  }
+
+  async openTransfer(id: string): Promise<GatewayTransferImage> {
+    try {
+      return await this.compressor.open(await this.open(id));
+    } catch (cause) {
+      if (cause instanceof GatewayImageCompressionError) throw new ImageUploadError(cause.message, cause.status);
+      throw cause;
+    }
+  }
+
+  close() {
+    return this.compressor.close();
   }
 }
 

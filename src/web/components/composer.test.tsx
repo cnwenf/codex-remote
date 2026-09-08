@@ -203,6 +203,16 @@ describe("Composer", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/最多.*4.*张/);
   });
 
+  it("accepts up to 50 MiB and explains that large or animated images use a static transfer copy", async () => {
+    render(<Composer onSend={vi.fn()} running={false} expanded />);
+    const image = new File([new Uint8Array(10 * 1024 * 1024 + 1)], "large.gif", { type: "image/gif" });
+
+    await userEvent.upload(screen.getByLabelText("添加图片"), image);
+
+    expect(screen.getByText("large.gif")).toBeVisible();
+    expect(screen.getByText(/大于 1 MB.*静态传输副本.*GIF.*静态图/)).toBeVisible();
+  });
+
   it("shows and updates the current model reasoning effort and permission", async () => {
     const onSettingsChange = vi.fn();
     const props = {

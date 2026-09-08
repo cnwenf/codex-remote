@@ -2,6 +2,7 @@
 
 import { once } from "node:events";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,8 @@ import type {
 import { createGateway } from "./server";
 import { initialCodexState, reduceCodexState } from "../protocol/thread-store";
 import { hydrateThread } from "../web/state/conversation-history";
+import { MAX_TRANSFER_IMAGE_BYTES } from "../protocol/image-transfer";
+import { createHighEntropyPng } from "../test/high-entropy-png";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -1504,6 +1507,54 @@ describe("gateway server", () => {
       await rm(uploadDir, { recursive: true, force: true });
     }
   });
+
+  it("serves an on-demand bounded transfer copy for a historical large image", async () => {
+    const token = "test-token";
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-remote-large-image-"));
+    const gateway = createGateway({ port: 0, token, uploadDir, transport: new FakeTransport() });
+    const address = await gateway.start();
+    try {
+      const original = createHighEntropyPng();
+      const upload = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "image/png" },
+        body: original,
+      });
+      expect(upload.status).toBe(201);
+      const stored = await upload.json() as { id: string };
+
+      await new Promise<void>((resolveAbort) => {
+        const request = httpRequest(`http://127.0.0.1:${address.port}/api/images/${stored.id}`, {
+          headers: { authorization: `Bearer ${token}` },
+        });
+        request.once("error", () => resolveAbort());
+        request.end();
+        setTimeout(() => request.destroy(), 5);
+      });
+
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/images/${stored.id}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/jpeg");
+      expect((await response.arrayBuffer()).byteLength).toBeLessThanOrEqual(MAX_TRANSFER_IMAGE_BYTES);
+      const originals = (await readdir(uploadDir)).filter((name) => name.endsWith(".png"));
+      expect(originals).toHaveLength(1);
+      expect(await readFile(join(uploadDir, originals[0]))).toEqual(original);
+
+      const [cached] = await readdir(join(uploadDir, ".transfer-cache"));
+      await rm(join(uploadDir, ".transfer-cache", cached));
+      const missingTransfer = await fetch(`http://127.0.0.1:${address.port}/api/images/${stored.id}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(missingTransfer.status).toBe(500);
+      expect((await fetch(`http://127.0.0.1:${address.port}/health`)).status).toBe(200);
+    } finally {
+      await gateway.stop();
+      await rm(uploadDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("imports a Desktop-local image before broadcasting its live user message", async () => {
     const token = "test-token";
