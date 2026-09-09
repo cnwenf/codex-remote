@@ -2,7 +2,7 @@
 
 ## 范围与状态
 
-本轮处理通知恢复及品牌图标、双向图片传输副本 ≤1,000,000 bytes、单次用户消息重复。源码修复、完整自动化和三端候选构建已完成；9 月 9 日最终移动包已安装且 Android instrumentation 通过，随后按现有更新器安装 Mac 0.5.32 成功，正在进行最终跨端联调，尚未发布新版本。
+本轮处理通知恢复及品牌图标、双向图片传输副本 ≤1,000,000 bytes、单次用户消息重复。**v0.5.32 已于 9 月 9 日公开发布**，全部正式资产重新下载核验完成，正式 Mac 包已按现有更新器安装并恢复 Gateway / Desktop 桥接。此前未完成的原生复验仍保留为未验收，不因发布改标通过；下文早期记录按发生顺序保留。
 
 验收分层：源码测试、HTTP/原生测试夹具、实际模拟器页面操作、正式签名与公开资产分别记录。模拟器通过不能证明所有手机 VPN、蜂窝网络和 OEM 后台策略均通过。
 
@@ -111,6 +111,27 @@
 - [ ] 候选 Mac / Android / iPhone 对齐，正式 CI、签名、校验和、发布与安装复验。
 
 本轮双向图片、同文发送、跨端排队转引导、通知点击深链已实际通过，不重复作为未测项。随后用户在已知剩余原生复验未完成的说明之后明确要求“发版”，按该最新指令发布当前已验证候选；上述未完成项和原问题短暂提示写入发布说明，不将其改标为通过。发布流程仍要求完整检查及正式资产校验，不改变系统安全策略。
+
+## 正式发布核验 — 2026-09-09
+
+- [v0.5.32](https://github.com/cnwenf/codex-remote/releases/tag/v0.5.32) 于北京时间 12:35 公开发布，非草稿；标签固定在 `35dcab39c6470813408aa5ca1d4d04fc43846962`。本次发布提交仅补发布说明及验收状态，生产源码与冻结候选一致。
+- [正式流水线 34311177969](https://github.com/cnwenf/codex-remote/actions/runs/34311177969) 的 verify、Android、Mac ARM64、Mac x86_64、iOS 和 publish 全部成功。合入 main 后本地完整检查再次通过：68 文件 / 1001 项，99.15 秒。
+- 五个正式二进制、各自 SHA-256 文件和 `latest.json` 共 11 项资产全部重新下载。逐项哈希核对、两个 DMG 的 `hdiutil verify`、三个移动归档完整性均通过；五项二进制摘要见下表。
+- 两种 Mac App 的深度严格签名校验和 App / Node / cloudflared 架构检查通过。Intel 包挂载后自检通过；ARM64 挂载路径直接自检退出 137，按正常更新流程安装后自检通过，不能将挂载执行结果等同安装失败。未改签、清除安全属性或调整安全设置。
+- 正式 Android APK 沿用固定证书，验证通过；版本 0.5.32 / 41。iOS 模拟器包签名验证通过，模拟器与未签名实体 IPA 均为 0.5.32 / 39；实体 IPA 仍需开发者签名。
+- 正式 Android / iOS 两种包各自 7 个 Web 资源逐字节匹配 dist，原生桥日志配置均为 none；Mac 两种架构与本机安装的 Web / Gateway 内容一致。
+- GitHub latest、raw 备用地址、CDN 清单均为 0.5.32，Android 下载固定提交 `8c743d1758915be46b6654e695a3964d33c537e3`。独立下载 CDN APK 与 GitHub 正式 APK 的字节摘要完全相同。
+- 复用 `perform-macos-update.sh` 安装正式 ARM64 包，退出 0；安装目录全部文件与正式 DMG 逐字节一致。通过既有 `local.codex-remote.app` 启动后，`/health` 200，桥接接口返回 `available=true`、`readOnly=false`、`transport=desktop-live`。
+- 配置与 token 文件的 inode / 大小 / 修改时间未变，Desktop PID 未变。正式包替换仅停止旧 Remote / Gateway，未重启 Desktop；临时 DMG 挂载均已卸载。
+- 本次正式发布没有补做锁屏后的原生点击，因此 iPhone 完整历史上翻及最终中断后的两端原生复验仍未确认，详见发布说明。
+
+| 正式资产 | SHA-256 |
+| --- | --- |
+| Android ARM64 APK | `a630141af990f64fd2c1346b38abde465e75ddf10aefe29980dbe3741b4cf7e6` |
+| Mac ARM64 DMG | `d566b4e3bdc26dbba01fec341e3c941c25678dde73f7afc7d7eb2360896c4ee5` |
+| Mac x86_64 DMG | `7f5aea42df16761e99a6fce58bb32b0457afca9c4844435cc48a9b4521fb5003` |
+| iOS Simulator ZIP | `46f2e7ca48a12e9e3b104def03711c7b3ca4b5cc82c12005fb3f5ac670b9c637` |
+| iOS unsigned IPA | `d616681325606981c0b30d9f410b25f3bfa846f2f34cb402353ad29f2a13b82c` |
 
 ## 本轮验收矩阵
 
