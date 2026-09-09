@@ -10,7 +10,7 @@
 
 **Spec:** 本文件的 Scope 是用户 2026-09-08 最新请求的实现契约。
 
-**执行状态：** 源码任务及独立审查已完成，完整检查 1001 项、Web E2E 61 项、Java 单测 21 项通过。Android / iPhone 最终候选已构建；最终原生整包验收和发布受 Mac 锁屏及候选执行门禁阻挡。以下保留原始任务步骤，逐项证据与未完成门禁以 [验收记录](../../android-notification-acceptance.md) 为准，不能将较早候选的原生结果当作最终包验收。
+**执行状态：** 源码任务及独立审查已完成，完整检查 1001 项、Web E2E 61 项、Java 单测 21 项通过。9 月 9 日解锁后 Android / iPhone 最终候选已安装，最终 Android instrumentation 5 项通过，分支 CI 完整成功；新 Mac 候选仍被本机执行安全机制拒绝，最终跨端联调和发布保持未完成。以下保留原始任务步骤，逐项证据与未完成门禁以 [验收记录](../../android-notification-acceptance.md) 为准，不能将较早候选的原生结果当作最终包验收。
 
 ## Scope / Global Constraints
 
@@ -103,7 +103,7 @@ expect(visibleUserMessages(afterTwoRealSubmissions)).toHaveLength(2);
 **Files:** `docs/android-notification-acceptance.md`、发布说明、版本文件与现有发布脚本。
 
 - [x] 全量 `NODE_OPTIONS=--max-old-space-size=2048 pnpm check --maxWorkers=1 --reporter=dot`、`pnpm e2e`、Android 单测；跳过项不得算通过。
-- [ ] 最终候选 Android instrumentation；新失败通知断言已编译，尚未运行。
+- [x] 最终候选 Android instrumentation；包含新失败通知与重播断言，5 项通过。
 - [ ] Android 实际页面验收：连接、正常/大图发送、同文多次、排队、重连、双向图片、通知权限关闭/恢复、运行/完成通知和锁屏图标。
 - [ ] 核对候选 Mac Gateway 与 Android APK 都含本轮 commit；先完成候选联调，再进入正式发布。不得只用模拟 HTTP 夹具替代所有跨端验收。
 - [ ] 完成全分支代码审查，消除阻塞问题。复用固定 Android 发布证书，验签后发布；不转调试签名、不旋转密钥。
