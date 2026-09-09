@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-0.5.34 已完成开发、自动化回归与独立代码审查；用户在知晓原生页面未复验后明确要求“直接发版”，当前进入正式发布流程。Mac 锁屏后的 Android / iPhone 页面点击仍记为未验收，不绕过锁屏，不把发布等同于全部原生验收通过。
+0.5.34 已于北京时间 2026-09-09 16:05 正式公开发布，正式资产和安卓更新地址复核完成。用户在知晓原生页面未复验后明确要求“直接发版”；Mac 锁屏后的 Android / iPhone 页面点击仍记为未验收，不绕过锁屏，不把发布等同于全部原生验收通过。
 
 本轮只处理任务通知的展示与状态归属。红米真机私网请求超时根因仍缺设备证据，图片发送问题按用户要求延期；不宣称这两项已解决。既有 Mac Gateway 0.5.32 保持运行，没有重启 Desktop 或替换本机网关。
 
@@ -49,4 +49,21 @@ Android debug QA 包 SHA-256：`c853b25d2f3905a2a5052ee0d2ff5d0d3ad9b5c970363074
 
 ## 正式发布
 
-本次仅更新发布说明，功能代码保持 `586cbc0` 不变。正式标签、流水线和下载资产将在发布完成后回填实测结果。
+本次发布提交仅更新说明，功能代码保持 `586cbc0` 不变。
+
+- [v0.5.34](https://github.com/cnwenf/codex-remote/releases/tag/v0.5.34) 非草稿、非预发布；标签固定在 `bf9c0ebfea16866e06edc463d7aab52ae3030ea0`。
+- [发布流水线 34326679694](https://github.com/cnwenf/codex-remote/actions/runs/34326679694) 的 verify、Android、Mac ARM64、Mac x86_64、iOS、publish 六项全部成功。发布前本地完整检查再次通过：68 文件 / 1011 项，65.05 秒。
+- 五个正式二进制、五份校验和及 latest.json 共 11 项资产重新下载；与 GitHub 资产摘要逐项匹配。五个二进制的独立 SHA-256 检查、两份 DMG 的 hdiutil verify、三个移动归档的完整性检查通过。
+- Android APK 固定发布证书验证通过，版本 0.5.34 / 43；没有用 debug 包替代正式产物。iOS 模拟器包签名校验通过；模拟器和未签名 IPA 均为 0.5.34 / 41，实体 IPA 仍需有效开发者签名。
+- 三个正式移动包各自 7 个 Web 文件与候选 dist 逐字节一致，原生桥参数日志保持关闭。
+- 两份 Mac 包的深度严格签名校验、App / Node / cloudflared 架构及版本校验通过。ARM64 本机挂载包自检通过；Intel 本机自检退出 137，amfid 记录 `AppleMobileFileIntegrityError -423`（临时签名或未知证书链）。Intel 同一正式流水线的自检通过，但不把它当成本机执行通过。没有改签、清除安全属性或替换本机安装。
+- GitHub latest、raw 备用清单和 CDN 清单均为 0.5.34，Android 固定下载提交为 `4586edaae3d488703d9690dfe0abcba50ad6c127`。独立下载的 CDN APK 与 GitHub 正式 APK 逐字节一致。
+- 临时 DMG 挂载已正常卸载；本轮没有新的原生页面点击，也没有安装正式包到 Mac / 手机或重启 Desktop。
+
+| 正式资产 | SHA-256 |
+| --- | --- |
+| Android ARM64 APK | `0ba90b1132b8bd0d2ac138487954ebaaee003f14670e012c6ecd0f49f4c7d67d` |
+| Mac ARM64 DMG | `1984c8c633c4f0f9aaa81f9407adef5e3f990520ac0d9b254375730bd9ad0de9` |
+| Mac x86_64 DMG | `d0f2434ec2f6068899d219391d00cb628f1ca25414be44d10b907bdfd71ab7a5` |
+| iOS Simulator ZIP | `b2418a237a0112e5da4f9179b8bf4ae9e694aba0ebab76a946d97afcbbd4b250` |
+| iOS unsigned IPA | `ebeb4b375152c952c529be332f7f56fc07dbb88df298dcbc5dae3048d1948036` |
