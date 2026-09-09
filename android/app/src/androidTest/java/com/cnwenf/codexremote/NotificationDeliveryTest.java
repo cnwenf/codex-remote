@@ -115,7 +115,9 @@ public class NotificationDeliveryTest {
             responseCode.set(401);
             startMonitor(context, start);
             awaitCondition(() -> "unauthorized".equals(CodexRemoteMonitorService.notificationStatus(context).optString("error")));
-            awaitCondition(() -> Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "后台监控异常".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))));
+            awaitCondition(() -> Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> n.getId() == CodexRemoteMonitorService.ONGOING_ID
+                && "任务通知".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))
+                && n.getNotification().extras.getCharSequence("android.text", "").toString().contains("自动重新检查")));
             responseCode.set(200);
             body.set("{\"bridge\":{\"available\":false},\"threads\":[]}");
             startMonitor(context, start);

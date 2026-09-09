@@ -90,6 +90,17 @@ test.describe("native mobile remote header", () => {
     expect(pillBounds!.x + pillBounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   });
 
+  test("keeps the same connection indicator in portrait and landscape", async ({ page }) => {
+    for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }]) {
+      await page.setViewportSize(viewport);
+      const indicator = page.locator(".remote-connection-indicator");
+      await expect(indicator).toBeVisible();
+      await expect(page.locator(".topbar-native .connection-state")).toBeHidden();
+      const green = await indicator.evaluate((element) => getComputedStyle(element).getPropertyValue("--success").trim());
+      await expect(indicator).toHaveCSS("background-color", green);
+    }
+  });
+
   test("keeps a long pending steer message and its final state inside the mobile viewport", async ({ page }) => {
     await page.setContent(`
       <meta name="viewport" content="width=device-width, initial-scale=1" />

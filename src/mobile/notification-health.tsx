@@ -4,15 +4,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CodexRemoteNative, type NotificationStatus } from "./native-bridge";
 import type { MobileLanguage } from "./settings-store";
 
-export function NotificationHealthPanel({ language, compact = false }: { language: MobileLanguage; compact?: boolean }) {
+// Settings-only: notification checks never control the conversation's connection indicator.
+export function NotificationHealthPanel({ language }: { language: MobileLanguage }) {
   const [status, setStatus] = useState<NotificationStatus>();
   const [actionError, setActionError] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [now, setNow] = useState(Date.now);
   const requestId = useRef(0);
   const mounted = useRef(false);
   const android = Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android";
   const refresh = useCallback(async () => {
     if (!mounted.current) return;
+    setNow(Date.now());
     const id = ++requestId.current;
     try {
       const next = await CodexRemoteNative.getNotificationStatus();
@@ -36,12 +39,15 @@ export function NotificationHealthPanel({ language, compact = false }: { languag
   const en = language === "en";
   const disabled = status && (!status.enabled || !status.runningEnabled || !status.completedEnabled);
   const failed = status?.state === "error" || status?.state === "stopped";
-  if (compact && !disabled && !failed && !actionError) return null;
+  const lastSuccessAt = status?.lastSuccessAt ?? 0;
+  const stale = lastSuccessAt > 0 && now - lastSuccessAt >= 60_000;
   const messages = {
-    idle: en ? "Open a connection to start background monitoring." : "打开连接后启用后台监控。",
-    starting: en ? "Checking background monitoring…" : "正在检查后台监控…",
-    healthy: en ? "Background monitoring is working." : "后台监控正常。",
-    stopped: en ? "Background monitoring stopped; completion alerts are unavailable." : "后台监控已停止，无法接收完成提醒。",
+    idle: en ? "Open a connection to enable task notifications." : "打开连接后启用任务通知。",
+    starting: en ? "Checking task notifications…" : "正在重新检查任务通知…",
+    healthy: stale
+      ? (en ? "Task notification status is out of date." : "任务通知状态已过期。")
+      : (en ? "Task notifications are working." : "任务通知正常。"),
+    stopped: en ? "Task notification checks stopped; completion alerts may be delayed." : "任务通知检查已停止，完成提醒可能延迟。",
     error: monitoringError(status?.error, en),
   };
   const permissionMessage = !status?.enabled
@@ -59,33 +65,45 @@ export function NotificationHealthPanel({ language, compact = false }: { languag
   }
   return (
     <aside className="mobile-notification-health" role="status">
-      {!compact ? <h2>{en ? "Task notifications" : "任务通知"}</h2> : null}
+      <h2>{en ? "Task notifications" : "任务通知"}</h2>
+      {status?.connectionName ? <p>{en ? "Connection: " : "对应连接："}{status.connectionName}</p> : null}
       <p>{disabled ? permissionMessage : status ? messages[status.state] : ""}</p>
       {disabled && failed ? <p>{messages[status.state]}</p> : null}
+      {status?.state === "starting" && status.error ? <p>{en ? "Previous check: " : "上次检查："}{monitoringError(status.error, en)}</p> : null}
+      {(status?.consecutiveFailures ?? 0) > 0 ? <p>{en ? "Consecutive failed checks: " : "连续检查失败："}{status!.consecutiveFailures}</p> : null}
+      <p>{en ? "Last successful check: " : "最近成功检查："}{lastSuccessAt > 0
+        ? <time dateTime={new Date(lastSuccessAt).toISOString()}>{relativeCheckTime(lastSuccessAt, now, en)}</time>
+        : (en ? "Not yet confirmed" : "尚未成功检查")}</p>
       {actionError ? <p>{en ? "Unable to check or configure notifications. Try again." : "通知状态读取或设置失败，请重试。"}</p> : null}
       <div>
-        {disabled || !compact ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void perform(() => CodexRemoteNative.openNotificationSettings(
+        <button type="button" className="secondary-button" disabled={busy} onClick={() => void perform(() => CodexRemoteNative.openNotificationSettings(
           !status?.enabled ? {} : !status.runningEnabled ? { channel: "running" } : !status.completedEnabled ? { channel: "completed" } : {},
-        ))}>{disabled ? (en ? "Enable notifications" : "开启通知") : (en ? "Notification settings" : "通知设置")}</button> : null}
-        {failed ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void perform(() => CodexRemoteNative.retryMonitoring())}>{en ? "Retry monitoring" : "重试监控"}</button> : null}
+        ))}>{disabled ? (en ? "Enable notifications" : "开启通知") : (en ? "Notification settings" : "通知设置")}</button>
+        {status?.connectionId ? <button type="button" className="secondary-button" disabled={busy} onClick={() => void perform(() => CodexRemoteNative.retryMonitoring())}>{en ? "Check again" : "重新检查"}</button> : null}
       </div>
-      {!compact ? <small>{en ? "Lock screen visibility and sounds follow Android settings. Only the last opened connection is monitored." : "锁屏显示和声音遵循 Android 系统设置；后台监控最近打开的连接。"}</small> : null}
+      <small>{en ? "This checks task notifications, not the chat connection. Only the last opened connection is checked. Lock screen visibility and sounds follow Android settings." : "此处只检查任务通知，不代表对话连接状态。仅检查最近打开的连接；锁屏显示和声音遵循 Android 系统设置。"}</small>
     </aside>
   );
 }
 
+function relativeCheckTime(timestamp: number, now: number, en: boolean) {
+  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
+  if (minutes === 0) return en ? "Just now" : "刚刚";
+  return en ? `${minutes} min ago` : `${minutes} 分钟前`;
+}
+
 function monitoringError(code: string | undefined, en: boolean): string {
   const messages: Record<string, string> = {
-    unauthorized: en ? "Background authentication failed. Check the connection password." : "后台监控鉴权失败，请检查连接密码。",
+    unauthorized: en ? "Task notification authentication failed. Check the connection password." : "任务通知鉴权失败，请检查连接密码。",
     "bridge-unavailable": en ? "The Mac gateway is reachable, but Codex Desktop is disconnected. Retrying automatically." : "已连上 Mac 网关，但 Mac 上的 Codex Desktop 暂未连接，正在自动重试。",
-    timeout: en ? "The background status request timed out. Retrying automatically." : "后台状态请求超时，正在自动重试。",
-    dns: en ? "The background monitor cannot resolve the connection address. Check the private network connection." : "后台监控的连接地址无法解析，请检查私网连接。",
-    tls: en ? "The background monitor could not establish a secure connection. Check the gateway certificate." : "后台监控安全连接失败，请检查网关证书。",
+    timeout: en ? "The task status request timed out. Checking again automatically." : "任务状态请求超时，将自动重新检查。",
+    dns: en ? "The notification check cannot resolve the connection address. Check the private network connection." : "任务通知的连接地址无法解析，请检查私网连接。",
+    tls: en ? "The notification check could not establish a secure connection. Check the gateway certificate." : "任务通知安全连接失败，请检查网关证书。",
     "invalid-status": en ? "The gateway returned invalid status data. Retrying automatically." : "网关返回的状态数据无效，正在自动重试。",
-    "start-failed": en ? "Background monitoring could not start. Reopen the connection and retry." : "后台监控启动失败，请重新打开连接后重试。",
+    "start-failed": en ? "Task notification checks could not start. Reopen the connection and retry." : "任务通知检查启动失败，请重新打开连接后重试。",
   };
   if (code && /^http-\d{3}$/.test(code)) {
-    return en ? `The status endpoint returned HTTP ${code.slice(5)}. Retrying automatically.` : `后台状态接口返回 HTTP ${code.slice(5)}，正在自动重试。`;
+    return en ? `The status endpoint returned HTTP ${code.slice(5)}. Retrying automatically.` : `任务状态接口返回 HTTP ${code.slice(5)}，将自动重新检查。`;
   }
-  return messages[code ?? ""] ?? (en ? "Background monitoring cannot reach the gateway. Retrying automatically; messaging uses a separate connection." : "后台监控暂时无法连接网关，正在自动重试；这与消息连接是独立的。");
+  return messages[code ?? ""] ?? (en ? "Task notification checks cannot reach the gateway. Messaging uses a separate connection." : "任务通知检查暂时无法连接网关；对话使用独立连接。");
 }

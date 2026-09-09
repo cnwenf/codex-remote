@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
     getLaunchTarget: vi.fn(async () => ({})),
     openExternalUrl: vi.fn(async () => undefined),
     startMonitoring: vi.fn(async () => undefined),
+    getNotificationStatus: vi.fn(),
     startImageUpload: vi.fn(async () => ({ uploadId: "native-upload-1" })),
     appendImageUpload: vi.fn(async (_options: { data: string }) => undefined),
     finishImageUpload: vi.fn(async () => ({
@@ -32,8 +33,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../web/app", () => ({
-  App: ({ remote }: { remote: { connectionId: string; imageUploader?(file: File): Promise<unknown>; onOpenConnection?(id: string): void; onOpenExternalUrl?(url: string): void } }) => (
+  App: ({ remote, nativeNotice }: { nativeNotice?: import("react").ReactNode; remote: { connectionId: string; imageUploader?(file: File): Promise<unknown>; onOpenConnection?(id: string): void; onOpenExternalUrl?(url: string): void } }) => (
     <main>
+      {nativeNotice}
       <span data-testid="active-connection">{remote.connectionId}</span>
       <span data-testid="image-upload-transport">{remote.imageUploader ? "native" : "web"}</span>
       <button type="button" onClick={() => remote.onOpenExternalUrl?.("https://docs.example.test/path")}>Open docs</button>
@@ -114,6 +116,22 @@ describe("MobileShell updates", () => {
     mocks.notificationPermissionRequested.clear();
     mocks.capacitorListeners.clear();
     window.history.replaceState(null, "");
+  });
+  it("keeps notification failures off the connection list and conversation surface", async () => {
+    mocks.isNativePlatform.mockReturnValue(true);
+    mocks.nativePlugin.getNotificationStatus.mockResolvedValue({
+      enabled: true, runningEnabled: true, completedEnabled: true,
+      connectionId: "mac-1", state: "error", error: "timeout", consecutiveFailures: 3,
+    });
+    const { store, settingsStore } = notificationConnectionFixture();
+    render(<MobileShell storeOverride={store as never} settingsStoreOverride={settingsStore as never} />);
+    const open = await screen.findByRole("button", { name: /Office Mac/ });
+    expect(screen.queryByRole("button", { name: /重试监控|重新检查/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/状态请求超时/)).not.toBeInTheDocument();
+    await userEvent.click(open);
+    await screen.findByTestId("active-connection");
+    expect(screen.queryByRole("button", { name: /重试监控|重新检查/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/状态请求超时/)).not.toBeInTheDocument();
   });
   it.each(["denied", "prompt-with-rationale"])(
     "does not repeat the notification prompt after Android reports %s",

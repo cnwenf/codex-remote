@@ -18,13 +18,13 @@ vi.mock("@capacitor/app", () => ({ App: { addListener: async (_: string, listene
 } } }));
 import { NotificationHealthPanel } from "./notification-health";
 
-const healthy = { enabled: true, runningEnabled: true, completedEnabled: true, state: "healthy" };
+const healthy = { enabled: true, runningEnabled: true, completedEnabled: true, state: "healthy", connectionId: "mac-1", connectionName: "Office Mac", lastSuccessAt: Date.now(), consecutiveFailures: 0 };
 afterEach(() => { vi.clearAllMocks(); });
 
 describe("Android notification health", () => {
   it("clears a transient status read error after a successful resume refresh", async () => {
     native.getNotificationStatus.mockRejectedValueOnce(new Error("temporary"));
-    render(<NotificationHealthPanel language="zh-CN" compact />);
+    render(<NotificationHealthPanel language="zh-CN" />);
     expect(await screen.findByText(/通知状态读取或设置失败/)).toBeVisible();
     native.getNotificationStatus.mockResolvedValue(healthy);
     act(() => native.onResume?.({ isActive: true }));
@@ -32,7 +32,7 @@ describe("Android notification health", () => {
   });
   it("explains denied notifications, opens settings, and refreshes when returning", async () => {
     native.getNotificationStatus.mockResolvedValue({ ...healthy, enabled: false });
-    render(<NotificationHealthPanel language="zh-CN" compact />);
+    render(<NotificationHealthPanel language="zh-CN" />);
     expect(await screen.findByText(/通知未开启/)).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "开启通知" }));
     expect(native.openNotificationSettings).toHaveBeenCalledWith({});
@@ -52,25 +52,26 @@ describe("Android notification health", () => {
   it("shows monitoring failure and lets the user retry without presenting a healthy connection", async () => {
     native.getNotificationStatus.mockResolvedValue({ ...healthy, state: "error", error: "unauthorized" });
     render(<NotificationHealthPanel language="zh-CN" />);
-    expect(await screen.findByText(/后台监控鉴权失败/)).toBeVisible();
+    expect(await screen.findByText(/任务通知鉴权失败/)).toBeVisible();
     native.getNotificationStatus.mockResolvedValue(healthy);
-    await userEvent.click(screen.getByRole("button", { name: "重试监控" }));
-    expect(await screen.findByText(/后台监控正常/)).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "重新检查" }));
+    expect(await screen.findByText(/任务通知正常/)).toBeVisible();
   });
 
   it("ignores an older failed refresh after retry has confirmed recovery", async () => {
     const failure = { ...healthy, state: "error", error: "timeout" };
     native.getNotificationStatus.mockResolvedValueOnce(failure);
-    render(<NotificationHealthPanel language="zh-CN" compact />);
-    await screen.findByRole("button", { name: "重试监控" });
+    render(<NotificationHealthPanel language="zh-CN" />);
+    await screen.findByRole("button", { name: "重新检查" });
     let resolveOld!: (value: typeof failure) => void;
     native.getNotificationStatus.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
     act(() => native.onResume?.({ isActive: true }));
     native.getNotificationStatus.mockResolvedValue(healthy);
-    await userEvent.click(screen.getByRole("button", { name: "重试监控" }));
-    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "重新检查" }));
+    await screen.findByText(/任务通知正常/);
     await act(async () => resolveOld(failure));
-    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText(/任务通知正常/)).toBeVisible();
+    expect(screen.queryByText(/状态请求超时/)).not.toBeInTheDocument();
   });
 
   it.each([
@@ -82,8 +83,22 @@ describe("Android notification health", () => {
     ["invalid-status", /状态数据无效/],
   ])("explains %s without suggesting every failure is the connection password", async (error, message) => {
     native.getNotificationStatus.mockResolvedValue({ ...healthy, state: "error", error });
-    render(<NotificationHealthPanel language="zh-CN" compact />);
+    render(<NotificationHealthPanel language="zh-CN" />);
     expect(await screen.findByText(message)).toBeVisible();
-    expect(screen.queryByText(/后台监控正常/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/任务通知正常/)).not.toBeInTheDocument();
+  });
+
+  it("shows the checked connection and actual last success without declaring retry a success", async () => {
+    const lastSuccessAt = Date.now() - 120_000;
+    const failed = { ...healthy, lastSuccessAt, state: "error", error: "timeout", consecutiveFailures: 2 };
+    native.getNotificationStatus.mockResolvedValue(failed);
+    render(<NotificationHealthPanel language="zh-CN" />);
+    expect(await screen.findByText(/Office Mac/)).toBeVisible();
+    expect(screen.getByText(/2 分钟前/).closest("time")).toHaveAttribute("dateTime", new Date(lastSuccessAt).toISOString());
+    native.getNotificationStatus.mockResolvedValue({ ...failed, state: "starting" });
+    await userEvent.click(screen.getByRole("button", { name: "重新检查" }));
+    expect(await screen.findByText(/正在重新检查/)).toBeVisible();
+    expect(screen.queryByText(/任务通知正常/)).not.toBeInTheDocument();
+    expect(screen.getByText(/2 分钟前/)).toBeVisible();
   });
 });

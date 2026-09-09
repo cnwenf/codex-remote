@@ -25,6 +25,10 @@ export type NotificationStatus = {
   completedEnabled: boolean;
   state: "idle" | "starting" | "healthy" | "error" | "stopped";
   error?: string;
+  connectionId?: string;
+  connectionName?: string;
+  lastSuccessAt?: number;
+  consecutiveFailures?: number;
 };
 
 export interface CodexRemoteNativePlugin {

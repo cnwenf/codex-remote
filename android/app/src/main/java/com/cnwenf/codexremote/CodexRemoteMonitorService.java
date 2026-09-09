@@ -70,11 +70,14 @@ public class CodexRemoteMonitorService extends Service {
     private String baseUrl;
     private Bitmap notificationLogo;
 
-    static Intent startIntent(Context context, String id, String name, String baseUrl) {
+    static synchronized Intent startIntent(Context context, String id, String name, String baseUrl) {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE);
         SharedPreferences.Editor editor = prefs.edit();
         if (!id.equals(prefs.getString("connectionId", null))) {
             editor.remove("states").remove("seenCompletions").remove("completionBaseline").remove("trackerConnectionId").remove("turns");
+        }
+        if (!id.equals(prefs.getString("connectionId", null)) || !baseUrl.equals(prefs.getString("baseUrl", null))) {
+            editor.remove("lastSuccessAt").remove("consecutiveFailures").remove("error");
         }
         editor
             .putString("connectionId", id)
@@ -83,10 +86,7 @@ public class CodexRemoteMonitorService extends Service {
             .putString("health", "starting")
             .putLong("lastAttemptAt", System.currentTimeMillis())
             .apply();
-        return new Intent(context, CodexRemoteMonitorService.class)
-            .putExtra("connectionId", id)
-            .putExtra("name", name)
-            .putExtra("baseUrl", baseUrl);
+        return new Intent(context, CodexRemoteMonitorService.class);
     }
 
     @Override
@@ -103,20 +103,22 @@ public class CodexRemoteMonitorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        synchronized (CodexRemoteMonitorService.class) {
+            return startCurrentConnection();
+        }
+    }
+
+    private int startCurrentConnection() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         generation++;
         handler.removeCallbacks(pollTimeout);
         if (inFlight != null) { inFlight.cancel(); inFlight = null; }
         String previousConnection = connectionId;
-        if (intent != null) {
-            connectionId = intent.getStringExtra("connectionId");
-            connectionName = intent.getStringExtra("name");
-            baseUrl = intent.getStringExtra("baseUrl");
-        }
-        if (connectionId == null || baseUrl == null) {
-            connectionId = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("connectionId", null);
-            connectionName = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("name", null);
-            baseUrl = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("baseUrl", null);
-        }
+        // A queued Android start command may be older than the user's latest selection.
+        // Saved configuration is the single target for initial starts, retries and service restarts.
+        connectionId = prefs.getString("connectionId", null);
+        connectionName = prefs.getString("name", null);
+        baseUrl = prefs.getString("baseUrl", null);
         if (connectionId == null || baseUrl == null) {
             stopSelf();
             return START_NOT_STICKY;
@@ -127,26 +129,30 @@ public class CodexRemoteMonitorService extends Service {
             notifiedRunning.clear();
             restorePreviousStates();
         }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("health", "starting").remove("error")
+        prefs.edit().putString("health", "starting")
             .putLong("lastAttemptAt", System.currentTimeMillis()).apply();
-        startForeground(ONGOING_ID, ongoing("正在检查运行中的对话", "Codex Remote 后台监控已开启", null));
+        startForeground(ONGOING_ID, ongoing("任务通知", "正在检查运行中的对话", null));
         handler.removeCallbacks(poll);
         handler.post(poll);
         return START_STICKY;
     }
 
-    static void clearSavedMonitor(Context context) {
+    static synchronized void clearSavedMonitor(Context context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply();
     }
 
-    static void recordHealth(Context context, @Nullable String error) {
-        context.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+    static synchronized void recordHealth(Context context, @Nullable String error) {
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE);
+        SharedPreferences.Editor editor = prefs.edit()
             .putString("health", error == null ? "healthy" : "error")
             .putString("error", error)
-            .putLong("lastAttemptAt", System.currentTimeMillis()).apply();
+            .putInt("consecutiveFailures", error == null ? 0 : Math.min(1000, prefs.getInt("consecutiveFailures", 0) + 1))
+            .putLong("lastAttemptAt", System.currentTimeMillis());
+        if (error == null) editor.putLong("lastSuccessAt", System.currentTimeMillis());
+        editor.apply();
     }
 
-    static JSObject notificationStatus(Context context) {
+    static synchronized JSObject notificationStatus(Context context) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         SharedPreferences prefs = context.getSharedPreferences(PREFS, MODE_PRIVATE);
         JSObject result = new JSObject();
@@ -158,7 +164,16 @@ public class CodexRemoteMonitorService extends Service {
         else if (!active || System.currentTimeMillis() - prefs.getLong("lastAttemptAt", 0) > 45_000) health = "stopped";
         result.put("state", health);
         result.put("error", prefs.getString("error", ""));
+        result.put("connectionId", prefs.getString("connectionId", ""));
+        result.put("connectionName", prefs.getString("name", ""));
+        result.put("lastSuccessAt", prefs.getLong("lastSuccessAt", 0));
+        result.put("consecutiveFailures", prefs.getInt("consecutiveFailures", 0));
         return result;
+    }
+
+    private static boolean matchesSavedConnection(SharedPreferences prefs, String id, String url) {
+        return id != null && id.equals(prefs.getString("connectionId", null)) &&
+            url != null && url.equals(prefs.getString("baseUrl", null));
     }
 
     private static boolean channelEnabled(NotificationManager manager, String id) {
@@ -204,22 +219,26 @@ public class CodexRemoteMonitorService extends Service {
 
     private void finishPoll(int requestedGeneration, @Nullable JSONObject result, @Nullable String failure) {
         handler.post(() -> {
-            // Canceled calls can still report a result. Only this service generation owns health and scheduling.
-            if (!active || requestedGeneration != generation) return;
-            handler.removeCallbacks(pollTimeout);
-            inFlight = null;
-            String problem = failure;
-            try {
-                if (result != null) {
-                    JSONObject bridge = result.optJSONObject("bridge");
-                    if (bridge != null && !bridge.optBoolean("available", true)) problem = "bridge-unavailable";
-                    else update(result);
-                }
-            } catch (Exception cause) { problem = "invalid-status"; }
-            recordHealth(CodexRemoteMonitorService.this, problem);
-            if (problem != null) getSystemService(NotificationManager.class).notify(ONGOING_ID,
-                ongoing("后台监控异常", "暂时无法获取任务状态，正在自动重试（" + problem + "）", null));
-            handler.postDelayed(poll, POLL_MS);
+            synchronized (CodexRemoteMonitorService.class) {
+                // Saving a new target happens before Android delivers its start command.
+                // Check ownership and write the result atomically with that saved-target change.
+                if (!active || requestedGeneration != generation ||
+                    !matchesSavedConnection(getSharedPreferences(PREFS, MODE_PRIVATE), connectionId, baseUrl)) return;
+                handler.removeCallbacks(pollTimeout);
+                inFlight = null;
+                String problem = failure;
+                try {
+                    if (result != null) {
+                        JSONObject bridge = result.optJSONObject("bridge");
+                        if (bridge != null && !bridge.optBoolean("available", true)) problem = "bridge-unavailable";
+                        else update(result);
+                    }
+                } catch (Exception cause) { problem = "invalid-status"; }
+                recordHealth(CodexRemoteMonitorService.this, problem);
+                if (problem != null) getSystemService(NotificationManager.class).notify(ONGOING_ID,
+                    ongoing("任务通知", "暂未获取到任务状态，将自动重新检查", null));
+                handler.postDelayed(poll, POLL_MS);
+            }
         });
     }
 

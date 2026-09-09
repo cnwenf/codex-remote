@@ -44,6 +44,70 @@ public class MonitorRecoveryTest {
         verifyRetry(true);
     }
 
+    @Test public void aQueuedConnectionSwitchCannotInheritThePreviousRequestsSuccess() throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        try (Fixture previous = new Fixture("blocked-success"); Fixture next = new Fixture(false)) {
+            prepare(context);
+            start(context, previous);
+            assertTrue(previous.received.await(5, TimeUnit.SECONDS));
+            // The plugin has requested a new endpoint, but Android has not delivered its start command yet.
+            Intent pending = CodexRemoteMonitorService.startIntent(context, "monitor-recovery-qa", "Next QA",
+                "http://127.0.0.1:" + next.server.getLocalPort());
+            previous.release.countDown();
+            assertTrue(previous.responded.await(5, TimeUnit.SECONDS));
+            Thread.sleep(500);
+            assertEquals("An old success must not be recorded for the newly requested endpoint", 0,
+                CodexRemoteMonitorService.notificationStatus(context).optLong("lastSuccessAt"));
+            ContextCompat.startForegroundService(context, pending);
+            await("The new connection can establish its own successful check", 3_000,
+                () -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
+            assertTrue(CodexRemoteMonitorService.notificationStatus(context).optLong("lastSuccessAt") > 0);
+        } finally { cleanup(context); }
+    }
+
+    @Test public void retryOfASavedFailedTargetKeepsItsFailureUntilTheResponseSucceeds() throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        try (Fixture saved = new Fixture("blocked-success")) {
+            prepare(context);
+            CodexRemoteMonitorService.startIntent(context, "monitor-recovery-qa", "Saved QA",
+                "http://127.0.0.1:" + saved.server.getLocalPort());
+            CodexRemoteMonitorService.recordHealth(context, "start-failed");
+            // Same no-extras Intent used by the settings page's retry action.
+            ContextCompat.startForegroundService(context, new Intent(context, CodexRemoteMonitorService.class));
+            assertTrue(saved.received.await(5, TimeUnit.SECONDS));
+            var starting = CodexRemoteMonitorService.notificationStatus(context);
+            assertEquals("starting", starting.optString("state"));
+            assertEquals("Saved QA", starting.optString("connectionName"));
+            assertEquals("start-failed", starting.optString("error"));
+            assertEquals(1, starting.optInt("consecutiveFailures"));
+            assertEquals(0, starting.optLong("lastSuccessAt"));
+            saved.release.countDown();
+            await("Only the response can confirm a successful retry", 3_000,
+                () -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
+            var healthy = CodexRemoteMonitorService.notificationStatus(context);
+            assertTrue(healthy.optLong("lastSuccessAt") > 0);
+            assertEquals(0, healthy.optInt("consecutiveFailures"));
+            assertTrue(healthy.optString("error").isEmpty());
+        } finally { cleanup(context); }
+    }
+
+    @Test public void anOlderStartCommandStillUsesTheLatestSavedTarget() throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        try (Fixture previous = new Fixture(false); Fixture latest = new Fixture(false)) {
+            prepare(context);
+            Intent older = CodexRemoteMonitorService.startIntent(context, "monitor-recovery-qa", "Old QA",
+                "http://127.0.0.1:" + previous.server.getLocalPort());
+            CodexRemoteMonitorService.startIntent(context, "monitor-recovery-qa", "Latest QA",
+                "http://127.0.0.1:" + latest.server.getLocalPort());
+            ContextCompat.startForegroundService(context, older);
+            assertTrue("An older Android start command must not strand the current target", latest.received.await(3, TimeUnit.SECONDS));
+            await("The latest target becomes healthy", 2_000,
+                () -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
+            assertEquals(1, previous.received.getCount());
+            assertEquals("Latest QA", CodexRemoteMonitorService.notificationStatus(context).optString("connectionName"));
+        } finally { cleanup(context); }
+    }
+
     private void verifyRetry(boolean switchConnection) throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
         try (Fixture blocked = new Fixture(true); Fixture healthy = new Fixture(false)) {
@@ -113,6 +177,7 @@ public class MonitorRecoveryTest {
         final ServerSocket server = new ServerSocket(0);
         final CountDownLatch received = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
+        final CountDownLatch responded = new CountDownLatch(1);
         final CopyOnWriteArrayList<Socket> clients = new CopyOnWriteArrayList<>();
 
         Fixture(boolean blocked) throws Exception { this(blocked ? "blocked" : "healthy"); }
@@ -141,7 +206,7 @@ public class MonitorRecoveryTest {
                 String line;
                 while ((line = reader.readLine()) != null && !line.isEmpty()) {}
                 received.countDown();
-                if (mode.equals("blocked")) release.await(30, TimeUnit.SECONDS);
+                if (mode.startsWith("blocked")) release.await(30, TimeUnit.SECONDS);
                 String content = mode.equals("blocked") || mode.equals("invalid-status") ? "invalid response"
                     : mode.equals("oversize") ? " ".repeat(256_001) : "{\"threads\":[],\"completions\":[]}";
                 byte[] body = content.getBytes(StandardCharsets.UTF_8);
@@ -155,6 +220,8 @@ public class MonitorRecoveryTest {
                         Thread.sleep(1_000); // Activity every second defeats an idle-only timeout.
                     }
                 } else socket.getOutputStream().write(body);
+                socket.getOutputStream().flush();
+                responded.countDown();
             } catch (Exception ignored) { /* Cancellation closes the fixture connection. */ }
         }
 

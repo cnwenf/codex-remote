@@ -514,9 +514,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .remote-connection-indicator { display: none; width: 8px; height: 8px; flex: 0 0 auto; border-radius: 999px; background: var(--ink-muted); }
 .remote-connection-indicator.connection-ready { background: var(--success); }
 .remote-connection-indicator.connection-connecting,
-.remote-connection-indicator.connection-reconnecting { background: var(--warning); }
+.remote-connection-indicator.connection-reconnecting { background: transparent; border: 1px solid var(--ink-muted); }
 .remote-connection-indicator.pairing-pending { background: var(--warning); }
-.remote-connection-indicator.pairing-error { background: var(--danger); }
+.remote-connection-indicator.connection-disconnected,
+.remote-connection-indicator.pairing-error { width: 12px; height: 12px; background: transparent; color: var(--danger); font: 700 15px/12px system-ui; text-align: center; }
+.app-root > .topbar-native .connection-state { display: none; }
+.app-root > .topbar-native .remote-connection-pill { display: inline-flex; align-items: center; gap: 7px; }
+.app-root > .topbar-native .remote-connection-indicator { display: block; }
 .native-connect-error { width: min(calc(100% - 32px), 520px); margin: auto; padding: 28px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
 .native-connect-error h2 { margin: 0; }
 .native-connect-error p { color: var(--ink-muted); line-height: 1.5; }
@@ -541,9 +545,6 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .mobile-notification-health p { margin: 0 0 8px; font-size: 0.8rem; line-height: 1.45; }
 .mobile-notification-health > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .mobile-notification-health small { display: block; margin-top: 8px; color: var(--ink-muted); }
-.native-notice-slot { max-height: 28dvh; overflow-y: auto; }
-.native-notice-slot .mobile-notification-health { border-radius: 0; }
-.app-root.has-native-notice { grid-template-rows: calc(58px + env(safe-area-inset-top)) auto minmax(0, 1fr); }
 .mobile-header-progress-ring { border: 0; background: conic-gradient(var(--action) 0 var(--download-progress), var(--surface-muted) var(--download-progress) 360deg); }
 .mobile-header-progress-ring::before { content: ""; position: absolute; inset: 3px; border: 1px solid var(--line); border-radius: inherit; background: var(--floating-surface); }
 .mobile-header-update.is-complete { border-color: color-mix(in oklch, var(--success) 65%, var(--line)); color: var(--success); }
@@ -629,11 +630,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .app-root > .topbar-native .brand-lockup { min-width: 0; flex: 0 1 auto; gap: 8px; }
   .app-root > .topbar-native:not(.topbar-native-thread) .brand-lockup { flex: 0 0 auto; }
   .app-root > .topbar-native .brand-lockup h1 { max-width: none; flex: 1 1 auto; font-size: 0.96rem; }
-  .app-root > .topbar-native .connection-state { display: none; }
   .app-root > .topbar-native .remote-connection-switcher { max-width: min(54vw, calc(100% - 88px)); flex: 0 1 auto; }
-  .app-root > .topbar-native .remote-connection-pill { min-width: 0; max-width: 112px; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; margin-left: 0; padding: 0 12px; }
+  .app-root > .topbar-native .remote-connection-pill { min-width: 0; max-width: 112px; flex: 0 0 auto; justify-content: center; margin-left: 0; padding: 0 12px; }
   .app-root > .topbar-native .remote-connection-pill > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .app-root > .topbar-native .remote-connection-indicator { display: block; }
   .app-root > .topbar-native-thread .remote-connection-switcher { max-width: 34vw; flex-shrink: 0; }
   .app-root > .topbar-native-thread .remote-connection-pill { max-width: min(112px, 34vw); }
   .app-root > .topbar-native-thread .mobile-thread-back { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; padding: 0 0 3px; border: 0; border-radius: 999px; color: var(--ink); background: var(--surface-muted); font-size: 1.9rem; line-height: 1; }

@@ -54,6 +54,7 @@ function codexState(overrides: Record<string, unknown> = {}) {
 
 describe("App", () => {
   beforeEach(() => {
+    window.history.replaceState(null, "", "/");
     useCodexMock.mockReset();
     useCodexMock.mockReturnValue(codexState());
   });
@@ -358,6 +359,21 @@ describe("App", () => {
     });
   });
 
+  it("distinguishes an offline connection by its icon and restores the normal connection action", async () => {
+    useCodexMock.mockReturnValue(codexState({ connection: "disconnected" }));
+    const remote = { connectionId: "mac-1", name: "Test Mac", baseUrl: "https://remote.example.test", token: "test", onManageConnections: vi.fn() };
+    const { rerender } = render(<App remote={remote} />);
+    expect(screen.getByRole("button", { name: /打开 Test Mac.*离线/ }).querySelector(".connection-disconnected")).toHaveTextContent("×");
+    const value = codexState({ connection: "ready" });
+    useCodexMock.mockReturnValue(value);
+    rerender(<App remote={remote} />);
+    const connection = screen.getByRole("button", { name: /打开 Test Mac.*已连接/ });
+    expect(connection.querySelector(".connection-ready")).toBeInTheDocument();
+    expect(connection).not.toHaveTextContent("×");
+    await userEvent.click(connection);
+    expect(value.clearSelection).toHaveBeenCalled();
+  });
+
   it("returns to saved connections from the Remote title and switches connection tabs", async () => {
     const onManageConnections = vi.fn();
     const onOpenConnection = vi.fn();
@@ -436,6 +452,7 @@ describe("App", () => {
       turnOrder: [],
       turns: {},
     };
+    window.history.replaceState({ codexRemoteView: "thread", codexRemoteThreadId: thread.id }, "");
     const value = codexState({
       state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
       connection: "ready",
@@ -454,6 +471,8 @@ describe("App", () => {
       onOpenConnection: vi.fn(),
     }} />);
 
+    await waitFor(() => expect(value.selectThread).toHaveBeenCalledWith(thread.id));
+    expect(value.clearSelection).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: /Office Mac/ }));
     expect(value.clearSelection).toHaveBeenCalledTimes(1);
   });
