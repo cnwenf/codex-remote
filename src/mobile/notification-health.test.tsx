@@ -57,4 +57,33 @@ describe("Android notification health", () => {
     await userEvent.click(screen.getByRole("button", { name: "重试监控" }));
     expect(await screen.findByText(/后台监控正常/)).toBeVisible();
   });
+
+  it("ignores an older failed refresh after retry has confirmed recovery", async () => {
+    const failure = { ...healthy, state: "error", error: "timeout" };
+    native.getNotificationStatus.mockResolvedValueOnce(failure);
+    render(<NotificationHealthPanel language="zh-CN" compact />);
+    await screen.findByRole("button", { name: "重试监控" });
+    let resolveOld!: (value: typeof failure) => void;
+    native.getNotificationStatus.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+    act(() => native.onResume?.({ isActive: true }));
+    native.getNotificationStatus.mockResolvedValue(healthy);
+    await userEvent.click(screen.getByRole("button", { name: "重试监控" }));
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    await act(async () => resolveOld(failure));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["bridge-unavailable", /Mac 上的 Codex Desktop/],
+    ["timeout", /状态请求超时/],
+    ["dns", /地址无法解析/],
+    ["tls", /安全连接失败/],
+    ["http-503", /HTTP 503/],
+    ["invalid-status", /状态数据无效/],
+  ])("explains %s without suggesting every failure is the connection password", async (error, message) => {
+    native.getNotificationStatus.mockResolvedValue({ ...healthy, state: "error", error });
+    render(<NotificationHealthPanel language="zh-CN" compact />);
+    expect(await screen.findByText(message)).toBeVisible();
+    expect(screen.queryByText(/后台监控正常/)).not.toBeInTheDocument();
+  });
 });

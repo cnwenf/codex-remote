@@ -25,9 +25,10 @@ import com.getcapacitor.JSObject;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.IOException;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.io.InterruptedIOException;
+import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import javax.net.ssl.SSLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -35,9 +36,14 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 public class CodexRemoteMonitorService extends Service {
@@ -47,8 +53,13 @@ public class CodexRemoteMonitorService extends Service {
     static final String GROUP_RUNNING = "codex_remote_running_threads";
     static final int ONGOING_ID = 1001;
     static final long POLL_MS = 15_000;
+    static final long REQUEST_TIMEOUT_MS = 15_000;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    // Transport cancellation releases old requests; the service watchdog owns the health deadline.
+    private final OkHttpClient http = new OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS).readTimeout(8, TimeUnit.SECONDS)
+        .callTimeout(15, TimeUnit.SECONDS).followRedirects(false).build();
+    private Call inFlight;
     private NotificationTracker tracker = new NotificationTracker();
     private final Set<String> notifiedRunning = new HashSet<>();
     private static volatile boolean active;
@@ -93,6 +104,8 @@ public class CodexRemoteMonitorService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         generation++;
+        handler.removeCallbacks(pollTimeout);
+        if (inFlight != null) { inFlight.cancel(); inFlight = null; }
         String previousConnection = connectionId;
         if (intent != null) {
             connectionId = intent.getStringExtra("connectionId");
@@ -114,7 +127,7 @@ public class CodexRemoteMonitorService extends Service {
             notifiedRunning.clear();
             restorePreviousStates();
         }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("health", "starting")
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("health", "starting").remove("error")
             .putLong("lastAttemptAt", System.currentTimeMillis()).apply();
         startForeground(ONGOING_ID, ongoing("正在检查运行中的对话", "Codex Remote 后台监控已开启", null));
         handler.removeCallbacks(poll);
@@ -157,60 +170,77 @@ public class CodexRemoteMonitorService extends Service {
     private final Runnable poll = new Runnable() {
         @Override public void run() {
             final int requestedGeneration = generation;
-            final String requestedId = connectionId;
-            final String requestedUrl = baseUrl;
-            executor.execute(() -> {
-                JSONObject snapshot = null;
-                String error = null;
-                try { snapshot = fetchStatus(requestedId, requestedUrl); }
-                catch (Exception cause) { error = "unauthorized".equals(cause.getMessage()) ? "unauthorized" : "unavailable"; }
-                final JSONObject result = snapshot;
-                final String failure = error;
-                handler.post(() -> {
-                    // A late response for a previously selected Mac must not update notifications or health.
-                    if (!active || requestedGeneration != generation) return;
-                    String problem = failure;
-                    try {
-                        if (result != null) {
-                            JSONObject bridge = result.optJSONObject("bridge");
-                            if (bridge != null && !bridge.optBoolean("available", true)) problem = "bridge-unavailable";
-                            else update(result);
-                        }
-                    } catch (Exception cause) { problem = "invalid-status"; }
-                    recordHealth(CodexRemoteMonitorService.this, problem);
-                    if (problem != null) getSystemService(NotificationManager.class).notify(ONGOING_ID,
-                        ongoing("后台监控异常", "无法获取任务状态，正在自动重试", null));
-                    handler.postDelayed(this, POLL_MS);
+            handler.postDelayed(pollTimeout, REQUEST_TIMEOUT_MS);
+            try {
+                String token = new EncryptedSecretStore(CodexRemoteMonitorService.this).get(connectionId);
+                if (token == null) { finishPoll(requestedGeneration, null, "unauthorized"); return; }
+                inFlight = http.newCall(new Request.Builder().url(baseUrl + "/api/mobile/status")
+                    .header("Authorization", "Bearer " + token).build());
+                inFlight.enqueue(new Callback() {
+                    @Override public void onFailure(Call call, IOException cause) {
+                        finishPoll(requestedGeneration, null, errorCode(cause));
+                    }
+                    @Override public void onResponse(Call call, Response response) {
+                        JSONObject result = null;
+                        String failure = null;
+                        try (response) {
+                            int status = response.code();
+                            if (status != 200) failure = status == 401 || status == 403 ? "unauthorized" : "http-" + status;
+                            else result = readStatus(response);
+                        } catch (Exception cause) { failure = errorCode(cause); }
+                        finishPoll(requestedGeneration, failure == null ? result : null, failure);
+                    }
                 });
-            });
+            } catch (Exception cause) { finishPoll(requestedGeneration, null, "start-failed"); }
         }
     };
 
-    private JSONObject fetchStatus(String id, String url) throws Exception {
-        String token = new EncryptedSecretStore(this).get(id);
-        if (token == null) throw new IllegalStateException("unauthorized");
-        HttpURLConnection connection = (HttpURLConnection) new URL(url + "/api/mobile/status").openConnection();
-        connection.setRequestMethod("GET");
-        connection.setConnectTimeout(5_000);
-        connection.setReadTimeout(8_000);
-        connection.setRequestProperty("Authorization", "Bearer " + token);
-        connection.setInstanceFollowRedirects(false);
-        try {
-            int status = connection.getResponseCode();
-            if (status == 401 || status == 403) throw new IOException("unauthorized");
-            if (status != 200) throw new IOException("unavailable");
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
-                StringBuilder body = new StringBuilder();
-                char[] chunk = new char[4096];
-                int count;
-                while ((count = reader.read(chunk)) != -1) {
-                    if (body.length() + count > 256_000) throw new IOException("status-too-large");
-                    body.append(chunk, 0, count);
+    private final Runnable pollTimeout = () -> {
+        // Do not wait for a stalled transport to deliver its callback before allowing recovery.
+        generation++;
+        if (inFlight != null) { inFlight.cancel(); inFlight = null; }
+        finishPoll(generation, null, "timeout");
+    };
+
+    private void finishPoll(int requestedGeneration, @Nullable JSONObject result, @Nullable String failure) {
+        handler.post(() -> {
+            // Canceled calls can still report a result. Only this service generation owns health and scheduling.
+            if (!active || requestedGeneration != generation) return;
+            handler.removeCallbacks(pollTimeout);
+            inFlight = null;
+            String problem = failure;
+            try {
+                if (result != null) {
+                    JSONObject bridge = result.optJSONObject("bridge");
+                    if (bridge != null && !bridge.optBoolean("available", true)) problem = "bridge-unavailable";
+                    else update(result);
                 }
-                return new JSONObject(body.toString());
+            } catch (Exception cause) { problem = "invalid-status"; }
+            recordHealth(CodexRemoteMonitorService.this, problem);
+            if (problem != null) getSystemService(NotificationManager.class).notify(ONGOING_ID,
+                ongoing("后台监控异常", "暂时无法获取任务状态，正在自动重试（" + problem + "）", null));
+            handler.postDelayed(poll, POLL_MS);
+        });
+    }
+
+    private static String errorCode(Exception cause) {
+        if (cause instanceof InterruptedIOException) return "timeout";
+        if (cause instanceof UnknownHostException) return "dns";
+        if (cause instanceof SSLException) return "tls";
+        if (cause instanceof JSONException) return "invalid-status";
+        return "unavailable"; // Never expose exception messages containing private addresses or credentials.
+    }
+
+    private static JSONObject readStatus(Response response) throws Exception {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8))) {
+            StringBuilder body = new StringBuilder();
+            char[] chunk = new char[4096];
+            int count;
+            while ((count = reader.read(chunk)) != -1) {
+                if (body.length() + count > 256_000) throw new JSONException("status-too-large");
+                body.append(chunk, 0, count);
             }
-        } finally {
-            connection.disconnect();
+            return new JSONObject(body.toString());
         }
     }
 
@@ -420,7 +450,10 @@ public class CodexRemoteMonitorService extends Service {
         active = false;
         generation++;
         handler.removeCallbacks(poll);
-        executor.shutdownNow();
+        handler.removeCallbacks(pollTimeout);
+        if (inFlight != null) { inFlight.cancel(); inFlight = null; }
+        http.dispatcher().executorService().shutdown();
+        http.connectionPool().evictAll();
         super.onDestroy();
     }
 

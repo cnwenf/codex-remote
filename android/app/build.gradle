@@ -45,8 +45,8 @@ android {
         applicationId "com.cnwenf.codexremote"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 41
-        versionName "0.5.32"
+        versionCode 42
+        versionName "0.5.33"
         ndk {
             abiFilters "arm64-v8a"
         }
@@ -104,6 +104,7 @@ dependencies {
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation "com.squareup.okhttp3:okhttp:5.3.0"
     implementation "com.google.android.gms:play-services-code-scanner:16.1.0"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"

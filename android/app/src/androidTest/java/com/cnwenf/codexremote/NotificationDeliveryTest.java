@@ -52,51 +52,51 @@ public class NotificationDeliveryTest {
             CodexRemoteMonitorService.clearSavedMonitor(context);
             manager.cancelAll();
             Intent start = CodexRemoteMonitorService.startIntent(context, "notification-qa", "Notification QA", "http://127.0.0.1:" + server.getLocalPort());
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             // Android can defer a new foreground-service notification for ten seconds.
             long deadline = System.currentTimeMillis() + 20000;
             while (System.currentTimeMillis() < deadline && Arrays.stream(manager.getActiveNotifications()).noneMatch(n -> "没有运行中的对话".contentEquals(n.getNotification().extras.getCharSequence("android.title", "")))) Thread.sleep(50);
             assertTrue(Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> n.getId() == 1001));
             body.set("{\"threads\":[{\"id\":\"qa-fast\",\"title\":\"Short task QA\",\"status\":\"idle\"}],\"completions\":[{\"id\":\"qa-fast:one\",\"threadId\":\"qa-fast\",\"turnId\":\"one\",\"title\":\"Short task QA\",\"status\":\"idle\",\"completedAt\":1}]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             deadline = System.currentTimeMillis() + 5000;
             while (System.currentTimeMillis() < deadline && Arrays.stream(manager.getActiveNotifications()).noneMatch(n -> "对话已完成".contentEquals(n.getNotification().extras.getCharSequence("android.title", "")))) Thread.sleep(50);
             assertTrue("A short turn must produce a real completion notification", Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "对话已完成".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))));
             assertBranding(context, Arrays.stream(manager.getActiveNotifications()).filter(n -> "对话已完成".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))).findFirst().get().getNotification());
             assertBranding(context, Arrays.stream(manager.getActiveNotifications()).filter(n -> n.getId() == 1001).findFirst().get().getNotification());
             body.set("{\"threads\":[{\"id\":\"list-only\",\"title\":\"List-only QA\",\"status\":\"running\",\"turnId\":\"two\"}],\"completions\":[]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             deadline = System.currentTimeMillis() + 5000;
             while (System.currentTimeMillis() < deadline && Arrays.stream(manager.getActiveNotifications()).noneMatch(n -> "List-only QA".contentEquals(n.getNotification().extras.getCharSequence("android.title", "")))) Thread.sleep(50);
             assertTrue(Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "List-only QA".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))));
             assertBranding(context, Arrays.stream(manager.getActiveNotifications()).filter(n -> "List-only QA".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))).findFirst().get().getNotification());
             body.set("{\"threads\":[{\"id\":\"list-only\",\"title\":\"List-only QA\",\"status\":\"idle\",\"turnId\":\"two\"}],\"completions\":[{\"threadId\":\"list-only\",\"turnId\":\"older\",\"status\":\"error\",\"title\":\"Old unrelated turn\",\"completedAt\":1}]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             deadline = System.currentTimeMillis() + 5000;
             while (System.currentTimeMillis() < deadline && Arrays.stream(manager.getActiveNotifications()).noneMatch(n -> "List-only QA".contentEquals(n.getNotification().extras.getCharSequence("android.text", "")) && "对话已完成".contentEquals(n.getNotification().extras.getCharSequence("android.title", "")))) Thread.sleep(50);
             assertTrue("A different turn's event must not suppress the terminal fallback", Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "List-only QA".contentEquals(n.getNotification().extras.getCharSequence("android.text", "")) && "对话已完成".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))));
 
             seedLegacyState(context, manager, server.getLocalPort());
             body.set("{\"generatedAt\":" + System.currentTimeMillis() + ",\"threads\":[{\"id\":\"legacy\",\"title\":\"Migrated running\",\"status\":\"running\",\"turnId\":\"current\"}],\"completions\":[{\"threadId\":\"legacy\",\"turnId\":\"old\",\"status\":\"idle\",\"title\":\"Old history\",\"completedAt\":1}]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
             assertFalse("Migrating a running thread must not announce older completed turns", Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "对话已完成".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))));
 
             seedLegacyState(context, manager, server.getLocalPort());
             body.set("{\"generatedAt\":" + System.currentTimeMillis() + ",\"threads\":[{\"id\":\"legacy\",\"title\":\"Migrated completion\",\"status\":\"idle\",\"turnId\":\"current\"}],\"completions\":[{\"threadId\":\"legacy\",\"turnId\":\"current\",\"status\":\"idle\",\"title\":\"Migrated completion\",\"completedAt\":1}]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "Migrated completion".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))));
             long deliveredAt = Arrays.stream(manager.getActiveNotifications()).filter(n -> "Migrated completion".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))).findFirst().get().getPostTime();
             context.stopService(new Intent(context, CodexRemoteMonitorService.class));
             Thread.sleep(300);
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
             assertEquals("Service restart must not re-post the same completed turn", deliveredAt, Arrays.stream(manager.getActiveNotifications()).filter(n -> "Migrated completion".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))).findFirst().get().getPostTime());
 
             Thread.sleep(2_000); // Avoid notification-rate throttling from the accelerated polls above.
             seedLegacyState(context, manager, server.getLocalPort());
             body.set("{\"generatedAt\":" + System.currentTimeMillis() + ",\"threads\":[{\"id\":\"legacy\",\"title\":\"Failure fallback\",\"status\":\"error\",\"turnId\":\"current\"}],\"completions\":[{\"threadId\":\"legacy\",\"turnId\":\"current\",\"status\":\"error\",\"title\":\"Failed completion event\",\"completedAt\":1}]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
             awaitCondition(() -> Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "Failed completion event".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))));
             var failed = Arrays.stream(manager.getActiveNotifications()).filter(n -> "Failed completion event".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))).findFirst().get();
@@ -104,7 +104,7 @@ public class NotificationDeliveryTest {
             assertFalse("The same turn's state fallback must not replace the completion event", Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "Failure fallback".contentEquals(n.getNotification().extras.getCharSequence("android.text", ""))));
             long failedDeliveredAt = failed.getPostTime();
             long checkedAt = context.getSharedPreferences("codex_remote_monitor", Context.MODE_PRIVATE).getLong("lastAttemptAt", 0);
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> context.getSharedPreferences("codex_remote_monitor", Context.MODE_PRIVATE).getLong("lastAttemptAt", 0) > checkedAt
                 && "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
             assertEquals("Replaying an error completion must not re-post the same turn", failedDeliveredAt, Arrays.stream(manager.getActiveNotifications()).filter(n -> n.getId() == failed.getId()).findFirst().get().getPostTime());
@@ -113,21 +113,21 @@ public class NotificationDeliveryTest {
             // Let Android's notification update rate limit settle before checking error UI.
             Thread.sleep(2_000);
             responseCode.set(401);
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> "unauthorized".equals(CodexRemoteMonitorService.notificationStatus(context).optString("error")));
             awaitCondition(() -> Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "后台监控异常".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))));
             responseCode.set(200);
             body.set("{\"bridge\":{\"available\":false},\"threads\":[]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> "bridge-unavailable".equals(CodexRemoteMonitorService.notificationStatus(context).optString("error")));
             body.set("{\"threads\":[],\"completions\":[]}");
-            ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
             awaitCondition(() -> "healthy".equals(CodexRemoteMonitorService.notificationStatus(context).optString("state")));
             assertTrue(CodexRemoteMonitorService.notificationStatus(context).optString("error").isEmpty());
             if ("true".equals(InstrumentationRegistry.getArguments().getString("showNotifications"))) {
                 body.set("{\"threads\":[{\"id\":\"visible-qa\",\"title\":\"Notification QA - Running\",\"status\":\"running\"}],\"completions\":[]}");
                 Thread.sleep(2_000);
-                ContextCompat.startForegroundService(context, start);
+            startMonitor(context, start);
                 awaitCondition(() -> Arrays.stream(manager.getActiveNotifications()).anyMatch(n -> "Notification QA - Running".contentEquals(n.getNotification().extras.getCharSequence("android.title", ""))));
                 Thread.sleep(45_000); // Optional, bounded window for native shade/lock-screen inspection.
             }
@@ -137,6 +137,12 @@ public class NotificationDeliveryTest {
             new EncryptedSecretStore(context).remove("notification-qa");
             manager.cancelAll();
         }
+    }
+
+    private static void startMonitor(Context context, Intent intent) throws Exception {
+        // Each poll posts foreground + task notifications; keep accelerated QA below Android's rate limit.
+        Thread.sleep(750);
+        ContextCompat.startForegroundService(context, intent);
     }
 
     private static void seedLegacyState(Context context, NotificationManager manager, int port) throws Exception {
