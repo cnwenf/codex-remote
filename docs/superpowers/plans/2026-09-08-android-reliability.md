@@ -10,7 +10,7 @@
 
 **Spec:** 本文件的 Scope 是用户 2026-09-08 最新请求的实现契约。
 
-**执行状态：** 源码任务及独立审查已完成，完整检查 1001 项、Web E2E 61 项、Java 单测 21 项通过。9 月 9 日解锁后 Android / iPhone 最终候选已安装，最终 Android instrumentation 5 项通过，分支 CI 完整成功；新 Mac 候选仍被本机执行安全机制拒绝，最终跨端联调和发布保持未完成。以下保留原始任务步骤，逐项证据与未完成门禁以 [验收记录](../../android-notification-acceptance.md) 为准，不能将较早候选的原生结果当作最终包验收。
+**执行状态：** 源码任务及独立审查已完成，完整检查 1001 项、Web E2E 61 项、Java 单测 21 项通过。9 月 9 日三端 0.5.32 最终候选已安装，最终 Android instrumentation 5 项通过，分支 CI 完整成功；Mac 正常安装流程复核后自检与运行通过，正在完成跨端联调，尚未发版。以下保留原始任务步骤，逐项证据与未完成门禁以 [验收记录](../../android-notification-acceptance.md) 为准，不能将较早候选的原生结果当作最终包验收。
 
 ## Scope / Global Constraints
 
