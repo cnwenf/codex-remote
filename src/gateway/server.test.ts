@@ -719,6 +719,45 @@ describe("gateway server", () => {
     await gateway.stop();
   });
 
+  it("allows HTTPS Tailscale origins by default while still requiring the password", async () => {
+    const gateway = createGateway({ port: 0, token: "test-token", transport: new AlreadyInitializedTransport() });
+    const address = await gateway.start();
+    const origin = "https://mac.tailnet.ts.net";
+    const login = (body: object, pageOrigin = origin) => fetch(`http://127.0.0.1:${address.port}/auth/session`, {
+      method: "POST", headers: { origin: pageOrigin, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    try {
+      for (const body of [{}, { token: "wrong" }]) {
+        const response = await login(body);
+        expect(response.status).toBe(401);
+        expect(response.headers.get("set-cookie")).toBeNull();
+      }
+      await expect(connect(address, undefined, origin)).rejects.toThrow(/401/);
+      const response = await login({ token: "test-token" });
+      expect(response.status).toBe(204);
+      const cookie = response.headers.get("set-cookie")?.split(";")[0];
+      expect(cookie).toContain("codex_local_session=");
+      const socket = await connect(address, undefined, origin, cookie);
+      await expect(nextJson(socket)).resolves.toMatchObject({ type: "session", state: "ready" });
+      socket.close(); await once(socket, "close");
+      for (const pageOrigin of ["https://mac.tailnet.ts.net:8443", "https://mac.tailnet.ts.net:10000"]) {
+        const socket = await connect(address, "test-token", pageOrigin);
+        await expect(nextJson(socket)).resolves.toMatchObject({ type: "session", state: "ready" });
+        socket.close(); await once(socket, "close");
+      }
+      for (const pageOrigin of [
+        "http://mac.tailnet.ts.net", "https://mac.tailnet.ts.net.evil.test", "https://not-ts.net",
+        "https://user@mac.tailnet.ts.net", "https://mac.tailnet.ts.net/path", "null",
+      ]) {
+        expect((await login({ token: "test-token" }, pageOrigin)).status).toBe(403);
+        await expect(connect(address, "test-token", pageOrigin)).rejects.toThrow(/403/);
+      }
+    } finally {
+      await gateway.stop();
+    }
+  });
+
   it("defaults to loopback", async () => {
     const gateway = createGateway({
       port: 0,

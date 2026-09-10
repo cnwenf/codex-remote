@@ -37,6 +37,9 @@ if [[ "$BIND_HOST" != 127.0.0.1 ]]; then
   ADDITIONAL_HOSTS=127.0.0.1
   ORIGINS="$ORIGINS,http://127.0.0.1:$PORT"
 fi
+if [[ -n "${ALLOWED_ORIGINS:-}" ]]; then
+  ORIGINS="$ORIGINS,$ALLOWED_ORIGINS"
+fi
 exec env \
   ACCESS_TOKEN_FILE="$TOKEN_FILE" \
   BIND_HOST="$BIND_HOST" PORT="$PORT" \

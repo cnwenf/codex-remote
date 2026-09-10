@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/cnwenf/codex-remote/main/install.sh
 
 私网模式最后会显示访问 URL，例如 `http://192.168.1.20:4321`。公网模式由 App 自动启动 Cloudflare Quick Tunnel，生成随机 `https://…trycloudflare.com` 地址；在菜单栏查看 URL 或显示配对二维码。登录 Cookie 默认保留 30 天，多个浏览器可以同时连接。
 
+自行配置 Tailscale Funnel 时，Gateway 默认接受 HTTPS `*.ts.net` 页面来源，登录和 WebSocket 仍需正确口令。其他精确来源可通过启动环境的 `ALLOWED_ORIGINS` 配置（多个来源用逗号分隔）；官方启动脚本保留这些值并合并本机地址，无需修改已签名的 App。
+
 ## Android 与 iPhone 客户端
 
 从 [GitHub Releases](https://github.com/cnwenf/codex-remote/releases) 下载移动端构建产物：

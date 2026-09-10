@@ -591,8 +591,8 @@ function appCopy(language: MobileLanguage) {
       : `当前有 ${count} 个对话正在运行。`,
     restartNoRunning: en ? "No conversations are currently running." : "当前没有运行中的对话。",
     restartWarning: en
-      ? "Desktop will quit once and reopen with its loopback bridge enabled. Running work may be interrupted."
-      : "Desktop 将退出一次并带本机桥接参数重新打开，正在运行的工作可能中断。",
+      ? "Desktop will be force-closed and reopened with its loopback bridge enabled. No confirmation is needed on the computer. Running work or unsaved changes may be lost."
+      : "将强制结束 Desktop 并带本机桥接参数重新打开，无需在电脑上确认。正在运行的工作或未保存的内容可能丢失。",
     confirmRestart: en ? "Confirm restart" : "确认重启",
     restarting: en ? "Restarting…" : "正在重启…",
     cancel: en ? "Cancel" : "取消",

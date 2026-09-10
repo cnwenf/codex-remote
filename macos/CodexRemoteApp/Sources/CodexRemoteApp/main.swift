@@ -459,7 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   @objc private func confirmDesktopRestart() {
     let alert = NSAlert()
     alert.messageText = "Restart Codex Desktop?"
-    alert.informativeText = "Desktop will quit once and reopen with its loopback bridge enabled. Running work may be interrupted."
+    alert.informativeText = "Desktop will be force-closed and reopened with its loopback bridge enabled. No further quit confirmation is needed. Running work or unsaved changes may be lost."
     alert.addButton(withTitle: "Restart Desktop")
     alert.addButton(withTitle: "Cancel")
     guard alert.runModal() == .alertFirstButtonReturn else { return }

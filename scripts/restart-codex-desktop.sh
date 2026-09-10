@@ -6,6 +6,8 @@ DESKTOP_BIN="$APP_PATH/Contents/MacOS/ChatGPT"
 CDP_PORT=${CODEX_REMOTE_CDP_PORT:-9229}
 CDP_ENDPOINT="http://127.0.0.1:$CDP_PORT/json/list"
 MODE=${1:---check}
+CURL_BIN=${CODEX_REMOTE_CURL_BIN:-/usr/bin/curl}
+OPEN_BIN=${CODEX_REMOTE_OPEN_BIN:-/usr/bin/open}
 
 [[ "$MODE" == "--check" || "$MODE" == "--execute" ]] || {
   print -u2 "Usage: restart-codex-desktop.sh [--check|--execute]"
@@ -18,14 +20,21 @@ MODE=${1:---check}
 }
 
 bridge_ready() {
-  /usr/bin/curl -fsS --max-time 2 "$CDP_ENDPOINT" >/dev/null 2>&1
+  "$CURL_BIN" -fsS --max-time 2 "$CDP_ENDPOINT" >/dev/null 2>&1
+}
+
+desktop_pids() {
+  /bin/ps -axww -o uid=,pid=,comm= | /usr/bin/awk -v owner="$EUID" -v target="$DESKTOP_BIN" '
+    {
+      uid = $1; pid = $2
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+/, "")
+      if (uid == owner && $0 == target) print pid
+    }
+  '
 }
 
 desktop_running() {
-  /bin/ps -axo command= | /usr/bin/awk -v target="$DESKTOP_BIN" '
-    $1 == target { found = 1 }
-    END { exit found ? 0 : 1 }
-  '
+  [[ -n "$(desktop_pids)" ]]
 }
 
 if bridge_ready; then
@@ -35,15 +44,25 @@ fi
 [[ "$MODE" == "--execute" ]] || { print -u2 "Desktop bridge is unavailable"; exit 1; }
 
 if desktop_running; then
-  /usr/bin/osascript -e 'tell application id "com.openai.codex" to quit'
+  # The remote user has already confirmed. A normal quit can open Desktop's
+  # own confirmation dialog, which cannot be answered from the phone.
+  # Match only this user's exact main executable, including paths with spaces.
+  for pid in ${(f)"$(desktop_pids)"}; do
+    /bin/kill -KILL "$pid" 2>/dev/null || true
+  done
   for _ in {1..80}; do
     desktop_running || break
     /bin/sleep 0.25
   done
-  desktop_running && { print -u2 "Codex Desktop did not quit cleanly"; exit 1; }
+  if desktop_running; then
+    # The existing login launcher may have reopened Desktop before us.
+    bridge_ready && { print "Desktop bridge is ready"; exit 0; }
+    print -u2 "Codex Desktop could not be stopped"
+    exit 1
+  fi
 fi
 
-/usr/bin/open -na "$APP_PATH" --args \
+"$OPEN_BIN" -na "$APP_PATH" --args \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port="$CDP_PORT"
 

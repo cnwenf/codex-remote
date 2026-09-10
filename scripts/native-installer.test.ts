@@ -13,6 +13,33 @@ const gatewayLauncher = readFileSync(join(root, "scripts/launch-bundled-gateway.
 const macosUpdater = readFileSync(join(root, "scripts/perform-macos-update.sh"), "utf8");
 
 describe("native installer contract", () => {
+  it("preserves externally configured origins in the bundled gateway launcher", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "codex-remote-origins-"));
+    const script = join(fixture, "launch-gateway.sh");
+    const app = join(fixture, "Desktop.app");
+    try {
+      execFileSync("/bin/mkdir", ["-p", join(fixture, "bin"), join(app, "Contents/Resources")]);
+      writeFileSync(script, gatewayLauncher, { mode: 0o755 });
+      writeFileSync(join(app, "Contents/Resources/codex"), '#!/bin/sh\necho "codex-cli fixture"\n', { mode: 0o755 });
+      writeFileSync(join(fixture, "bin/node"), '#!/bin/sh\nprintf "%s" "$ALLOWED_ORIGINS"\n', { mode: 0o755 });
+      const env = {
+        ...process.env, CODEX_DESKTOP_APP_PATH: app,
+        CODEX_REMOTE_GATEWAY_PID_FILE: join(fixture, "gateway.pid"),
+        ALLOWED_ORIGINS: "https://mac.tailnet.ts.net,https://example.test",
+      };
+      const origins = execFileSync("/bin/zsh", [script, "127.0.0.2", "4321"], { env, encoding: "utf8" }).split(",");
+      expect(origins).toEqual([
+        "http://127.0.0.2:4321", "http://127.0.0.1:4321",
+        "https://mac.tailnet.ts.net", "https://example.test",
+      ]);
+      expect(execFileSync("/bin/zsh", [script], {
+        env: { ...env, ALLOWED_ORIGINS: "" }, encoding: "utf8",
+      })).toBe("http://127.0.0.1:4321");
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("does not log native bridge credentials or image payloads even in QA builds", async () => {
     const { default: config } = await import("../capacitor.config");
     expect(config.loggingBehavior).toBe("none");

@@ -25,3 +25,7 @@ If this Codex conversation is interrupted by the restart:
 5. Compare active `threadId` and `turnId` in the evidence with the restored Desktop conversation before testing a mutation.
 
 The script never force-kills Desktop. If AppleScript cannot close it cleanly, the script exits and leaves the current process running.
+
+## Native/mobile restart helper (v0.5.36+)
+
+The native app and the mobile confirmation flow use `scripts/restart-codex-desktop.sh`, not the legacy persistent-bridge scripts above. Once the user confirms, this helper force-stops only the current user's exact Desktop main executable and reopens it with the loopback bridge enabled. It does not send an AppleScript quit request, so Codex's own quit confirmation cannot block remote recovery. Running work or unsaved changes may be lost. A healthy bridge check does not stop Desktop, and this is still a one-time action rather than an automatic restart loop.

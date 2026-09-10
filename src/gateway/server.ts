@@ -841,11 +841,14 @@ export function createGateway(options: GatewayOptions) {
 
   function isConfiguredOrigin(origin: string | undefined) {
     if (isAllowedOrigin(origin, allowedOrigins)) return true;
-    if (!options.allowTryCloudflareOrigin || !origin) return false;
+    if (!origin) return false;
     try {
       const url = new URL(origin);
-      return url.protocol === "https:" && url.port === "" &&
-        /^[a-z0-9-]+\.trycloudflare\.com$/.test(url.hostname);
+      return origin === url.origin && url.protocol === "https:" && (
+        /^(?:[a-z0-9-]+\.)+ts\.net$/.test(url.hostname) ||
+        (options.allowTryCloudflareOrigin === true && url.port === "" &&
+          /^[a-z0-9-]+\.trycloudflare\.com$/.test(url.hostname))
+      );
     } catch {
       return false;
     }
