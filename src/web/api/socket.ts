@@ -1,5 +1,6 @@
 import type { GatewayEnvelope, RpcId, RpcMessage } from "../../protocol/types";
 import { compressImageForUpload } from "./image-compression";
+import { MAX_TRANSFER_IMAGE_BYTES } from "../../protocol/image-transfer";
 
 export interface BrowserSocket {
   readonly OPEN: number;
@@ -43,6 +44,7 @@ export class CodexSocket {
   private reconnectEnabled = false;
   private deliberateDisconnect = false;
   private recoveryListenersBound = false;
+  private imageUploadSupported = false;
 
   constructor(
     private readonly factory: SocketFactory = (url, protocols) =>
@@ -65,6 +67,7 @@ export class CodexSocket {
   }
 
   private open(url: string, protocols: string[], reconnecting: boolean): Promise<void> {
+    this.imageUploadSupported = false;
     const socket = this.factory(
       url,
       protocols,
@@ -155,6 +158,27 @@ export class CodexSocket {
     });
   }
 
+  async uploadImage(file: File): Promise<UploadedImage> {
+    if (!this.imageUploadSupported) throw new Error("请先更新 Mac 端 Codex Remote，再发送图片");
+    if (file.size > MAX_TRANSFER_IMAGE_BYTES) throw new Error("图片传输副本不能超过 1 MB");
+    const connection = this.socket;
+    const data = await imageAsBase64(file);
+    if (!connection || this.socket !== connection || connection.readyState !== connection.OPEN) {
+      throw new Error("图片发送时连接已切换或断开，请重试");
+    }
+    try {
+      const result = await this.request("gateway/image/upload", {
+        name: file.name, mimeType: file.type, data,
+      }, { timeoutMs: 30_000 });
+      return uploadedImageFromResponse(201, result);
+    } catch (cause) {
+      if (cause instanceof Error && cause.message === "codex-socket-request-timeout") {
+        throw new Error("图片发送超时（聊天连接），请重试");
+      }
+      throw cause;
+    }
+  }
+
   notify(method: string, params?: unknown) {
     this.sendRpc({ method, params });
   }
@@ -197,6 +221,9 @@ export class CodexSocket {
       envelope = JSON.parse(raw) as GatewayEnvelope;
     } catch {
       return undefined;
+    }
+    if (envelope.type === "session" && envelope.state === "ready") {
+      this.imageUploadSupported = envelope.imageUpload === true;
     }
     for (const listener of this.sessionListeners) listener(envelope);
     if (envelope.type !== "rpc") return envelope;
@@ -306,7 +333,29 @@ export type RemoteApiOptions = {
   baseUrl?: string;
   token?: string;
   imageUploader?: (file: File) => Promise<UploadedImage>;
+  uploadImagesViaSocket?: boolean;
 };
+
+function imageAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    const timer = setTimeout(() => {
+      reject(new Error("图片读取超时，请重新选择图片"));
+      reader.abort();
+    }, 30_000);
+    reader.onload = () => {
+      clearTimeout(timer);
+      if (typeof reader.result === "string" && reader.result.includes(",")) {
+        resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+      } else reject(new Error("图片读取失败，请重新选择图片"));
+    };
+    reader.onerror = reader.onabort = () => {
+      clearTimeout(timer);
+      reject(new Error("图片读取失败，请重新选择图片"));
+    };
+    try { reader.readAsDataURL(file); } catch (cause) { clearTimeout(timer); reject(cause); }
+  });
+}
 
 export async function uploadImage(
   file: File,

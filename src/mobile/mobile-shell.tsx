@@ -288,7 +288,8 @@ export function MobileShell({
         requestedThreadId,
         language: settings.language,
         messageSendMode: settings.messageSendMode,
-        imageUploader: Capacitor.isNativePlatform()
+        uploadImagesViaSocket: Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android",
+        imageUploader: Capacitor.isNativePlatform() && Capacitor.getPlatform() !== "android"
           ? (file) => uploadNativeImage(connection.baseUrl, token, file)
           : undefined,
         connections: availableConnections.map(({ id: connectionId, name, pairingStatus }) => ({

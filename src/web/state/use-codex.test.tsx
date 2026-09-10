@@ -1017,6 +1017,26 @@ describe("Desktop history gaps", () => {
 });
 
 describe("useCodex", () => {
+  it("does not start an old task when its connection page unmounts during image upload", async () => {
+    const socket = new CodexSocket(() => new FakeBrowserSocket());
+    const request = vi.spyOn(socket, "request").mockImplementation(async (method) => {
+      if (method === "desktopState/readThread") throw new Error("not a desktop thread");
+      if (method === "thread/resume") return { thread: { id: "t1", status: "idle", turns: [] } };
+      return {};
+    });
+    let finish!: (value: { id: string; name: string; mimeType: string; size: number }) => void;
+    const upload = vi.spyOn(socket, "uploadImage").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const { result, unmount } = renderHook(() => useCodex(socket, { uploadImagesViaSocket: true }));
+    await act(() => result.current.selectThread("t1"));
+    const sending = result.current.sendInstruction("see image", [validPngFile("screen.png", 1, 1)]);
+    const rejected = expect(sending).rejects.toThrow("连接页面已关闭");
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    unmount();
+    finish({ id: "image-1", name: "screen.png", mimeType: "image/png", size: 68 });
+    await rejected;
+    expect(request.mock.calls.some(([method]) => ["turn/start", "desktop/queue/add"].includes(method))).toBe(false);
+  });
+
   it("applies a deadline only to the read-only question RPC", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

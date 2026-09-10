@@ -34,6 +34,7 @@ export type GatewayEnvelope =
       transport?: "desktop-live" | "desktop-cold" | "web-live";
       readOnly?: boolean;
       appServerVersion?: string;
+      imageUpload?: boolean;
     }
   | { type: "rpc"; payload: RpcMessage }
   | { type: "diagnostic"; category: string; message: string };

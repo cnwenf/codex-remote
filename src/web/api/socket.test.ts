@@ -40,6 +40,59 @@ afterEach(() => {
 });
 
 describe("CodexSocket", () => {
+  it("uploads an image on the authenticated chat connection without an HTTP request", async () => {
+    const fake = new FakeBrowserSocket(false);
+    const socket = new CodexSocket(() => fake);
+    const connecting = socket.connect("secret", "ws://127.0.0.1/rpc");
+    fake.serverSend({ type: "session", state: "ready", imageUpload: true });
+    await connecting;
+    const http = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("HTTP path unavailable"));
+    const image = pngFile("phone.png", 400, 300);
+    const result = socket.uploadImage(image);
+    await vi.waitFor(() => expect(fake.sent).toHaveLength(1));
+    const request = JSON.parse(fake.sent[0]).payload;
+    expect(request).toMatchObject({ method: "gateway/image/upload", params: {
+      name: "phone.png", mimeType: "image/png", data: expect.any(String),
+    } });
+    expect(Buffer.from(request.params.data, "base64").length).toBe(image.size);
+    fake.serverSend({ type: "rpc", payload: { id: request.id, result: {
+      id: "image-1", name: "phone.png", mimeType: "image/png", size: image.size,
+    } } });
+    await expect(result).resolves.toMatchObject({ id: "image-1", size: image.size });
+    expect(http).not.toHaveBeenCalled();
+    socket.disconnect();
+  });
+
+  it("does not send a file to a different connection after reading it", async () => {
+    const first = new FakeBrowserSocket(false);
+    const second = new FakeBrowserSocket(false);
+    let connection = first;
+    const socket = new CodexSocket(() => connection);
+    const ready = socket.connect("first", "ws://first.test/rpc");
+    first.serverSend({ type: "session", state: "ready", imageUpload: true });
+    await ready;
+    const upload = socket.uploadImage(pngFile("private.png", 1, 1));
+    const rejected = expect(upload).rejects.toThrow("连接已切换或断开");
+    socket.disconnect();
+    connection = second;
+    const connected = socket.connect("second", "ws://second.test/rpc");
+    second.serverSend({ type: "session", state: "ready", imageUpload: true });
+    await connected;
+    await rejected;
+    expect(first.sent).toEqual([]);
+    expect(second.sent).toEqual([]);
+    socket.disconnect();
+  });
+
+  it("asks for a Mac upgrade immediately when its gateway lacks chat image upload", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    await socket.connect("secret", "ws://127.0.0.1/rpc");
+    await expect(socket.uploadImage(pngFile("phone.png", 1, 1))).rejects.toThrow("更新 Mac");
+    expect(fake.sent).toHaveLength(0);
+    socket.disconnect();
+  });
+
   it("does not finish connecting until the gateway session is ready", async () => {
     const fake = new FakeBrowserSocket(false);
     const socket = new CodexSocket(() => fake);

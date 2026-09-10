@@ -23,6 +23,7 @@ export type NativeRemoteSession = {
   language?: MobileLanguage;
   messageSendMode?: MobileMessageSendMode;
   imageUploader?: (file: File) => Promise<UploadedImage>;
+  uploadImagesViaSocket?: boolean;
   connections?: Array<{
     id: string;
     name: string;
@@ -41,6 +42,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
     baseUrl: remote.baseUrl,
     token: remote.token,
     imageUploader: remote.imageUploader,
+    uploadImagesViaSocket: remote.uploadImagesViaSocket,
   } : {});
   const autoConnectAttempted = useRef(false);
   const nativeConnecting = Boolean(remote) &&

@@ -37,6 +37,7 @@ import { ActiveMessageReplay } from "./active-message-replay";
 import { registerAssistantImages } from "./assistant-images";
 import { registerToolOutputImages } from "./tool-output-images";
 import { itemText, messageKind } from "../protocol/message-content";
+import { MAX_TRANSFER_IMAGE_BYTES } from "../protocol/image-transfer";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 4 * 1024;
@@ -259,6 +260,7 @@ export function createGateway(options: GatewayOptions) {
     sendEnvelope(socket, {
       type: "session",
       state: "ready",
+      imageUpload: true,
       ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
       ...options.transport.getSessionInfo?.(),
     });
@@ -274,6 +276,10 @@ export function createGateway(options: GatewayOptions) {
       try {
         const envelope = JSON.parse(rawDataToBuffer(data).toString("utf8")) as unknown;
         if (!isRpcEnvelope(envelope)) throw new Error("invalid-envelope");
+        if (isRpcRequest(envelope.payload) && envelope.payload.method === "gateway/image/upload") {
+          void handleSocketImageUpload(socket, envelope.payload);
+          return;
+        }
         if (isRpcRequest(envelope.payload) && envelope.payload.method === "gateway/threadActivity/read") {
           handleThreadActivityRequest(socket, envelope.payload);
           return;
@@ -415,6 +421,7 @@ export function createGateway(options: GatewayOptions) {
             broadcastEnvelope({
               type: "session",
               state: "ready",
+              imageUpload: true,
               ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
               ...sessionInfo,
             });
@@ -442,6 +449,7 @@ export function createGateway(options: GatewayOptions) {
         broadcastEnvelope({
           type: "session",
           state: "ready",
+          imageUpload: true,
           ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
           ...sessionInfo,
         });
@@ -748,7 +756,47 @@ export function createGateway(options: GatewayOptions) {
     }
   }
 
+  async function handleSocketImageUpload(socket: WebSocket, request: RpcRequest) {
+    const params = recordValue(request.params);
+    try {
+      const { data, mimeType, name } = params;
+      if (typeof data !== "string" || typeof mimeType !== "string" ||
+          (name !== undefined && (typeof name !== "string" || name.length > 1024)) ||
+          data.length > 4 * Math.ceil(MAX_TRANSFER_IMAGE_BYTES / 3) ||
+          !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+        throw new ImageUploadError("图片上传数据无效或超过 1 MB", 400);
+      }
+      const buffer = Buffer.from(data, "base64");
+      if (buffer.length > MAX_TRANSFER_IMAGE_BYTES || buffer.toString("base64") !== data) {
+        throw new ImageUploadError("图片上传数据无效或超过 1 MB", 400);
+      }
+      const stored = await imageStore.save(buffer, mimeType, typeof name === "string" ? encodeURIComponent(name) : undefined);
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result: {
+        id: stored.id, name: stored.name, mimeType: stored.mimeType, size: stored.size,
+      } } });
+    } catch (cause) {
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, error: {
+        code: -32602, message: cause instanceof ImageUploadError ? cause.message : "图片保存失败，请重试",
+      } } });
+    }
+  }
+
   async function handleImageUpload(request: IncomingMessage, response: ServerResponse) {
+    const started = Date.now();
+    const requestId = randomBytes(8).toString("hex");
+    let bytes = 0;
+    const client = request.headers["user-agent"] === "Codex-Remote-Android"
+      ? "android-native" : request.headers.origin ? "webview-or-browser" : "other";
+    const trace = (phase: string) => {
+      try {
+        options.onTransportDiagnostic?.({ category: "image-upload", message: JSON.stringify({
+          requestId, phase, client, bytes, elapsedMs: Date.now() - started,
+          status: response.headersSent ? response.statusCode : 0,
+        }) });
+      } catch { /* Diagnostics must not interrupt an upload. */ }
+    };
+    trace("arrived");
+    response.once("close", () => trace(response.writableFinished ? "finished" : "disconnected"));
     response.setHeader("Cache-Control", "no-store");
     if (request.method !== "POST") {
       response.writeHead(405, { Allow: "POST" }).end();
@@ -773,7 +821,9 @@ export function createGateway(options: GatewayOptions) {
       return;
     }
     try {
+      request.on("data", (chunk: Buffer) => { bytes += chunk.byteLength; });
       const body = await readRawBody(request, MAX_IMAGE_BYTES);
+      trace("body-received");
       const originalName = singleHeader(request.headers["x-file-name"]);
       const stored = await imageStore.save(body, mimeType, originalName);
       response.writeHead(201, { "content-type": "application/json; charset=utf-8" });

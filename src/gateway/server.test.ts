@@ -1796,6 +1796,65 @@ describe("gateway server", () => {
     }
   });
 
+  it("stores authenticated chat image uploads locally without forwarding bytes to Desktop", async () => {
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-chat-image-"));
+    const transport = new FakeTransport();
+    const gateway = createGateway({ port: 0, token: "test-token", uploadDir, transport,
+      allowedOrigins: ["http://127.0.0.1:4321"] });
+    const address = await gateway.start();
+    const socket = await connect(address, "test-token", "http://127.0.0.1:4321");
+    const session = await nextJson(socket);
+    try {
+      expect(session).toMatchObject({ imageUpload: true });
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: "upload", method: "gateway/image/upload",
+        params: { name: "../../phone%2Fphoto.png", mimeType: "image/png", data: PNG_1X1.toString("base64") } } }));
+      const reply = (await nextJson(socket)).payload;
+      expect(reply.error).toBeUndefined();
+      expect(reply.result).toMatchObject({ name: "phone%2Fphoto.png", size: PNG_1X1.length });
+      expect(reply.result.path).toBeUndefined();
+      expect((await readFile(join(uploadDir, `${reply.result.id}.png`))).equals(PNG_1X1)).toBe(true);
+      expect(transport.sent.some((message) => "method" in message && message.method === "gateway/image/upload")).toBe(false);
+      for (const params of [
+        { mimeType: "image/png", data: "!!!!" },
+        { mimeType: "image/jpeg", data: PNG_1X1.toString("base64") },
+        { mimeType: "image/png", data: Buffer.alloc(1_000_001).toString("base64") },
+      ]) {
+        socket.send(JSON.stringify({ type: "rpc", payload: { id: "bad", method: "gateway/image/upload", params } }));
+        expect((await nextJson(socket)).payload.error).toBeDefined();
+      }
+      expect(await readdir(uploadDir)).toEqual([`${reply.result.id}.png`]);
+    } finally { socket.close(); await once(socket, "close"); await gateway.stop(); await rm(uploadDir, { recursive: true, force: true }); }
+  });
+
+  it("records upload arrival and completion without credentials, file names, or image content", async () => {
+    const diagnostics: Array<{ category: string; message: string }> = [];
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-remote-upload-diagnostics-"));
+    const gateway = createGateway({ port: 0, token: "private-fixture-token", uploadDir,
+      transport: new FakeTransport(), onTransportDiagnostic: (value) => diagnostics.push(value) });
+    const address = await gateway.start();
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
+        method: "POST", headers: { authorization: "Bearer private-fixture-token",
+          "content-type": "image/png", "x-file-name": "private-file-name.png",
+          "user-agent": "Codex-Remote-Android" }, body: PNG_1X1,
+      });
+      expect(response.status).toBe(201);
+      await response.arrayBuffer();
+      const uploads = diagnostics.filter((value) => value.category === "image-upload")
+        .map((value) => JSON.parse(value.message));
+      expect(uploads).toMatchObject([
+        { phase: "arrived", client: "android-native", bytes: 0 },
+        { phase: "body-received", bytes: PNG_1X1.length },
+        { phase: "finished", bytes: PNG_1X1.length, status: 201 },
+      ]);
+      expect(new Set(uploads.map((value) => value.requestId)).size).toBe(1);
+      const serialized = JSON.stringify(diagnostics);
+      for (const secret of ["private-fixture-token", "private-file-name", PNG_1X1.toString("base64")]) {
+        expect(serialized).not.toContain(secret);
+      }
+    } finally { await gateway.stop(); await rm(uploadDir, { recursive: true, force: true }); }
+  });
+
   it("rejects unauthenticated, oversized, and content-spoofed image uploads", async () => {
     const token = "test-token";
     const origin = "http://127.0.0.1:4310";

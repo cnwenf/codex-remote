@@ -204,6 +204,11 @@ const emptyCreationOptions = {
 
 export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptions = {}) {
   const [socket] = useState(() => socketOverride ?? new CodexSocket());
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [reconciler] = useState(() => new ConversationReconciler());
   const [state, setState] = useState<CodexState>(initialCodexState);
   const stateRef = useRef(state);
@@ -815,8 +820,15 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         throw new Error("此对话正由 Codex Desktop 运行，Web 当前为同步查看模式");
       }
       const uploaded = images.length > 0
-        ? await Promise.all(images.map((image) => uploadImage(image, fetch, remoteApi)))
+        ? await Promise.all(images.map((image) => uploadImage(image, fetch, {
+          ...remoteApi,
+          ...(remoteApi.uploadImagesViaSocket ? { imageUploader: (file: File) => {
+            if (!mounted.current) throw new Error("连接页面已关闭，请重试");
+            return socket.uploadImage(file);
+          } } : {}),
+        })))
         : [];
+      if (!mounted.current) throw new Error("连接页面已关闭，请重试");
       const input = [
         ...(text ? [{ type: "text", text }] : []),
         ...uploaded.map((image) => ({ type: "remoteImage", id: image.id })),
@@ -946,7 +958,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         }
       }
     },
-    [desktopControlAvailable, reconciler, remoteApi.baseUrl, remoteApi.imageUploader, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
+    [desktopControlAvailable, reconciler, remoteApi.baseUrl, remoteApi.imageUploader, remoteApi.uploadImagesViaSocket, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
   );
 
   const steerQueuedMessage = useCallback(async (messageId: string) => {
