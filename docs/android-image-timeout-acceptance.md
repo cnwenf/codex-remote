@@ -52,3 +52,19 @@ adb shell am instrument -w -e chatImage true -e class com.cnwenf.codexremote.Cha
 ## 证据边界
 
 故障注入验证的是“原生 HTTP 不响应但聊天 WebSocket 正常”时新路径能完成图片上传。用户手机未连接本机 ADB，其私网为何区别对待两条连接尚未确认；不能把模拟器故障注入写成对该手机底层网络根因的证明。iOS 真机和 Intel Mac 硬件运行不在本轮验收范围。
+
+## 0.5.35 正式发布核验
+
+- 源码/标签：`fe50d87` / `v0.5.35`；[发布流水线 34483484665](https://github.com/cnwenf/codex-remote/actions/runs/34483484665) 所有作业成功。
+- [正式 Release](https://github.com/cnwenf/codex-remote/releases/tag/v0.5.35) 包含 5 个二进制包、对应 SHA-256 和更新清单，共 11 个资产。下载后逐一独立验证 SHA-256；iOS ZIP/IPA 解压校验通过。
+- ARM64/x86_64 DMG 均完成 `hdiutil verify`、严格签名验证、主程序/Node/cloudflared 架构检查和包内 `--self-test`。Intel 自检在本机通过兼容层执行，不等于 Intel 真机 UI 验收。
+- APK 签名与登记证书一致；更新 CDN APK 与 GitHub APK 字节一致。正式签名 APK 在发布模拟器上从 0.5.31 覆盖升级至 0.5.35（versionCode 44），原生设置页显示 v0.5.35。
+- 本机通过支持回滚的升级器安装正式 ARM64 包，配置和登录凭据未改变，网关恢复 `desktop-live` / 非只读。新接口真实上传与逐字节下载校验通过，该次测试图片已删除。没有重启 Codex Desktop。
+
+| 资产 | SHA-256 |
+| --- | --- |
+| ARM64 DMG | `113e23724d916640b203068f729d85e3a0f22a469663c4c9a091c0e703f36667` |
+| x86_64 DMG | `5a33a7ba6673df03c1bb39197359c287b5683a9c8655f1d2a2669bb7fa6ae825` |
+| Android APK | `1852a38ae9d77ba15072fa0939f4b4ba71cabfb324ac344bec1838937142e11a` |
+| iOS Simulator ZIP | `fe5d417120227fe1f5010ee98d94ed88b75f518d32152f8590b00b3beb64b936` |
+| iOS unsigned IPA | `6d49fb0ee95d0eabca429d0e7e65bafd8d716719d037088def47b7bfa9ab801e` |
