@@ -288,6 +288,8 @@ export function MobileShell({
         requestedThreadId,
         language: settings.language,
         messageSendMode: settings.messageSendMode,
+        // 用户要求保留 v0.5.35 的安卓发送链路：复用 WebSocket 上传。
+        // 图片下载/显示问题不得改动此处；修改发送逻辑须用户再次明确授权。
         uploadImagesViaSocket: Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android",
         imageUploader: Capacitor.isNativePlatform() && Capacitor.getPlatform() !== "android"
           ? (file) => uploadNativeImage(connection.baseUrl, token, file)

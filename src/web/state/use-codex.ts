@@ -819,6 +819,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       if (thread?.desktopMirror && !desktopControlAvailable) {
         throw new Error("此对话正由 Codex Desktop 运行，Web 当前为同步查看模式");
       }
+      // 发送链路按用户要求锁定 v0.5.35 行为；不要为修复图片预览而改变上传协议或顺序。
       const uploaded = images.length > 0
         ? await Promise.all(images.map((image) => uploadImage(image, fetch, {
           ...remoteApi,
