@@ -103,12 +103,12 @@ describe("assistant local image rendering", () => {
   });
 
   it("shows unavailable local images and failed authenticated downloads instead of loading forever", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
     const { rerender } = render(<Timeline thread={thread()} />);
     expect(screen.getByText("本机图片不可用：Generated")).toBeVisible();
     expect(screen.queryByRole("img", { name: "Generated" })).not.toBeInTheDocument();
     rerender(<Timeline thread={thread({ [source]: id })} imageRequest={{ baseUrl: "https://gateway.test", token: "test-secret" }} />);
-    expect(await screen.findByText("图片加载失败：Generated")).toBeVisible();
+    expect(await screen.findByText("图片加载失败：Generated（HTTP 404）")).toBeVisible();
     await waitFor(() => expect(screen.queryByText("正在加载图片…")).not.toBeInTheDocument());
   });
 

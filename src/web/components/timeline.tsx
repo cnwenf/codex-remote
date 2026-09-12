@@ -1,7 +1,8 @@
-import { createContext, useContext, useEffect, useState, type ComponentPropsWithoutRef } from "react";
+import { Fragment, createContext, useContext, useEffect, useState, type ComponentPropsWithoutRef } from "react";
 import { createPortal } from "react-dom";
 import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { MarkdownPre } from "./mermaid-block";
 import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-store";
 import { messageKind } from "../../protocol/message-content";
 import { isToolActivity, MAX_TOOL_OUTPUT_IMAGES } from "../../protocol/tool-content";
@@ -118,18 +119,26 @@ function TurnView({
             explicitlyRunning || segment.items.some((item) => item.status === undefined)
           );
           return (
-            <details key={segment.key} className="activity-group"
-              data-question-anchor={anchorItem ? "true" : undefined}
-              data-turn-id={turn.id} data-anchor-item-id={anchorItem?.id}>
-              <summary>
-                <span className={`run-indicator run-${activityRunning ? "inProgress" : "completed"}`} aria-hidden="true" />
-                <span>执行过程（{segment.items.length} 项）</span>
-                <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
-              </summary>
-              <ol className="activity-list">
-                {segment.items.map((item) => <ActivityItem key={item.id} item={item} imageRequest={imageRequest} onPreviewImage={onPreviewImage} />)}
-              </ol>
-            </details>
+            <Fragment key={segment.key}>
+              <details className="activity-group"
+                data-question-anchor={anchorItem ? "true" : undefined}
+                data-turn-id={turn.id} data-anchor-item-id={anchorItem?.id}>
+                <summary>
+                  <span className={`run-indicator run-${activityRunning ? "inProgress" : "completed"}`} aria-hidden="true" />
+                  <span>执行过程（{segment.items.length} 项）</span>
+                  <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
+                </summary>
+                <ol className="activity-list">
+                  {segment.items.map((item) => <ActivityItem key={item.id} item={item} imageRequest={imageRequest} onPreviewImage={onPreviewImage} />)}
+                </ol>
+              </details>
+              {segment.items.some((item) => item.toolOutputImageIds?.length) ? <div className="message-images">
+                {[...new Set(segment.items.flatMap((item) => item.toolOutputImageIds ?? []))].map((imageId, index) => (
+                  <AuthenticatedImage key={imageId} imageId={imageId} request={imageRequest}
+                    alt={`工具返回图片 ${index + 1}`} onPreview={onPreviewImage} />
+                ))}
+              </div> : null}
+            </Fragment>
           );
         }
         return (
@@ -237,29 +246,36 @@ function AuthenticatedImage({
 }) {
   const fallback = `/api/images/${encodeURIComponent(imageId)}`;
   const [source, setSource] = useState(request ? undefined : fallback);
-  const [failed, setFailed] = useState(false);
+  const [failure, setFailure] = useState<string>();
   useEffect(() => {
-    setFailed(false);
+    setFailure(undefined);
     if (!request) { setSource(fallback); return; }
     setSource(undefined);
     let disposed = false;
     let objectUrl: string | undefined;
+    // Keep controlled stage labels: raw fetch errors can contain credentials.
+    let failureStage = "下载请求失败";
     void fetch(`${request.baseUrl}/api/images/${encodeURIComponent(imageId)}`, {
       headers: { authorization: `Bearer ${request.token}` },
     }).then((response) => {
-      if (!response.ok) throw new Error("image-download-failed");
+      if (!response.ok) {
+        failureStage = `HTTP ${response.status}`;
+        throw new Error("image-download-failed");
+      }
+      failureStage = "读取图片数据失败";
       return response.blob();
     }).then((blob) => {
       if (disposed) return;
+      failureStage = "创建图片预览失败";
       objectUrl = URL.createObjectURL(blob);
       setSource(objectUrl);
-    }).catch(() => { if (!disposed) setFailed(true); });
+    }).catch(() => { if (!disposed) setFailure(failureStage); });
     return () => {
       disposed = true;
       if (objectUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(objectUrl);
     };
   }, [fallback, imageId, request?.baseUrl, request?.token]);
-  if (failed) return <span className="image-error">图片加载失败：{alt}</span>;
+  if (failure) return <span className="image-error">图片加载失败：{alt}（{failure}）</span>;
   return source ? (
     <button
       type="button"
@@ -272,7 +288,8 @@ function AuthenticatedImage({
         onPreview({ source, alt });
       }}
     >
-      <img src={source} alt={alt} loading="lazy" onError={() => setFailed(true)} />
+      <img src={source} alt={alt} loading="lazy"
+        onError={() => setFailure(request ? "下载已完成，图片显示失败" : "图片请求或显示失败")} />
     </button>
   ) : <span className="image-loading">正在加载图片…</span>;
 }
@@ -415,6 +432,7 @@ function MarkdownContent({ text, assistant, onOpenExternalUrl, localImages, imag
           remarkPlugins={assistant ? [remarkGfm, remarkAssistantPresentation] : [remarkGfm]}
           urlTransform={(url, key, node) => node.tagName === "img" ? url : defaultUrlTransform(url)}
           components={{
+            pre: MarkdownPre,
             img: MarkdownImage,
             a: MarkdownLink,
           }}
@@ -481,10 +499,6 @@ function ActivityItem({ item, imageRequest, onPreviewImage }: {
           {item.toolInputTruncated ? <p>已截断：显示前 {item.toolInput?.length ?? 0} 个字符{item.toolInputLength !== undefined ? `，原文 ${item.toolInputLength} 个字符` : ""}</p> : null}
           <strong>结果</strong>
           <pre>{outputDescription}</pre>
-          {item.toolOutputImageIds?.length ? <div className="message-images">
-            {item.toolOutputImageIds.map((imageId, index) => <AuthenticatedImage key={imageId} imageId={imageId}
-              request={imageRequest} alt={`工具返回图片 ${index + 1}`} onPreview={onPreviewImage} />)}
-          </div> : null}
           {item.toolOutputImagesIncomplete ? <p>部分工具图片不可用或超出限制（每项最多显示 {MAX_TOOL_OUTPUT_IMAGES} 张）。</p> : null}
           {item.toolOutputTruncated ? <p>已截断：显示前 {item.toolOutput?.length ?? 0} 个字符{item.toolOutputLength !== undefined ? `，原文 ${item.toolOutputLength} 个字符` : ""}</p> : null}
         </details> : null}

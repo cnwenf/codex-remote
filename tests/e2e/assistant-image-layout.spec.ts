@@ -17,7 +17,8 @@ test("fits a real assistant image to the conversation and previews the uncropped
           id: "turn", status: "completed", items: [
             { id: "assistant", type: "agentMessage", text: "![App icon](/fixture/app-icon.png)",
               localImages: { "/fixture/app-icon.png": "00000000-0000-4000-8000-000000000001" } },
-            { id: "user", type: "userMessage", text: "Existing user attachment", imageIds: ["00000000-0000-4000-8000-000000000001"] }
+            { id: "user", type: "userMessage", text: "Existing user attachment", imageIds: ["00000000-0000-4000-8000-000000000001"] },
+            { id: "image-tool", type: "toolCall", text: "exec", status: "completed", toolOutput: "[非文本结果]", toolOutputImageIds: ["00000000-0000-4000-8000-000000000001"] }
           ]
         }] } }).threads.fixture;
         createRoot(document.getElementById("root")).render(
@@ -36,6 +37,8 @@ test("fits a real assistant image to the conversation and previews the uncropped
   await page.goto("/__image-layout");
   await page.addStyleTag({ path: resolve("src/web/styles.css") });
   await page.addScriptTag({ content: fixture.outputFiles[0].text });
+  await expect(page.getByRole("img", { name: "工具返回图片 1", exact: true })).toBeVisible();
+  await expect(page.locator(".activity-group")).not.toHaveAttribute("open", "");
   const image = page.locator(".message-agent .message-image-link img");
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(1024);

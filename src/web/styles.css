@@ -312,6 +312,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .markdown-body code { padding: 0.14em 0.36em; border-radius: 5px; background: var(--surface-muted); font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size: 0.88em; }
 .markdown-body pre { box-sizing: border-box; display: block; width: 100%; min-width: 0; max-width: 100%; overflow-x: auto; margin: 0.85em 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); -webkit-overflow-scrolling: touch; }
 .markdown-body pre code { padding: 0; background: transparent; font-size: 0.82em; white-space: pre; }
+.mermaid-block { max-width: 100%; min-width: 0; margin: 0.85em 0; overflow-x: auto; }
+.mermaid-block > img { display: block; max-width: 100%; height: auto; padding: 8px; box-sizing: border-box; border-radius: 10px; background: white; }
 .markdown-body table { display: block; max-width: 100%; overflow-x: auto; margin: 0.85em 0; border-collapse: collapse; }
 .markdown-body th, .markdown-body td { padding: 7px 10px; border: 1px solid var(--line); text-align: left; }
 .markdown-body a { color: var(--accent-strong); text-underline-offset: 0.16em; }
