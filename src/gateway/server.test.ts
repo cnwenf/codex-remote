@@ -14,6 +14,7 @@ import type {
   TransportDiagnostic,
 } from "../protocol/types";
 import { createGateway } from "./server";
+import { ImageUploadStore } from "./image-upload-store";
 import { initialCodexState, reduceCodexState } from "../protocol/thread-store";
 import { hydrateThread } from "../web/state/conversation-history";
 import { MAX_TRANSFER_IMAGE_BYTES } from "../protocol/image-transfer";
@@ -1863,6 +1864,79 @@ describe("gateway server", () => {
       }
       expect(await readdir(uploadDir)).toEqual([`${reply.result.id}.png`]);
     } finally { socket.close(); await once(socket, "close"); await gateway.stop(); await rm(uploadDir, { recursive: true, force: true }); }
+  });
+
+  it("traces chat image upload stages without exposing request contents", async () => {
+    const diagnostics: Array<{ category: string; message: string }> = [];
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-chat-image-trace-"));
+    const gateway = createGateway({ port: 0, token: "private-fixture-token", uploadDir,
+      transport: new FakeTransport(), allowedOrigins: ["http://127.0.0.1:4321"],
+      onTransportDiagnostic: value => diagnostics.push(value) });
+    const address = await gateway.start();
+    const socket = await connect(address, "private-fixture-token", "http://127.0.0.1:4321");
+    await nextJson(socket);
+    try {
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: "private-request-id", method: "gateway/image/upload",
+        params: { name: "private-file-name.png", mimeType: "image/png", data: PNG_1X1.toString("base64") } } }));
+      expect((await nextJson(socket)).payload.result.size).toBe(PNG_1X1.length);
+      await vi.waitFor(() => expect(diagnostics.filter(d => d.category === "image-upload-socket").length).toBe(5));
+      const traces = diagnostics.filter(d => d.category === "image-upload-socket").map(d => JSON.parse(d.message));
+      expect(traces.map(t => t.phase)).toEqual(["arrived", "saving", "saved", "response-queued", "response-written"]);
+      expect(new Set(traces.map(t => t.requestId)).size).toBe(1);
+      expect(traces[2].bytes).toBe(PNG_1X1.length);
+      for (const secret of ["private-fixture-token", "private-request-id", "private-file-name", PNG_1X1.toString("base64")]) {
+        expect(JSON.stringify(diagnostics)).not.toContain(secret);
+      }
+    } finally { socket.close(); await once(socket, "close"); await gateway.stop(); await rm(uploadDir, { recursive: true, force: true }); }
+  });
+
+  it.each(["validation", "save", "disconnect", "logger"])("keeps chat image behavior intact when %s fails", async (failure) => {
+    const phases: string[] = [];
+    const messages: string[] = [];
+    const uploadDir = await mkdtemp(join(tmpdir(), "codex-chat-image-failure-"));
+    let releaseSave: (() => void) | undefined;
+    const originalSave = ImageUploadStore.prototype.save;
+    const save = vi.spyOn(ImageUploadStore.prototype, "save").mockImplementation(async function (this: ImageUploadStore, ...args) {
+      if (failure === "save") throw new Error("private-filesystem-error");
+      if (failure === "disconnect") await new Promise<void>(resolve => { releaseSave = resolve; });
+      return originalSave.apply(this, args);
+    });
+    const gateway = createGateway({ port: 0, token: "test-token", uploadDir,
+      transport: new FakeTransport(), allowedOrigins: ["http://127.0.0.1:4321"],
+      onTransportDiagnostic: value => {
+        if (value.category !== "image-upload-socket") return;
+        phases.push(JSON.parse(value.message).phase);
+        messages.push(value.message);
+        if (failure === "logger") throw new Error("logger unavailable");
+      } });
+    const address = await gateway.start();
+    const socket = await connect(address, "test-token", "http://127.0.0.1:4321");
+    await nextJson(socket);
+    try {
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: 1, method: "gateway/image/upload",
+        params: { mimeType: "image/png", data: failure === "validation" ? "!" : PNG_1X1.toString("base64") } } }));
+      if (failure === "disconnect") {
+        await vi.waitFor(() => expect(releaseSave).toBeTypeOf("function"));
+        socket.close();
+        await once(socket, "close");
+        await vi.waitFor(() => expect(phases).toContain("disconnected"));
+        releaseSave!();
+        await vi.waitFor(() => expect(phases).toContain("response-write-failed"));
+        expect(phases).not.toContain("response-written");
+      } else {
+        const reply = (await nextJson(socket)).payload;
+        if (failure === "logger") expect(reply.result.size).toBe(PNG_1X1.length);
+        else expect(reply.error.code).toBe(-32602);
+        await vi.waitFor(() => expect(phases).toContain("response-written"));
+        if (failure !== "logger") expect(phases).toContain(`${failure}-failed`);
+        if (failure === "validation") expect(save).not.toHaveBeenCalled();
+      }
+      expect(messages.join("\n")).not.toContain("private-filesystem-error");
+    } finally {
+      releaseSave?.();
+      if (socket.readyState !== WebSocket.CLOSED) { socket.close(); await once(socket, "close"); }
+      await gateway.stop(); save.mockRestore(); await rm(uploadDir, { recursive: true, force: true });
+    }
   });
 
   it("records upload arrival and completion without credentials, file names, or image content", async () => {

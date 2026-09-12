@@ -758,6 +758,26 @@ export function createGateway(options: GatewayOptions) {
 
   async function handleSocketImageUpload(socket: WebSocket, request: RpcRequest) {
     const params = recordValue(request.params);
+    const started = Date.now();
+    const requestId = randomBytes(8).toString("hex");
+    let bytes = 0;
+    let stage = "validation";
+    const trace = (phase: string) => {
+      try {
+        options.onTransportDiagnostic?.({ category: "image-upload-socket", message: JSON.stringify({
+          requestId, phase, bytes, elapsedMs: Date.now() - started,
+          socketState: socket.readyState, bufferedBytes: socket.bufferedAmount,
+        }) });
+      } catch { /* Logging must never interrupt image sending. */ }
+    };
+    const disconnected = () => trace("disconnected");
+    socket.once("close", disconnected);
+    const responseWritten = (error?: Error) => {
+      socket.off("close", disconnected);
+      // This is a local socket write, not an acknowledgement from the phone.
+      trace(error ? "response-write-failed" : "response-written");
+    };
+    trace("arrived");
     try {
       const { data, mimeType, name } = params;
       if (typeof data !== "string" || typeof mimeType !== "string" ||
@@ -770,14 +790,22 @@ export function createGateway(options: GatewayOptions) {
       if (buffer.length > MAX_TRANSFER_IMAGE_BYTES || buffer.toString("base64") !== data) {
         throw new ImageUploadError("图片上传数据无效或超过 1 MB", 400);
       }
+      bytes = buffer.length;
+      stage = "save";
+      trace("saving");
       const stored = await imageStore.save(buffer, mimeType, typeof name === "string" ? encodeURIComponent(name) : undefined);
+      trace("saved");
+      stage = "response";
+      trace("response-queued");
       sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result: {
         id: stored.id, name: stored.name, mimeType: stored.mimeType, size: stored.size,
-      } } });
+      } } }, responseWritten);
     } catch (cause) {
+      trace(`${stage}-failed`);
+      trace("error-response-queued");
       sendEnvelope(socket, { type: "rpc", payload: { id: request.id, error: {
         code: -32602, message: cause instanceof ImageUploadError ? cause.message : "图片保存失败，请重试",
-      } } });
+      } } }, responseWritten);
     }
   }
 
@@ -1382,8 +1410,9 @@ function isRpcEnvelope(value: unknown): value is { type: "rpc"; payload: RpcMess
   return "method" in payload || hasId;
 }
 
-function sendEnvelope(socket: WebSocket, envelope: GatewayEnvelope) {
-  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(envelope));
+function sendEnvelope(socket: WebSocket, envelope: GatewayEnvelope, onWritten?: (error?: Error) => void) {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(envelope), onWritten);
+  else onWritten?.(new Error("socket-not-open"));
 }
 
 function rejectUpgrade(socket: Duplex, status: number, reason: string) {
