@@ -6,6 +6,26 @@ import { hydrateThread } from "../state/conversation-history";
 import { Timeline, TodoListDock } from "./timeline";
 
 describe("Timeline", () => {
+  it("uses a single muted shimmer for the live action and stops it at completion", () => {
+    const state = hydrateThread(initialCodexState, { thread: { id: "t", status: "active", turns: [{
+      id: "turn", status: "inProgress", items: [
+        { id: "commentary", type: "agentMessage", phase: "commentary", text: "正在检查恢复逻辑。" },
+        { id: "tool", type: "commandExecution", command: "pnpm test", status: "inProgress" },
+      ],
+    }] } });
+    const { container, rerender } = render(<Timeline thread={state.threads.t} />);
+    expect(screen.getByText("正在运行命令 · pnpm test")).toBeVisible();
+    expect(container.querySelectorAll(".activity-shimmer")).toHaveLength(1);
+    expect(container.querySelector(".typing-indicator")).not.toBeInTheDocument();
+    expect(screen.getByText("正在检查恢复逻辑。")).toBeVisible();
+    const completed = structuredClone(state.threads.t);
+    completed.status = "idle";
+    completed.turns.turn.status = "completed";
+    rerender(<Timeline thread={completed} />);
+    expect(screen.getByText("已运行命令")).toBeVisible();
+    expect(container.querySelector(".activity-shimmer")).not.toBeInTheDocument();
+  });
+
   it("exposes exact answer anchors without treating user or delegated input as an answer", () => {
     const state = hydrateThread(initialCodexState, { thread: { id: "t", status: "idle", turns: [{
       id: "turn-1", status: "completed", items: [
@@ -161,9 +181,9 @@ describe("Timeline", () => {
 
     expect(screen.getByText("Run tests")).toBeVisible();
     expect(screen.getByText("All tests pass")).toBeVisible();
-    expect(screen.getByText("执行过程（2 项）")).toBeVisible();
+    expect(screen.getByLabelText("执行详情，2 项")).toBeVisible();
     expect(screen.queryByText("Inspecting failures")).not.toBeVisible();
-    await userEvent.click(screen.getByText("执行过程（2 项）"));
+    await userEvent.click(screen.getByLabelText("执行详情，2 项"));
     expect(screen.getByText("Inspecting failures")).toBeVisible();
     expect(screen.getByText("pnpm test")).toBeVisible();
   });
@@ -196,13 +216,13 @@ describe("Timeline", () => {
 
     expect(screen.getByText("把问题修好")).toBeVisible();
     expect(screen.getByText("问题已经修好。")).toBeVisible();
-    expect(screen.getAllByText("执行过程（1 项）")).toHaveLength(2);
+    expect(screen.getAllByLabelText("执行详情，1 项")).toHaveLength(2);
     expect(screen.queryByText("我先检查消息分组。")).toBeVisible();
     expect(screen.queryByText("测试已经通过。")).toBeVisible();
     expect(screen.getByText("先定位根因")).not.toBeVisible();
     expect(screen.getByText("pnpm test")).not.toBeVisible();
 
-    for (const summary of screen.getAllByText("执行过程（1 项）")) await userEvent.click(summary);
+    for (const summary of screen.getAllByLabelText("执行详情，1 项")) await userEvent.click(summary);
 
     expect(screen.getByText("先定位根因")).toBeVisible();
     expect(screen.getByText("我先检查消息分组。")).toBeVisible();
@@ -248,7 +268,7 @@ describe("Timeline", () => {
     expect(screen.getByText("较早但晚到的过程说明")).toBeVisible();
   });
 
-  it("keeps tool activity after the assistant text that preceded it and shows a running ellipsis", () => {
+  it("keeps tool activity after the assistant text and shimmers its action summary", () => {
     const thread: CodexThread = {
       id: "ordered",
       title: "Ordered output",
@@ -270,14 +290,14 @@ describe("Timeline", () => {
 
     const { container } = render(<Timeline thread={thread} />);
     const agent = screen.getByText("先输出文字").closest("article");
-    const activity = screen.getByText("执行过程（1 项）").closest("details");
+    const activity = screen.getByLabelText("执行详情，1 项").closest("details");
     expect((agent?.compareDocumentPosition(activity as Node) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(activity).not.toHaveAttribute("open");
     expect(screen.getByLabelText("Codex 仍在输出")).toBeVisible();
-    expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
+    expect(container.querySelectorAll(".activity-shimmer")).toHaveLength(1);
   });
 
-  it("shows one running ellipsis when stale history contains multiple in-progress turns", () => {
+  it("shimmers only the active turn when stale history contains multiple in-progress turns", () => {
     const thread: CodexThread = {
       id: "stale-running-turns",
       title: "Only latest animates",
@@ -303,8 +323,8 @@ describe("Timeline", () => {
     const { container } = render(<Timeline thread={thread} />);
 
     expect(screen.getAllByLabelText("Codex 仍在输出")).toHaveLength(1);
-    expect(container.querySelectorAll(".typing-dot")).toHaveLength(3);
-    expect(container.querySelector('[data-turn-id="turn-2"] .typing-indicator')).toBeInTheDocument();
+    expect(container.querySelectorAll(".activity-shimmer")).toHaveLength(1);
+    expect(container.querySelector('[data-turn-id="turn-2"] .activity-shimmer')).toBeInTheDocument();
   });
 
   it("shows a running ellipsis while the active turn identity is being recovered", () => {
@@ -387,9 +407,9 @@ describe("Timeline", () => {
     };
 
     const { container } = render(<Timeline thread={thread} />);
-    expect(screen.getByText("执行过程（1 项）").closest("details")).not.toHaveAttribute("open");
-    expect(container.querySelector(".activity-group .run-completed")).toBeInTheDocument();
-    expect(container.querySelector(".activity-group .run-inProgress")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("执行详情，1 项").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("已运行命令")).toBeVisible();
+    expect(container.querySelector(".activity-group .activity-shimmer")).not.toBeInTheDocument();
   });
 
   it("only expands a running activity group after the user opens it", async () => {
@@ -411,7 +431,7 @@ describe("Timeline", () => {
       },
     };
     const { rerender } = render(<Timeline thread={thread} />);
-    const summary = screen.getByText("执行过程（1 项）");
+    const summary = screen.getByLabelText("执行详情，1 项");
     const activity = summary.closest("details");
     expect(activity).not.toHaveAttribute("open");
 
@@ -427,7 +447,7 @@ describe("Timeline", () => {
       status: "running",
     };
     rerender(<Timeline thread={updated} />);
-    expect(screen.getByText("执行过程（2 项）").closest("details")).toHaveAttribute("open");
+    expect(screen.getByLabelText("执行详情，2 项").closest("details")).toHaveAttribute("open");
   });
 
   it("collapses an earlier completed activity segment after newer assistant output", () => {
@@ -450,9 +470,9 @@ describe("Timeline", () => {
       },
     };
     const { container } = render(<Timeline thread={thread} />);
-    const activity = screen.getByText("执行过程（1 项）").closest("details");
+    const activity = screen.getByLabelText("执行详情，1 项").closest("details");
     expect(activity).not.toHaveAttribute("open");
-    expect(container.querySelector(".activity-group .run-inProgress")).toBeNull();
+    expect(container.querySelector(".activity-group .activity-shimmer")).toBeNull();
   });
 
   it("renders assistant messages as safe GitHub-flavored Markdown", () => {

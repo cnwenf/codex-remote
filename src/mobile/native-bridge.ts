@@ -19,6 +19,12 @@ export type NativeImageUploadResult = {
   data: unknown;
 };
 
+export type NativeImageUploadProgress = {
+  uploadId: string;
+  loaded: number;
+  total: number;
+};
+
 export type NotificationStatus = {
   enabled: boolean;
   runningEnabled: boolean;
@@ -61,6 +67,10 @@ export interface CodexRemoteNativePlugin {
   addListener(
     eventName: "openThread",
     listener: (target: MobileThreadTarget) => void,
+  ): Promise<{ remove(): Promise<void> }>;
+  addListener(
+    eventName: "imageUploadProgress",
+    listener: (progress: NativeImageUploadProgress) => void,
   ): Promise<{ remove(): Promise<void> }>;
   addListener(
     eventName: "updateDownloadProgress",

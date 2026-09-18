@@ -20,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/cnwenf/codex-remote/main/install.sh
 
 安装器会自动识别 `arm64` 或 `x86_64` 并下载对应 DMG、校验 SHA-256。交互中先选择“私网”或“公网 HTTPS”，再隐藏输入 Web 登录密码；私网模式列出本机 IPv4 供选择，公网模式不要求公网 IP 或端口映射。随后安装并启动 App，配置登录自启动。
 
-安装完成后，退出并重新打开一次 Codex Desktop，使它启用仅监听本机的调试端口 `127.0.0.1:9229`。这个端口不会暴露给手机。
+Remote 开启期间会自动恢复 Desktop 连接：Codex 启动或升级后，如果连续约 20 秒仍缺少调试端口，Remote 会自动重启一次 Desktop，启用仅监听本机的 `127.0.0.1:9229`。这可能中断刚启动的任务；同一进程只处理一次，已有调试参数的进程不会反复重启。主动退出 Desktop 后不会自动拉起。这个端口不会暴露给手机。
 
 私网模式最后会显示访问 URL，例如 `http://192.168.1.20:4321`。公网模式由 App 自动启动 Cloudflare Quick Tunnel，生成随机 `https://…trycloudflare.com` 地址；在菜单栏查看 URL 或显示配对二维码。登录 Cookie 默认保留 30 天，多个浏览器可以同时连接。
 
@@ -57,7 +57,7 @@ GitHub 仓库：git@github.com:cnwenf/codex-remote.git
 2. 询问我 Web 登录密码。不要把密码写入 URL、日志、Git、LaunchAgent plist 或命令行参数。
 3. 获得选择后，严格执行 README 的 curl | sh 一键安装流程，并在安装器交互中替我选择地址和输入密码。
 4. 验证 DMG 的 SHA-256、App 的 ad-hoc 签名、对应 CPU 架构、登录自启动配置和本机健康检查。
-5. 安装完成后提醒我只需退出并重新打开一次 Codex Desktop；不要自行反复重启 Desktop。
+5. 安装完成后检查 Desktop bridge 是否 Connected；Remote 会自动处理启动后缺少调试端口的情况，不要另建循环重启 Desktop 的任务。
 6. 最后告诉我完整访问 URL、我设置的登录密码，以及每项验证是否通过。任何失败都要明确说明，不要声称安装成功。
 ```
 

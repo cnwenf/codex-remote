@@ -45,6 +45,7 @@ export function ConversationViewport({
       question.context.question.sourceThreadId ?? ""].join("\u0000")
     : undefined;
   const expandedQuestionIdentity = useRef<string | undefined>(undefined);
+  const filledShortViewport = useRef(false);
   const syncVisibleAnchorRef = useRef<(viewport: HTMLDivElement) => void>(() => undefined);
 
   useEffect(() => {
@@ -68,6 +69,7 @@ export function ConversationViewport({
     if (mountedThreadId.current !== threadId) {
       mountedThreadId.current = threadId;
       followLatest.current = true;
+      filledShortViewport.current = false;
       prependAnchor.current = undefined;
       scrollToLatest(viewport);
       setVisibleAnchor(undefined);
@@ -80,7 +82,7 @@ export function ConversationViewport({
     let restoredAnchor = false;
     if (anchor) {
       const addedHeight = viewport.scrollHeight - anchor.scrollHeight;
-      if (addedHeight !== 0) {
+      if (addedHeight > 0) {
         viewport.scrollTop = anchor.scrollTop + addedHeight;
         lastScrollTop.current = viewport.scrollTop;
         prependAnchor.current = undefined;
@@ -146,10 +148,13 @@ export function ConversationViewport({
 
   function requestEarlierIfNeeded(viewport: HTMLDivElement, requireShortViewport = false, manual = false) {
     if (
-      (requireShortViewport && viewport.scrollHeight > viewport.clientHeight) ||
+      (requireShortViewport && (filledShortViewport.current || viewport.scrollHeight > viewport.clientHeight)) ||
       (history.gapRecoveryPaused && !manual) ||
       !history.hasMoreBefore || history.loading || prependAnchor.current
     ) return;
+    // A collapsed tool group may stay short across hundreds of history pages.
+    // Fill once; subsequent history loading follows explicit reading intent.
+    if (requireShortViewport) filledShortViewport.current = true;
     prependAnchor.current = {
       scrollHeight: viewport.scrollHeight,
       scrollTop: viewport.scrollTop,
@@ -167,13 +172,14 @@ export function ConversationViewport({
   function handleScroll(event: UIEvent<HTMLDivElement>) {
     const viewport = event.currentTarget;
     const distanceFromBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
+    const scrolledUp = viewport.scrollTop < lastScrollTop.current;
     // Image layout/scroll anchoring can dispatch scroll before ResizeObserver.
     // A growing bottom gap alone does not mean the reader scrolled upward.
     if (distanceFromBottom <= BOTTOM_FOLLOW_THRESHOLD) followLatest.current = true;
     else if (viewport.scrollTop < lastScrollTop.current) followLatest.current = false;
     lastScrollTop.current = viewport.scrollTop;
     syncVisibleAnchor(viewport);
-    if (viewport.scrollTop <= TOP_LOAD_THRESHOLD) requestEarlierIfNeeded(viewport);
+    if (scrolledUp && viewport.scrollTop <= TOP_LOAD_THRESHOLD) requestEarlierIfNeeded(viewport);
   }
 
   return (
@@ -237,7 +243,9 @@ export function ConversationViewport({
               if (viewportRef.current) requestEarlierIfNeeded(viewportRef.current, false, true);
             }}>继续加载遗漏内容</button>
           : history.hasMoreBefore
-            ? "继续向上滚动可加载更早内容"
+            ? <button type="button" className="secondary-button" onClick={() => {
+              if (viewportRef.current) requestEarlierIfNeeded(viewportRef.current, false, true);
+            }}>加载更早内容</button>
             : "已显示最早内容"}
       </div> : null}
       <div ref={contentRef}>{children}</div>

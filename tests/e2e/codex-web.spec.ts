@@ -5,6 +5,45 @@ const PNG_1X1 = Buffer.from(
   "base64",
 );
 
+test("shows grouped action text with one shimmer and respects reduced motion", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("textbox", { name: "Instruction" }).fill("Inspect live activity presentation");
+  await page.getByRole("button", { name: "Send" }).click();
+  const group = page.getByLabel("执行详情，3 项");
+  await expect(group).toContainText("正在运行命令 · pnpm test");
+  await expect(page.locator(".activity-shimmer")).toHaveCount(1);
+  await expect(page.locator(".typing-indicator")).toHaveCount(0);
+  await group.click();
+  await expect(page.getByText("cat README.md", { exact: true })).toBeVisible();
+  await group.click();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(page.locator(".activity-shimmer")).toHaveCSS("animation-name", "none");
+  await page.getByRole("button", { name: "Stop" }).click();
+  await expect(page.locator(".activity-shimmer")).toHaveCount(0);
+  await expect(group).toContainText("已停止");
+});
+
+test("keeps inline and fenced code readable in a shimmering stage description", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  await page.getByRole("textbox", { name: "Instruction" }).fill("Inspect live commentary presentation");
+  await page.getByRole("button", { name: "Send" }).click();
+  const code = page.locator(".message-commentary.activity-shimmer code");
+  await expect(code).toHaveCount(2);
+  for (const element of await code.all()) {
+    await expect(element).toBeVisible();
+    expect(await element.evaluate((node) => getComputedStyle(node).color)).not.toBe("rgba(0, 0, 0, 0)");
+  }
+  await page.getByRole("button", { name: "Stop" }).click();
+});
+
 test("confirms a one-time Desktop restart before leaving read-only mode", async ({ page }) => {
   test.skip(process.env.CODEX_REMOTE_E2E_DESKTOP_MIRROR !== "1", "read-only Desktop fixture only");
   await page.goto("/");
@@ -191,7 +230,7 @@ test("keeps the completed final reply above expanded mobile controls", async ({ 
 
   await expect(page.locator(".task-status")).toHaveText("空闲");
   const completedTurn = page.locator('li.conversation-turn[data-turn-id="fixture-live-turn"]').last();
-  await expect(completedTurn.getByText("执行过程（1 项）")).toBeVisible();
+  await expect(completedTurn.getByLabel("执行详情，1 项")).toBeVisible();
   await expect(completedTurn.locator(":scope > .message-user")).toContainText("Finish a compact mobile turn");
   await expect(page.locator(".pinned-user-question")).toHaveCount(0);
   await expect(page.getByText(/请持续检查这个很长的移动端任务/)).toHaveCount(0);
@@ -226,7 +265,7 @@ test("keeps the semantic final reply visible after many tools and late commentar
   const finalReply = completedTurn.locator(":scope > .message-agent");
   await expect(finalReply).toHaveCount(3);
   await expect(completedTurn.getByText("Semantic final reply remains visible")).toBeVisible();
-  await expect(completedTurn.getByText("执行过程（8 项）")).toBeVisible();
+  await expect(completedTurn.getByLabel("执行详情，8 项")).toBeVisible();
   await expect(completedTurn.getByText("Older commentary delivered after completion")).toBeVisible();
 });
 

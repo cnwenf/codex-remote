@@ -5,8 +5,18 @@ import { CodexRemoteNative } from "./native-bridge";
 const IMAGE_UPLOAD_CHUNK_BYTES = 256 * 1024;
 const IMAGE_UPLOAD_TIMEOUT_MS = 60_000;
 
-export async function uploadNativeImage(baseUrl: string, token: string, file: File) {
+export async function uploadNativeImage(
+  baseUrl: string,
+  token: string,
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+) {
   let uploadId: string | undefined;
+  let settled = false;
+  let progressListener: { remove(): Promise<void> } | undefined;
+  const removeProgressListener = async (listener: { remove(): Promise<void> }) => {
+    try { await listener.remove(); } catch { /* Progress must not affect sending. */ }
+  };
   let phase = "准备原生上传";
   let cancellationRequested = false;
   const controller = new AbortController();
@@ -31,6 +41,19 @@ export async function uploadNativeImage(baseUrl: string, token: string, file: Fi
       const started = await CodexRemoteNative.startImageUpload();
       uploadId = started.uploadId;
       if (signal.aborted) throw signal.reason;
+      if (onProgress) {
+        // Do not let missing/stalled event support block the existing upload flow.
+        void (async () => {
+          const listener = await CodexRemoteNative.addListener("imageUploadProgress", (event) => {
+            if (settled || signal.aborted || event.uploadId !== uploadId) return;
+            const { loaded, total } = event;
+            if (!Number.isFinite(loaded) || !Number.isFinite(total) || loaded < 0 || total <= 0 || loaded > total) return;
+            try { onProgress(loaded, total); } catch { /* Ignore a detached view. */ }
+          });
+          if (settled) void removeProgressListener(listener);
+          else progressListener = listener;
+        })().catch(() => undefined);
+      }
       for (let offset = 0; offset < file.size; offset += IMAGE_UPLOAD_CHUNK_BYTES) {
         phase = "读取图片";
         const data = await blobAsBase64(file.slice(offset, offset + IMAGE_UPLOAD_CHUNK_BYTES), signal);
@@ -61,6 +84,8 @@ export async function uploadNativeImage(baseUrl: string, token: string, file: Fi
     cancel();
     throw cause;
   } finally {
+    settled = true;
+    if (progressListener) void removeProgressListener(progressListener);
     if (timeout) clearTimeout(timeout);
   }
 }

@@ -7,6 +7,7 @@ import type { CodexItem, CodexThread, CodexTurn } from "../../protocol/thread-st
 import { messageKind } from "../../protocol/message-content";
 import { isToolActivity, MAX_TOOL_OUTPUT_IMAGES } from "../../protocol/tool-content";
 import { remarkAssistantPresentation } from "./assistant-presentation";
+import { activitySummary } from "./activity-summary";
 
 type ImageRequest = { baseUrl: string; token: string };
 type ImagePreview = { source: string; alt: string };
@@ -107,6 +108,10 @@ function TurnView({
 }) {
   const items = turn.itemOrder.map((id) => turn.items[id]).filter(Boolean);
   const segments = segmentItems(items);
+  const lastSegment = segments.at(-1);
+  const liveActivity = showTyping && turn.status === "inProgress" && lastSegment?.kind === "activity" &&
+    lastSegment.items.some((item) => item.status === undefined || item.status === "running" || item.status === "inProgress");
+  const liveCommentary = showTyping && turn.status === "inProgress" && lastSegment?.kind === "agent" && lastSegment.item.phase === "commentary";
 
   return (
     <li className="conversation-turn" data-turn-id={turn.id}>
@@ -114,18 +119,18 @@ function TurnView({
         if (segment.kind === "activity") {
           const anchorItem = indexedActivityAnchor(segment.items);
           const hasLaterOutput = segments.slice(segmentIndex + 1).some((candidate) => candidate.kind !== "activity");
-          const explicitlyRunning = segment.items.some((item) => item.status === "running" || item.status === "inProgress");
-          const activityRunning = !hasLaterOutput && turn.status === "inProgress" && (
-            explicitlyRunning || segment.items.some((item) => item.status === undefined)
-          );
+          const activityRunning = Boolean(liveActivity && !hasLaterOutput);
           return (
             <Fragment key={segment.key}>
               <details className="activity-group"
                 data-question-anchor={anchorItem ? "true" : undefined}
                 data-turn-id={turn.id} data-anchor-item-id={anchorItem?.id}>
-                <summary>
-                  <span className={`run-indicator run-${activityRunning ? "inProgress" : "completed"}`} aria-hidden="true" />
-                  <span>执行过程（{segment.items.length} 项）</span>
+                <summary aria-label={`执行详情，${segment.items.length} 项`}>
+                  <span className="activity-chevron" aria-hidden="true">›</span>
+                  <span className={`activity-summary${activityRunning ? " activity-shimmer" : ""}`}
+                    role={activityRunning ? "status" : undefined} aria-label={activityRunning ? "Codex 仍在输出" : undefined}>
+                    {activitySummary(segment.items, activityRunning, turn.status)}
+                  </span>
                   <span className="activity-duration">{formatDuration(turn.durationMs)}</span>
                 </summary>
                 <ol className="activity-list">
@@ -146,6 +151,7 @@ function TurnView({
             key={segment.item.id}
             segment={segment}
             turnId={turn.id}
+            shimmer={Boolean(liveCommentary && segment === lastSegment)}
             imageRequest={imageRequest}
             onPreviewImage={onPreviewImage}
             onOpenExternalUrl={onOpenExternalUrl}
@@ -163,7 +169,7 @@ function TurnView({
 
       {turn.status === "interrupted" ? <p className="turn-stopped">本轮已停止</p> : null}
 
-      {showTyping ? (
+      {showTyping && !liveActivity && !liveCommentary ? (
         <TypingIndicator />
       ) : null}
     </li>
@@ -183,12 +189,14 @@ function TypingIndicator() {
 function MessageSegment({
   segment,
   turnId,
+  shimmer = false,
   imageRequest,
   onPreviewImage,
   onOpenExternalUrl,
 }: {
   segment: Extract<TurnSegment, { kind: "user" | "agent" | "delegated" }>;
   turnId: string;
+  shimmer?: boolean;
   imageRequest?: ImageRequest;
   onPreviewImage: (preview: ImagePreview) => void;
   onOpenExternalUrl?: (url: string) => void;
@@ -224,7 +232,8 @@ function MessageSegment({
     );
   }
   return (
-    <article className="message message-agent" data-question-anchor="true"
+    <article className={`message message-agent${item.phase === "commentary" ? " message-commentary" : ""}${shimmer ? " activity-shimmer" : ""}`}
+      role={shimmer ? "status" : undefined} aria-label={shimmer ? "Codex 仍在输出" : undefined} data-question-anchor="true"
       data-turn-id={turnId} data-anchor-item-id={item.id}>
       <span className="message-author">Codex</span>
       <MarkdownContent text={item.text || "等待输出…"} assistant onOpenExternalUrl={onOpenExternalUrl}

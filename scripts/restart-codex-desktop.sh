@@ -8,9 +8,10 @@ CDP_ENDPOINT="http://127.0.0.1:$CDP_PORT/json/list"
 MODE=${1:---check}
 CURL_BIN=${CODEX_REMOTE_CURL_BIN:-/usr/bin/curl}
 OPEN_BIN=${CODEX_REMOTE_OPEN_BIN:-/usr/bin/open}
+PS_BIN=${CODEX_REMOTE_PS_BIN:-/bin/ps}
 
-[[ "$MODE" == "--check" || "$MODE" == "--execute" ]] || {
-  print -u2 "Usage: restart-codex-desktop.sh [--check|--execute]"
+[[ "$MODE" == "--check" || "$MODE" == "--execute" || "$MODE" == "--recover" ]] || {
+  print -u2 "Usage: restart-codex-desktop.sh [--check|--execute|--recover <pid>]"
   exit 2
 }
 [[ -x "$DESKTOP_BIN" ]] || { print -u2 "Codex Desktop executable is missing"; exit 2; }
@@ -24,7 +25,7 @@ bridge_ready() {
 }
 
 desktop_pids() {
-  /bin/ps -axww -o uid=,pid=,comm= | /usr/bin/awk -v owner="$EUID" -v target="$DESKTOP_BIN" '
+  "$PS_BIN" -axww -o uid=,pid=,comm= | /usr/bin/awk -v owner="$EUID" -v target="$DESKTOP_BIN" '
     {
       uid = $1; pid = $2
       sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+/, "")
@@ -41,14 +42,29 @@ if bridge_ready; then
   print "Desktop bridge is ready"
   exit 0
 fi
-[[ "$MODE" == "--execute" ]] || { print -u2 "Desktop bridge is unavailable"; exit 1; }
+[[ "$MODE" != "--check" ]] || { print -u2 "Desktop bridge is unavailable"; exit 1; }
 
+if [[ "$MODE" == "--recover" ]]; then
+  RECOVERY_PID=${2:-}
+  [[ "$RECOVERY_PID" == <-> ]] || { print -u2 "Recovery requires a Desktop PID"; exit 2; }
+  # Recheck the exact observed process after the native app's startup grace period.
+  # Never reopen an intentionally closed app or restart the replacement process.
+  [[ "$(desktop_pids)" == "$RECOVERY_PID" ]] || exit 0
+  DESKTOP_ARGUMENTS=$("$PS_BIN" -ww -p "$RECOVERY_PID" -o args=)
+  # A debug-enabled replacement that fails to start its bridge needs diagnosis,
+  # not another automatic restart. This also prevents restart loops after updates.
+  [[ "$DESKTOP_ARGUMENTS" != *" --remote-debugging-port="* &&
+     "$DESKTOP_ARGUMENTS" != *" --remote-debugging-port "* ]] || exit 0
+fi
+
+stopped_target=false
 if desktop_running; then
-  # The remote user has already confirmed. A normal quit can open Desktop's
+  # The user requested a restart or automatic recovery. A normal quit can open Desktop's
   # own confirmation dialog, which cannot be answered from the phone.
   # Match only this user's exact main executable, including paths with spaces.
   for pid in ${(f)"$(desktop_pids)"}; do
-    /bin/kill -KILL "$pid" 2>/dev/null || true
+    [[ "$MODE" != "--recover" || "$pid" == "$RECOVERY_PID" ]] || continue
+    if /bin/kill -KILL "$pid" 2>/dev/null; then stopped_target=true; fi
   done
   for _ in {1..80}; do
     desktop_running || break
@@ -61,6 +77,8 @@ if desktop_running; then
     exit 1
   fi
 fi
+
+[[ "$MODE" != "--recover" || "$stopped_target" == true ]] || exit 0
 
 "$OPEN_BIN" -na "$APP_PATH" --args \
   --remote-debugging-address=127.0.0.1 \

@@ -264,7 +264,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .pinned-question-status { cursor: default; }
 .pinned-question-more { justify-self: end; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: var(--floating-surface); box-shadow: var(--shadow); font: inherit; font-size: 0.76rem; font-weight: 700; cursor: pointer; }
 .pinned-question-more-error { justify-self: end; padding: 6px 10px; border-radius: 10px; color: var(--danger); background: var(--floating-surface); box-shadow: var(--shadow); font-size: 0.72rem; }
-.history-sentinel { width: min(100%, 820px); min-height: 24px; margin: 0 auto 12px; color: var(--ink-muted); font-size: 0.68rem; text-align: center; }
+.history-sentinel { width: min(100%, 820px); min-height: 44px; display: grid; place-items: center; margin: 0 auto 12px; color: var(--ink-muted); font-size: 0.68rem; text-align: center; }
 .timeline { width: min(100%, 820px); min-width: 0; max-width: 100%; margin: 0 auto; padding: 0; list-style: none; }
 .todo-list-dock { position: relative; z-index: 7; flex: 0 0 auto; width: min(calc(100% - 36px), 780px); height: 38px; margin: -8px auto 4px; display: grid; place-items: center; }
 .todo-list-trigger { min-height: 34px; display: inline-flex; align-items: center; gap: 8px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-muted); background: var(--surface); box-shadow: var(--shadow); font-size: 0.72rem; font-weight: 680; cursor: pointer; }
@@ -331,6 +331,25 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   list-style: none;
 }
 .activity-group > summary::-webkit-details-marker { display: none; }
+.activity-chevron { font-size: 1rem; font-weight: 400; transition: transform 160ms ease; }
+.activity-group[open] > summary .activity-chevron { transform: rotate(90deg); }
+.activity-summary { min-width: 0; width: fit-content; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 450; }
+.message-commentary .markdown-body { color: var(--ink-muted); }
+.activity-shimmer { color: var(--ink-muted); }
+.message-commentary.activity-shimmer .markdown-body code { color: var(--ink); }
+.activity-summary.activity-shimmer, .message-commentary.activity-shimmer .markdown-body {
+  background: linear-gradient(100deg, var(--ink-muted) 35%, var(--ink) 48%, var(--ink-muted) 61%);
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: activity-text-sweep 3s linear infinite;
+}
+@keyframes activity-text-sweep { 0%, 25% { background-position: 100% 0; } 65%, 100% { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .activity-summary.activity-shimmer, .message-commentary.activity-shimmer .markdown-body { animation: none; background: none; color: var(--ink-muted); }
+  .activity-chevron { transition: none; }
+}
 .activity-duration { font-weight: 520; }
 .activity-list { display: grid; gap: 1px; margin: 2px 0 0 6px; padding: 0 0 0 14px; border-left: 1px solid var(--line); list-style: none; }
 .activity-list li { min-height: 44px; display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 8px 6px; }
@@ -375,10 +394,21 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .composer-collapsed .composer-actions { min-width: 48px; }
 .composer-expanded textarea { min-height: 86px; resize: vertical; }
 .composer-images { display: flex; gap: 7px; overflow-x: auto; padding: 0 5px 8px; }
-.composer-image { position: relative; display: grid; grid-template-columns: 34px minmax(50px, 110px) 24px; align-items: center; gap: 6px; min-width: 0; padding: 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-muted); }
-.composer-image img { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; }
-.composer-image span { overflow: hidden; color: var(--ink-muted); font-size: 0.66rem; text-overflow: ellipsis; white-space: nowrap; }
-.composer-image button { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 999px; color: var(--ink-muted); background: transparent; font-size: 1rem; }
+.composer-image { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 22px; align-items: center; gap: 4px; flex: 0 0 100px; min-width: 0; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); }
+.composer-image-preview { position: relative; grid-column: 1 / -1; height: 80px; overflow: hidden; border-radius: 6px; }
+.composer-image img { width: 100%; height: 100%; object-fit: cover; }
+.composer-image > span { overflow: hidden; color: var(--ink-muted); font-size: 0.66rem; text-overflow: ellipsis; white-space: nowrap; }
+.composer-image button { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 999px; color: var(--ink-muted); background: transparent; font-size: 1rem; }
+.image-upload-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: #fff; background: #0008; }
+.image-upload-ring { position: relative; width: 44px; height: 44px; }
+.image-upload-ring svg { display: block; width: 100%; height: 100%; transform: rotate(-90deg); }
+.image-upload-ring circle { fill: none; stroke-width: 3; }
+.image-upload-track { stroke: #ffffff40; }
+.image-upload-fill { stroke: currentColor; stroke-linecap: round; transition: stroke-dashoffset 100ms linear; }
+.image-upload-percent { position: absolute; inset: 0; display: grid; place-items: center; font-size: 10px; font-variant-numeric: tabular-nums; }
+.image-upload-label { font-size: 10px; }
+.image-upload-error { color: #ffcccc; }
+@media (prefers-reduced-motion: reduce) { .image-upload-fill { transition: none; } }
 .composer-image-hint { margin: -3px 8px 7px; color: var(--ink-muted); font-size: 0.66rem; line-height: 1.35; }
 .composer-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 4px 7px; overflow: visible; }
 .composer-settings::-webkit-scrollbar { display: none; }

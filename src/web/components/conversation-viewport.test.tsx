@@ -452,6 +452,38 @@ describe("ConversationViewport", () => {
     expect(viewport.scrollTop).toBe(450);
   });
 
+  it("does not keep paging a short collapsed timeline on every render", () => {
+    scrollHeight = 200;
+    clientHeight = 300;
+    const onLoadEarlier = vi.fn().mockResolvedValue(undefined);
+    const view = (text: string) => <ConversationViewport threadId="short-tools"
+      history={{ hasMoreBefore: true, loading: false }} onLoadEarlier={onLoadEarlier}>
+      <div>{text}</div>
+    </ConversationViewport>;
+    const { rerender } = render(view("Collapsed tool group"));
+    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
+    for (let page = 0; page < 5; page++) rerender(view(`Collapsed tool group, page ${page}`));
+    fireEvent.scroll(screen.getByTestId("timeline-scroll"));
+    expect(onLoadEarlier).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "加载更早内容" }));
+    expect(onLoadEarlier).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains its prepend anchor if layout shrinks while older history is loading", () => {
+    const onLoadEarlier = vi.fn().mockResolvedValue(undefined);
+    const view = (loading: boolean) => <ConversationViewport threadId="shrink"
+      history={{ hasMoreBefore: true, loading }} onLoadEarlier={onLoadEarlier}><div>Content</div></ConversationViewport>;
+    const { rerender } = render(view(false));
+    const viewport = screen.getByTestId("timeline-scroll");
+    viewport.scrollTop = 50;
+    fireEvent.scroll(viewport);
+    scrollHeight = 980;
+    rerender(view(true));
+    scrollHeight = 1400;
+    rerender(view(false));
+    expect(viewport.scrollTop).toBe(450);
+  });
+
   it("requires an explicit action when automatic gap recovery is paused", () => {
     scrollHeight = 200;
     clientHeight = 300;

@@ -22,7 +22,7 @@ export type NativeRemoteSession = {
   requestedThreadId?: string;
   language?: MobileLanguage;
   messageSendMode?: MobileMessageSendMode;
-  imageUploader?: (file: File) => Promise<UploadedImage>;
+  imageUploader?: (file: File, onProgress?: (loaded: number, total: number) => void) => Promise<UploadedImage>;
   uploadImagesViaSocket?: boolean;
   connections?: Array<{
     id: string;
@@ -469,7 +469,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 />
                 <Composer
                 draftKey={codex.selectedThread.id}
-                onSend={(text, images) => codex.sendInstruction(text, images, remote?.messageSendMode)}
+                onSend={(text, images, onProgress) => codex.sendInstruction(text, images, remote?.messageSendMode, onProgress)}
                 running={codex.selectedThread.status === "running"}
                 runningMode={codex.selectedThread.desktopMirror
                   ? remote?.messageSendMode ?? "queue"

@@ -21,7 +21,7 @@ import {
   permissionStateFromProtocol,
   type PermissionModeVisibility,
 } from "../../protocol/permissions";
-import { CodexSocket, uploadImage, type RemoteApiOptions } from "../api/socket";
+import { CodexSocket, uploadImage, type RemoteApiOptions, type ImageUploadObserver } from "../api/socket";
 import { isQuestionContext, type QuestionContextRequest } from "../../protocol/question-context";
 
 export type ConnectionState = "disconnected" | "connecting" | "reconnecting" | "ready";
@@ -810,7 +810,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   );
 
   const sendInstruction = useCallback(
-    async (text: string, images: File[] = [], runningMessageMode: "queue" | "steer" = "queue") => {
+    async (text: string, images: File[] = [], runningMessageMode: "queue" | "steer" = "queue", onImageProgress?: ImageUploadObserver) => {
       if (!selectedThreadId) throw new Error("Select a task first");
       if (threadLoadError?.threadId === selectedThreadId) {
         throw new Error(threadLoadError.message);
@@ -821,11 +821,12 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       }
       // 发送链路按用户要求锁定 v0.5.35 行为；不要为修复图片预览而改变上传协议或顺序。
       const uploaded = images.length > 0
-        ? await Promise.all(images.map((image) => uploadImage(image, fetch, {
+        ? await Promise.all(images.map((image, index) => uploadImage(image, fetch, {
           ...remoteApi,
-          ...(remoteApi.uploadImagesViaSocket ? { imageUploader: (file: File) => {
+          ...(onImageProgress ? { onImageUploadProgress: (progress) => onImageProgress(index, progress) } : {}),
+          ...(remoteApi.uploadImagesViaSocket ? { imageUploader: (file: File, onProgress?: (loaded: number, total: number) => void) => {
             if (!mounted.current) throw new Error("连接页面已关闭，请重试");
-            return socket.uploadImage(file);
+            return socket.uploadImage(file, onProgress);
           } } : {}),
         })))
         : [];

@@ -509,7 +509,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Steer" })).toBeVisible();
     await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "Guide now");
     await userEvent.click(screen.getByRole("button", { name: "Steer" }));
-    expect(value.sendInstruction).toHaveBeenCalledWith("Guide now", [], "steer");
+    expect(value.sendInstruction).toHaveBeenCalledWith("Guide now", [], "steer", undefined);
   });
 
   it("wires the visible assistant identity to the dedicated question RPC", async () => {

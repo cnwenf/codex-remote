@@ -187,6 +187,21 @@ lines.on("line", (line) => {
         },
       });
     }
+    if (text === "Inspect live commentary presentation") {
+      send({ method: "item/started", params: { threadId: "fixture-thread", turnId: "fixture-live-turn",
+        item: { id: "commentary-code", type: "agentMessage", phase: "commentary",
+          text: "正在检查 `reconnect()`，下一步验证：\n\n```sh\npnpm test\n```" } } });
+      return;
+    }
+    if (text === "Inspect live activity presentation") {
+      for (const item of [
+        { id: "activity-stage", type: "agentMessage", phase: "commentary", text: "正在检查连接恢复逻辑，接下来运行回归测试。" },
+        { id: "activity-read", type: "commandExecution", command: "cat README.md", status: "completed" },
+        { id: "activity-search", type: "commandExecution", command: "rg reconnect src/gateway", status: "completed" },
+        { id: "activity-test", type: "commandExecution", command: "pnpm test", status: "inProgress" },
+      ]) send({ method: "item/started", params: { threadId: "fixture-thread", turnId: "fixture-live-turn", item } });
+      return;
+    }
     if (text === "Finish a compact mobile turn") {
       send({
         method: "item/started",

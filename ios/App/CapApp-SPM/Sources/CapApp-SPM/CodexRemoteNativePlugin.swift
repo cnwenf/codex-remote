@@ -206,7 +206,12 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 45
         configuration.waitsForConnectivity = false
-        let session = URLSession(configuration: configuration, delegate: NoRedirectSessionDelegate(), delegateQueue: nil)
+        let delegate = NoRedirectSessionDelegate { [weak self] loaded, total in
+            self?.notifyListeners("imageUploadProgress", data: [
+                "uploadId": uploadId, "loaded": loaded, "total": total,
+            ])
+        }
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         let task = session.uploadTask(with: request, fromFile: file) { [weak self] data, response, error in
             defer {
                 try? FileManager.default.removeItem(at: file)
@@ -277,6 +282,23 @@ public final class CodexRemoteNativePlugin: CAPPlugin, CAPBridgedPlugin {
 }
 
 private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate {
+    private let onProgress: @Sendable (Int64, Int64) -> Void
+
+    init(onProgress: @escaping @Sendable (Int64, Int64) -> Void) {
+        self.onProgress = onProgress
+        super.init()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didSendBodyData bytesSent: Int64,
+        totalBytesSent: Int64,
+        totalBytesExpectedToSend: Int64
+    ) {
+        onProgress(totalBytesSent, totalBytesExpectedToSend)
+    }
+
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,

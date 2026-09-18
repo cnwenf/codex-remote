@@ -18,7 +18,7 @@ describe("tool result disclosure", () => {
       { id: "command", type: "commandExecution", status, toolInput: '["/bin/zsh","-lc","pwd"]', toolOutput },
     ] }] } }).threads.t;
     const { container } = render(<Timeline thread={thread} />);
-    await userEvent.click(screen.getByText("执行过程（1 项）"));
+    await userEvent.click(screen.getByLabelText("执行详情，1 项"));
     expect(container.querySelector(".activity-copy > span")).toHaveTextContent(summary);
     await userEvent.click(screen.getByText("查看输入与结果"));
     const output = container.querySelectorAll(".tool-details > pre")[1];
@@ -55,7 +55,7 @@ describe("tool result disclosure", () => {
         toolOutputImageIds: [imageId], toolOutputImagesIncomplete: true },
     ] }] } }).threads.t;
     const { rerender } = render(<Timeline thread={thread} imageRequest={{ baseUrl: "https://gateway.test", token: "first-token" }} />);
-    await userEvent.click(screen.getByText("执行过程（1 项）"));
+    await userEvent.click(screen.getByLabelText("执行详情，1 项"));
     await userEvent.click(screen.getByText("查看输入与结果"));
     expect(await screen.findByRole("img", { name: "工具返回图片 1" })).toHaveAttribute("src", "blob:tool-1");
     expect(fetcher).toHaveBeenCalledExactlyOnceWith(`https://gateway.test/api/images/${imageId}`, { headers: { authorization: "Bearer first-token" } });
@@ -99,7 +99,7 @@ describe("tool result disclosure", () => {
       { id: "c", type: "commandExecution", command: "pnpm test", aggregatedOutput: "<b>result</b>\n" + "x".repeat(17000) },
     ] }] } });
     render(<Timeline thread={state.threads.t} />);
-    await userEvent.click(screen.getByText("执行过程（1 项）"));
+    await userEvent.click(screen.getByLabelText("执行详情，1 项"));
     await userEvent.click(screen.getByText("查看输入与结果"));
     expect(screen.getByText("输入")).toBeVisible();
     expect(screen.getByText("结果")).toBeVisible();
@@ -112,7 +112,7 @@ describe("tool result disclosure", () => {
       { id: "c", type: "commandExecution", command: "pwd", status: "completed" },
     ] }] } });
     render(<Timeline thread={state.threads.t} />);
-    await userEvent.click(screen.getByText("执行过程（1 项）"));
+    await userEvent.click(screen.getByLabelText("执行详情，1 项"));
     await userEvent.click(screen.getByText("查看输入与结果"));
     expect(screen.getByText("未收到结果正文")).toBeVisible();
   });

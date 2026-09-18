@@ -5,6 +5,7 @@ class FakeBrowserSocket implements BrowserSocket {
   readonly OPEN = 1;
   readyState = this.OPEN;
   sent: string[] = [];
+  bufferedAmount = 0;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -18,6 +19,7 @@ class FakeBrowserSocket implements BrowserSocket {
 
   send(data: string) {
     this.sent.push(data);
+    this.bufferedAmount += new TextEncoder().encode(data).length;
   }
 
   close() {
@@ -60,6 +62,62 @@ describe("CodexSocket", () => {
     } } });
     await expect(result).resolves.toMatchObject({ id: "image-1", size: image.size });
     expect(http).not.toHaveBeenCalled();
+    socket.disconnect();
+  });
+
+  it("tracks each image's queued wire bytes independently and waits for server confirmation", async () => {
+    const fake = new FakeBrowserSocket(false);
+    const socket = new CodexSocket(() => fake);
+    const connecting = socket.connect("secret", "ws://127.0.0.1/rpc");
+    fake.serverSend({ type: "session", state: "ready", imageUpload: true });
+    await connecting;
+    const first = vi.fn();
+    const second = vi.fn();
+    const a = socket.uploadImage(pngFile("one.png", 10, 10), first);
+    await vi.waitFor(() => expect(fake.sent).toHaveLength(1));
+    const firstBytes = new TextEncoder().encode(fake.sent[0]).length;
+    const b = socket.uploadImage(pngFile("two.png", 10, 10), second);
+    await vi.waitFor(() => expect(fake.sent).toHaveLength(2));
+    const secondBytes = new TextEncoder().encode(fake.sent[1]).length;
+    socket.notify("unrelated", { text: "not part of either image" });
+    const laterBytes = new TextEncoder().encode(fake.sent[2]).length;
+    fake.bufferedAmount = Math.ceil(firstBytes / 2) + secondBytes + laterBytes;
+    await vi.waitFor(() => expect(first).toHaveBeenLastCalledWith(Math.floor(firstBytes / 2), firstBytes));
+    expect(second).toHaveBeenLastCalledWith(0, secondBytes);
+    fake.bufferedAmount = Math.ceil(secondBytes / 2) + laterBytes;
+    await vi.waitFor(() => expect(second).toHaveBeenLastCalledWith(Math.floor(secondBytes / 2), secondBytes));
+    expect(first).toHaveBeenLastCalledWith(firstBytes, firstBytes);
+    // Still pending despite all first-frame bytes leaving the local send queue.
+    let confirmed = false;
+    void a.then(() => { confirmed = true; });
+    expect(confirmed).toBe(false);
+    for (const wire of fake.sent.slice(0, 2)) {
+      const request = JSON.parse(wire).payload;
+      fake.serverSend({ type: "rpc", payload: { id: request.id, result: {
+        id: String(request.id), name: request.params.name, mimeType: "image/png", size: 24,
+      } } });
+    }
+    await Promise.all([a, b]);
+    const count = first.mock.calls.length;
+    fake.bufferedAmount = 0;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(first).toHaveBeenCalledTimes(count);
+    socket.disconnect();
+  });
+
+  it("does not let a progress observer break the protected websocket upload", async () => {
+    const fake = new FakeBrowserSocket(false);
+    const socket = new CodexSocket(() => fake);
+    const connecting = socket.connect("secret", "ws://127.0.0.1/rpc");
+    fake.serverSend({ type: "session", state: "ready", imageUpload: true });
+    await connecting;
+    const result = socket.uploadImage(pngFile("one.png", 10, 10), () => { throw new Error("UI gone"); });
+    await vi.waitFor(() => expect(fake.sent).toHaveLength(1));
+    const { id } = JSON.parse(fake.sent[0]).payload;
+    fake.serverSend({ type: "rpc", payload: { id, result: {
+      id: "one", name: "one.png", mimeType: "image/png", size: 24,
+    } } });
+    await expect(result).resolves.toMatchObject({ id: "one" });
     socket.disconnect();
   });
 
@@ -162,6 +220,85 @@ describe("CodexSocket", () => {
     await expect(createBrowserSession("wrong", async () =>
       new Response(null, { status: 401 })
     )).rejects.toThrow("codex-session-login-failed");
+  });
+
+  it("maps real byte progress to a partial ring and reserves 100 for a successful response", async () => {
+    let bytes!: (loaded: number, total: number) => void;
+    let finish!: (value: { id: string; name: string; mimeType: string; size: number }) => void;
+    const progress = vi.fn();
+    const result = uploadImage(pngFile("one.png", 10, 10), fetch, {
+      onImageUploadProgress: progress,
+      imageUploader: (_file, observer) => {
+        bytes = observer!;
+        return new Promise((resolve) => { finish = resolve; });
+      },
+    });
+    expect(progress).toHaveBeenLastCalledWith({ phase: "preparing", percent: 0 });
+    await vi.waitFor(() => expect(bytes).toBeDefined());
+    bytes(40, 100);
+    expect(progress).toHaveBeenLastCalledWith({ phase: "uploading", percent: 40 });
+    bytes(25, 100); // No regressions if a native progress event arrives out of order.
+    expect(progress).toHaveBeenLastCalledWith({ phase: "uploading", percent: 40 });
+    bytes(100, 100);
+    expect(progress).toHaveBeenLastCalledWith({ phase: "confirming", percent: 99 });
+    finish({ id: "one", name: "one.png", mimeType: "image/png", size: 24 });
+    await result;
+    expect(progress).toHaveBeenLastCalledWith({ phase: "complete", percent: 100 });
+    const count = progress.mock.calls.length;
+    bytes(80, 100);
+    expect(progress).toHaveBeenCalledTimes(count);
+  });
+
+  it("retains actual partial progress on failure, never falsely reports 100", async () => {
+    const progress = vi.fn();
+    const result = uploadImage(pngFile("one.png", 10, 10), fetch, {
+      onImageUploadProgress: progress,
+      imageUploader: async (_file, observer) => {
+        observer?.(62, 100);
+        throw new Error("offline");
+      },
+    });
+    await expect(result).rejects.toThrow("offline");
+    expect(progress).toHaveBeenLastCalledWith({ phase: "error", percent: 62 });
+    expect(progress.mock.calls.some(([value]) => value.percent === 100)).toBe(false);
+  });
+
+  it.each(["success", "unauthorized", "timeout", "network", "abort"])("observes HTTP image upload bytes without changing body or authentication: %s", async (outcome) => {
+    const xhr = {
+      open: vi.fn(), setRequestHeader: vi.fn(), send: vi.fn(),
+      withCredentials: false, timeout: 0, responseType: "", status: 201,
+      response: { id: "one", name: "one.png", mimeType: "image/png", size: 24 },
+      upload: { onprogress: undefined as unknown as (event: { loaded: number; total: number; lengthComputable: boolean }) => void },
+      onload: () => {}, onerror: () => {}, ontimeout: () => {}, onabort: () => {},
+    };
+    vi.stubGlobal("XMLHttpRequest", function () { return xhr; });
+    const progress = vi.fn();
+    const image = pngFile("one.png", 10, 10);
+    const noFetch = vi.fn();
+    const result = uploadImage(image, noFetch, { baseUrl: "https://remote.test", token: "test-token", onImageUploadProgress: progress });
+    const settled = result.catch((error: Error) => error);
+    await vi.waitFor(() => expect(xhr.send).toHaveBeenCalled());
+    expect(xhr.open).toHaveBeenCalledWith("POST", "https://remote.test/api/images");
+    expect(xhr.send).toHaveBeenCalledWith(image);
+    expect(xhr.setRequestHeader).toHaveBeenCalledWith("authorization", "Bearer test-token");
+    expect(xhr.withCredentials).toBe(false);
+    expect(noFetch).not.toHaveBeenCalled();
+    xhr.upload.onprogress({ loaded: 25, total: 100, lengthComputable: true });
+    expect(progress).toHaveBeenLastCalledWith({ phase: "uploading", percent: 25 });
+    xhr.upload.onprogress({ loaded: 100, total: 100, lengthComputable: true });
+    expect(progress).toHaveBeenLastCalledWith({ phase: "confirming", percent: 99 });
+    if (outcome === "unauthorized") { xhr.status = 401; xhr.onload(); }
+    else if (outcome === "timeout") xhr.ontimeout();
+    else if (outcome === "network") xhr.onerror();
+    else if (outcome === "abort") xhr.onabort();
+    else xhr.onload();
+    if (outcome === "success") {
+      expect(await settled).toMatchObject({ id: "one" });
+      expect(progress).toHaveBeenLastCalledWith({ phase: "complete", percent: 100 });
+    } else {
+      expect(await settled).toBeInstanceOf(Error);
+      expect(progress).toHaveBeenLastCalledWith({ phase: "error", percent: 99 });
+    }
   });
 
   it("uses a configured native image uploader instead of WebView fetch", async () => {

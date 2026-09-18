@@ -5,6 +5,7 @@ import { MAX_TRANSFER_IMAGE_BYTES } from "../../protocol/image-transfer";
 export interface BrowserSocket {
   readonly OPEN: number;
   readyState: number;
+  readonly bufferedAmount?: number;
   onopen: (() => void) | null;
   onmessage: ((event: { data: string }) => void) | null;
   onclose: (() => void) | null;
@@ -18,7 +19,8 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
 };
-type RequestOptions = { signal?: AbortSignal; timeoutMs?: number };
+type UploadBytesObserver = (loaded: number, total: number) => void;
+type RequestOptions = { signal?: AbortSignal; timeoutMs?: number; onUploadProgress?: UploadBytesObserver };
 
 type RecoveryEvent = "online" | "visibilitychange";
 type SocketOptions = {
@@ -34,6 +36,7 @@ const DEFAULT_RECONNECT_DELAYS = [500, 1_000, 2_000, 5_000, 10_000];
 export class CodexSocket {
   private socket: BrowserSocket | undefined;
   private nextId = 1;
+  private sentBytes = 0;
   private readonly pending = new Map<RpcId, PendingRequest>();
   private readonly listeners = new Set<(message: RpcMessage) => void>();
   private readonly sessionListeners = new Set<(envelope: GatewayEnvelope) => void>();
@@ -73,6 +76,7 @@ export class CodexSocket {
       protocols,
     );
     this.socket = socket;
+    this.sentBytes = 0;
 
     return new Promise<void>((resolve, reject) => {
       let opened = false;
@@ -127,9 +131,11 @@ export class CodexSocket {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let progressTimer: ReturnType<typeof setInterval> | undefined;
       const cleanup = () => {
         options.signal?.removeEventListener("abort", abort);
         if (timeout !== undefined) clearTimeout(timeout);
+        if (progressTimer !== undefined) clearInterval(progressTimer);
       };
       const pending = {
         resolve: (value: unknown) => { cleanup(); resolve(value); },
@@ -150,7 +156,22 @@ export class CodexSocket {
         }, options.timeoutMs);
       }
       try {
-        this.sendRpc({ id, method, params });
+        const transfer = this.sendRpc({ id, method, params });
+        if (options.onUploadProgress && transfer.connection.bufferedAmount !== undefined && this.pending.has(id)) {
+          let previous = -1;
+          const report = () => {
+            if (this.socket !== transfer.connection || transfer.connection.readyState !== transfer.connection.OPEN) return;
+            // WebSocket has no upload event. Count bytes drained from this frame's
+            // position in the shared queue, including subsequent unrelated frames.
+            const drained = this.sentBytes - (transfer.connection.bufferedAmount ?? 0);
+            const loaded = Math.max(0, Math.min(transfer.size, drained - transfer.start));
+            if (loaded <= previous) return;
+            previous = loaded;
+            try { options.onUploadProgress?.(loaded, transfer.size); } catch { /* UI observers cannot break sending. */ }
+          };
+          progressTimer = setInterval(report, 50);
+          report();
+        }
       } catch (error) {
         this.pending.delete(id);
         pending.reject(error instanceof Error ? error : new Error(String(error)));
@@ -158,7 +179,7 @@ export class CodexSocket {
     });
   }
 
-  async uploadImage(file: File): Promise<UploadedImage> {
+  async uploadImage(file: File, onProgress?: UploadBytesObserver): Promise<UploadedImage> {
     if (!this.imageUploadSupported) throw new Error("请先更新 Mac 端 Codex Remote，再发送图片");
     if (file.size > MAX_TRANSFER_IMAGE_BYTES) throw new Error("图片传输副本不能超过 1 MB");
     const connection = this.socket;
@@ -169,7 +190,7 @@ export class CodexSocket {
     try {
       const result = await this.request("gateway/image/upload", {
         name: file.name, mimeType: file.type, data,
-      }, { timeoutMs: 30_000 });
+      }, { timeoutMs: 30_000, onUploadProgress: onProgress });
       return uploadedImageFromResponse(201, result);
     } catch (cause) {
       if (cause instanceof Error && cause.message === "codex-socket-request-timeout") {
@@ -212,7 +233,13 @@ export class CodexSocket {
     if (!this.socket || this.socket.readyState !== this.socket.OPEN) {
       throw new Error("codex-socket-not-connected");
     }
-    this.socket.send(JSON.stringify({ type: "rpc", payload }));
+    const connection = this.socket;
+    const wire = JSON.stringify({ type: "rpc", payload });
+    const start = this.sentBytes;
+    const size = new TextEncoder().encode(wire).length;
+    connection.send(wire);
+    this.sentBytes += size;
+    return { connection, start, size };
   }
 
   private receive(raw: string) {
@@ -329,10 +356,17 @@ export type UploadedImage = {
   size: number;
 };
 
+export type ImageUploadProgress = {
+  phase: "preparing" | "uploading" | "confirming" | "complete" | "error";
+  percent: number;
+};
+export type ImageUploadObserver = (index: number, progress: ImageUploadProgress) => void;
+
 export type RemoteApiOptions = {
   baseUrl?: string;
   token?: string;
-  imageUploader?: (file: File) => Promise<UploadedImage>;
+  imageUploader?: (file: File, onProgress?: UploadBytesObserver) => Promise<UploadedImage>;
+  onImageUploadProgress?: (progress: ImageUploadProgress) => void;
   uploadImagesViaSocket?: boolean;
 };
 
@@ -362,20 +396,75 @@ export async function uploadImage(
   fetcher: typeof fetch = fetch,
   options: RemoteApiOptions = {},
 ): Promise<UploadedImage> {
-  const transmitted = await compressImageForUpload(file);
-  if (options.imageUploader) return options.imageUploader(transmitted);
-  const response = await fetcher(`${options.baseUrl ?? ""}/api/images`, {
-    method: "POST",
-    credentials: options.baseUrl ? "omit" : "same-origin",
-    headers: {
-      "content-type": transmitted.type,
-      "x-file-name": encodeURIComponent(transmitted.name),
-      ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
-    },
-    body: transmitted,
+  let percent = 0;
+  let observing = true;
+  const report = (phase: ImageUploadProgress["phase"], value = percent) => {
+    percent = value;
+    try { options.onImageUploadProgress?.({ phase, percent }); } catch { /* Progress is observation only. */ }
+  };
+  const onBytes: UploadBytesObserver = (loaded, total) => {
+    if (!observing || !Number.isFinite(loaded) || !Number.isFinite(total) || total <= 0) return;
+    const next = Math.max(percent, Math.min(99, Math.floor(loaded / total * 100)));
+    report(loaded >= total ? "confirming" : "uploading", next);
+  };
+  report("preparing");
+  try {
+    const transmitted = await compressImageForUpload(file);
+    report("uploading");
+    let result: UploadedImage;
+    if (options.imageUploader) {
+      result = await (options.onImageUploadProgress
+        ? options.imageUploader(transmitted, onBytes)
+        : options.imageUploader(transmitted));
+    } else if (options.onImageUploadProgress) {
+      // Same HTTP endpoint/body/auth as before; XHR exposes real upload byte events.
+      result = await uploadImageWithProgress(transmitted, options, onBytes);
+    } else {
+      const response = await fetcher(`${options.baseUrl ?? ""}/api/images`, {
+        method: "POST",
+        credentials: options.baseUrl ? "omit" : "same-origin",
+        headers: {
+          "content-type": transmitted.type,
+          "x-file-name": encodeURIComponent(transmitted.name),
+          ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+        },
+        body: transmitted,
+      });
+      const value = response.ok ? await response.json() as unknown : undefined;
+      result = uploadedImageFromResponse(response.status, value);
+    }
+    report("complete", 100);
+    return result;
+  } catch (cause) {
+    report("error");
+    throw cause;
+  } finally {
+    observing = false;
+  }
+}
+
+function uploadImageWithProgress(file: File, options: RemoteApiOptions, onBytes: UploadBytesObserver) {
+  return new Promise<UploadedImage>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${options.baseUrl ?? ""}/api/images`);
+    xhr.withCredentials = !options.baseUrl;
+    xhr.timeout = 60_000;
+    xhr.responseType = "json";
+    xhr.setRequestHeader("content-type", file.type);
+    xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+    if (options.token) xhr.setRequestHeader("authorization", `Bearer ${options.token}`);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onBytes(event.loaded, event.total);
+    };
+    xhr.onload = () => {
+      try { resolve(uploadedImageFromResponse(xhr.status, xhr.response)); }
+      catch (cause) { reject(cause); }
+    };
+    xhr.onerror = () => reject(new Error("图片上传失败，请检查连接后重试"));
+    xhr.ontimeout = () => reject(new Error("图片上传超时，请重试"));
+    xhr.onabort = () => reject(new Error("图片上传已取消，请重试"));
+    xhr.send(file);
   });
-  const value = response.ok ? await response.json() as unknown : undefined;
-  return uploadedImageFromResponse(response.status, value);
 }
 
 export function uploadedImageFromResponse(status: number, value: unknown): UploadedImage {

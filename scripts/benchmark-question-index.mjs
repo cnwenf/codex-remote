@@ -47,7 +47,15 @@ try {
     { type: "response_item", payload: { id: user, type: "message", role: "user", content: [{ type: "input_text", text: "Tail question" }] } },
     { type: "response_item", payload: { id: answer, type: "message", role: "assistant", content: [{ type: "output_text", text: "Tail answer" }] } },
   ].map(value => JSON.stringify(value)).join("\n") + "\n";
+  // Only this real task_started boundary makes the suffix authoritative. A
+  // repeated turn_context below must not reset the original answer association.
   await text(tail("tail", "user-tail", "answer-tail"));
+  await text([
+    { type: "turn_context", payload: { turn_id: "tail" } },
+    { type: "response_item", payload: { id: "user-steer", type: "message", role: "user", content: [{ type: "input_text", text: "Steering question" }] } },
+    { type: "response_item", payload: { id: "answer-tail", type: "message", role: "assistant", content: [{ type: "output_text", text: "Original answer replay" }] } },
+    { type: "response_item", payload: { id: "answer-steer", type: "message", role: "assistant", content: [{ type: "output_text", text: "Steering answer" }] } },
+  ].map(value => JSON.stringify(value)).join("\n") + "\n");
   const fileBytes = (await handle.stat()).size;
   await handle.close(); handle = undefined;
 
@@ -68,7 +76,7 @@ try {
   let timerTicks = 0;
   sampleTimer = setInterval(() => { timerTicks++; peakRss = Math.max(peakRss, process.memoryUsage().rss); }, 10);
   delay.enable();
-  const request = { threadId: "benchmark", turnId: "tail", anchorItemId: "answer-tail" };
+  const request = { threadId: "benchmark", turnId: "tail", anchorItemId: "answer-steer" };
   const coldStarted = performance.now();
   assert.equal(index.read(rollout, request).state, "pending");
   async function waitReady(query) {
@@ -82,27 +90,60 @@ try {
     }
   }
   const ready = await waitReady(request);
-  assert.equal(ready.question.id, "user-tail");
+  assert.equal(ready.question.id, "user-steer");
+  assert.equal((await waitReady({ threadId: "benchmark", turnId: "tail" })).question?.id, "user-steer");
+  assert.equal(index.read(rollout, { ...request, anchorItemId: "answer-tail" }).question?.id, "user-tail");
   const coldMs = performance.now() - coldStarted;
   const coldReadBytes = scanBytes;
-  const old = index.read(rollout, { threadId: "benchmark", turnId: "long", anchorItemId: "answer-long" });
-  assert.equal(old.question?.text, "Original question outside the final history page");
-  assert.equal(old.question?.imageCount, 1);
-  assert.equal(old.question?.id, "user-long");
+  assert(coldReadBytes <= 1024 * 1024, "recent question lookup exceeded the bounded tail budget");
   const warmStarted = performance.now();
   for (let n = 0; n < 100; n++) assert.equal(index.read(rollout, request).state, "ready");
   const warm100Ms = performance.now() - warmStarted;
-  assert.equal(scanBytes, coldReadBytes, "warm lookups rescanned the session");
+  const warmReadBytes = scanBytes - coldReadBytes;
+  assert.equal(warmReadBytes, 0, "warm lookups rescanned the session");
+
+  index.close();
+  const reopenStarted = performance.now();
+  index = new QuestionIndex(join(directory, "questions.sqlite"));
+  assert.equal(index.read(rollout, request).question?.id, "user-steer");
+  assert.equal(index.read(rollout, { threadId: "benchmark", turnId: "tail" }).question?.id, "user-steer");
+  assert.equal(index.read(rollout, { ...request, anchorItemId: "answer-tail" }).question?.id, "user-tail");
+  const reopenMs = performance.now() - reopenStarted;
+  const reopenReadBytes = scanBytes - coldReadBytes;
+  assert.equal(reopenReadBytes, 0, "reopening discarded the persisted recent question");
+
   const appended = tail("append", "user-append", "answer-append");
   handle = await open(rollout, "a"); await handle.write(appended); await handle.close(); handle = undefined;
-  await waitReady({ threadId: "benchmark", turnId: "append", anchorItemId: "answer-append" });
+  const appendStarted = performance.now();
+  const next = await waitReady({ threadId: "benchmark", turnId: "append", anchorItemId: "answer-append" });
+  assert.equal(next.question?.id, "user-append");
+  await waitReady({ threadId: "benchmark", turnId: "append" });
+  const appendMs = performance.now() - appendStarted;
   const appendReadBytes = scanBytes - coldReadBytes;
   assert.equal(appendReadBytes, Buffer.byteLength(appended));
-  assert.equal(coldReadBytes, fileBytes);
+
+  // History outside the suffix requires its own scan, never the latest question as a substitute.
+  const oldRequest = { threadId: "benchmark", turnId: "long", anchorItemId: "answer-long" };
+  const historicalStartBytes = scanBytes;
+  const historicalStarted = performance.now();
+  assert.equal(index.read(rollout, oldRequest).state, "pending");
+  const old = await waitReady(oldRequest);
+  assert.equal(old.question?.text, "Original question outside the final history page");
+  assert.equal(old.question?.imageCount, 1);
+  assert.equal(old.question?.id, "user-long");
+  const originalAfterBackfill = index.read(rollout, { ...request, anchorItemId: "answer-tail" });
+  assert.equal(originalAfterBackfill.question?.id, "user-tail");
+  assert.equal(originalAfterBackfill.revision, ready.revision);
+  assert.equal(index.read(rollout, request).question?.id, "user-steer");
+  const historicalMs = performance.now() - historicalStarted;
+  const historicalReadBytes = scanBytes - historicalStartBytes;
+  assert(historicalReadBytes <= fileBytes + Buffer.byteLength(appended), "historical lookup rescanned bytes");
   assert(timerTicks > 0, "index scan blocked the event loop throughout");
   assert(peakRss - baselineRss < 128 * 1024 * 1024, "index RSS increased by more than 128 MiB");
-  console.log(JSON.stringify({ fileBytes, coldReadBytes, coldMs: Math.round(coldMs), warm100Ms: Math.round(warm100Ms),
-    appendReadBytes, baselineRss, peakRss, rssIncreaseBytes: peakRss - baselineRss, timerTicks,
+  const ms = (value) => Math.round(value * 100) / 100;
+  console.log(JSON.stringify({ fileBytes, coldReadBytes, coldMs: ms(coldMs), warmReadBytes, warm100Ms: ms(warm100Ms),
+    reopenReadBytes, reopenMs: ms(reopenMs), appendReadBytes, appendMs: ms(appendMs),
+    historicalReadBytes, historicalMs: ms(historicalMs), baselineRss, peakRss, rssIncreaseBytes: peakRss - baselineRss, timerTicks,
     eventLoopDelayMaxMs: Math.round(delay.max / 1e6), eventLoopDelayP99Ms: Math.round(delay.percentile(99) / 1e6) }, null, 2));
 } finally {
   clearInterval(sampleTimer);

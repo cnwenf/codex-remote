@@ -6,11 +6,13 @@ import type { QuestionContext, QuestionContextRequest } from "../protocol/questi
 import { QuestionRecordReader, type QuestionRecord } from "./question-records";
 
 const BLOCK = 64 * 1024;
-const INDEX_VERSION = 1;
+const TAIL_BYTES = 256 * 1024;
+const INDEX_VERSION = 3;
 type FileRow = { path: string; thread: string; generation: string; identity: string; size: number; mtime: number; ctime: number;
   fingerprint: string; scanned: number; observed: number; turn: string | null; error: string | null; barrier: number };
 type QuestionRow = { id: string; text: string; length: number; images: number; source: "user" | "delegated";
   source_thread: string | null; start: number; end: number };
+type TailRow = { start: number; scanned: number; observed: number; turn: string | null; barrier: number };
 
 // All instances share two read slots; the queue is also bounded.
 let active = 0;
@@ -59,10 +61,16 @@ export class QuestionIndex {
       CREATE INDEX IF NOT EXISTS question_latest ON questions(generation, thread, turn, start DESC);
       CREATE TABLE IF NOT EXISTS question_anchors (
         generation TEXT NOT NULL, thread TEXT NOT NULL, turn TEXT NOT NULL, id TEXT NOT NULL, question TEXT,
-        PRIMARY KEY(generation, thread, turn, id));`);
+        start INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(generation, thread, turn, id));
+      CREATE TABLE IF NOT EXISTS question_tails (
+        generation TEXT PRIMARY KEY, start INTEGER NOT NULL, scanned INTEGER NOT NULL,
+        observed INTEGER NOT NULL, turn TEXT, barrier INTEGER NOT NULL);`);
+    // Additive schema migration preserves existing columns; version changes below invalidate stale semantics.
+    const columns = this.db.prepare("PRAGMA table_info(question_anchors)").all() as { name: string }[];
+    if (!columns.some((column) => column.name === "start")) this.db.exec("ALTER TABLE question_anchors ADD COLUMN start INTEGER NOT NULL DEFAULT 0");
     const version = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
     if (version.user_version !== INDEX_VERSION) this.db.exec(`BEGIN;
-      DELETE FROM question_anchors; DELETE FROM questions; DELETE FROM question_files;
+      DELETE FROM question_anchors; DELETE FROM questions; DELETE FROM question_files; DELETE FROM question_tails;
       PRAGMA user_version=${INDEX_VERSION}; COMMIT;`);
   }
 
@@ -78,15 +86,29 @@ export class QuestionIndex {
       const file = this.validate(path, request.threadId);
       const revision = file.generation;
       if (file.error) return { ...base, state: "error", revision, message: file.error };
-      if (file.observed < file.size) this.schedule("scan:" + revision, () => this.scan(file));
-      if (!request.anchorItemId && file.observed < file.size) return { ...base, state: "pending", revision };
+      let tail = this.db.prepare("SELECT * FROM question_tails WHERE generation=?").get(revision) as TailRow | undefined;
+      const latest = file.observed >= file.size ? file : tail && tail.observed >= file.size ? tail : undefined;
       const q = (request.anchorItemId
         ? this.db.prepare(`SELECT q.* FROM question_anchors a JOIN questions q ON q.generation=a.generation AND q.thread=a.thread
             AND q.turn=a.turn AND q.id=a.question WHERE a.generation=? AND a.thread=? AND a.turn=? AND a.id=?`)
           .get(revision, request.threadId, request.turnId, request.anchorItemId)
-        : this.db.prepare("SELECT * FROM questions WHERE generation=? AND thread=? AND turn=? AND start>=? ORDER BY start DESC LIMIT 1")
-          .get(revision, request.threadId, request.turnId, file.barrier)) as QuestionRow | undefined;
-      if (!q) return { ...base, state: file.observed < file.size ? "pending" : "not_found", revision };
+        : latest && this.db.prepare("SELECT * FROM questions WHERE generation=? AND thread=? AND turn=? AND start>=? ORDER BY start DESC LIMIT 1")
+          .get(revision, request.threadId, request.turnId, latest.barrier)) as QuestionRow | undefined;
+      if (!q) {
+        if (file.observed < file.size) this.schedule("scan:" + revision, async () => {
+          // Try a bounded suffix before scanning old history. Never carry turn/question state across the gap.
+          // Once present, retain the suffix checkpoint even for a large append.
+          if (!tail && file.size - file.scanned > TAIL_BYTES) {
+            const start = file.size - TAIL_BYTES;
+            tail = { start, scanned: start, observed: -1, turn: null, barrier: start };
+            this.db.prepare("INSERT OR REPLACE INTO question_tails VALUES(?,?,?,?,?,?)").run(revision, start, start, -1, null, start);
+          }
+          if (tail && tail.observed < file.size && tail.scanned > file.scanned) {
+            await this.scan({ ...file, ...tail }, true, tail.scanned === tail.start);
+          } else await this.scan(file);
+        });
+        return { ...base, state: file.observed < file.size ? "pending" : "not_found", revision };
+      }
       const offset = request.textOffset ?? 0;
       let text = offset === 0 ? q.text : offset >= q.length ? "" : undefined;
       if (text === undefined) {
@@ -132,6 +154,7 @@ export class QuestionIndex {
         for (const [key, page] of this.pages) if (page.generation === row.generation) this.pages.delete(key);
         this.db.prepare("DELETE FROM questions WHERE generation=?").run(row.generation);
         this.db.prepare("DELETE FROM question_anchors WHERE generation=?").run(row.generation);
+        this.db.prepare("DELETE FROM question_tails WHERE generation=?").run(row.generation);
       }
       row = { path, thread, generation: randomUUID(), identity, size: stat.size, mtime: stat.mtimeMs, ctime: stat.ctimeMs,
         fingerprint: this.fingerprint(path, stat.size), scanned: 0, observed: -1, turn: null, error: null, barrier: 0 };
@@ -160,24 +183,43 @@ export class QuestionIndex {
     return !this.closed && this.validate(file.path, file.thread).generation === file.generation;
   }
 
-  private saveRecord(file: FileRow, entry: QuestionRecord | undefined, start: number, end: number) {
+  private saveRecord(file: FileRow, entry: QuestionRecord | undefined, start: number, end: number, tail: boolean) {
     if (!entry) return;
-    if (entry.kind === "turn") { file.turn = entry.turnId ?? null; return; }
+    if (entry.kind === "question" && entry.replay) return;
+    // An explicitly foreign completion is historical replay, not a change of turn.
+    if (tail && entry.kind === "anchor" && entry.replay && entry.turnId !== undefined && entry.turnId !== file.turn) return;
+    if (entry.kind === "turn") {
+      // turn_context can repeat after mid-turn compaction. Only task_started proves
+      // the suffix includes the whole turn, including earlier occurrences of an anchor ID.
+      if (!tail || entry.turnStart) file.turn = entry.turnId ?? null;
+      else if (entry.turnId !== file.turn) { file.turn = null; file.barrier = end; }
+      return;
+    }
     const turn = entry.turnId ?? file.turn;
+    if (tail && (!file.turn || turn !== file.turn)) {
+      file.turn = null;
+      file.barrier = end;
+      return;
+    }
     if (!turn || !entry.id) return;
     if (entry.kind === "question") {
-      if (entry.replay) return;
-      this.db.prepare(`INSERT OR IGNORE INTO questions VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+      this.db.prepare(`INSERT INTO questions VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(generation,thread,turn,id) DO UPDATE SET text=excluded.text,length=excluded.length,
+          images=excluded.images,source=excluded.source,source_thread=excluded.source_thread,start=excluded.start,end=excluded.end
+        WHERE excluded.start < questions.start`).run(
         file.generation, file.thread, turn, entry.id, entry.text ?? "", entry.textLength ?? 0, entry.imageCount ?? 0,
         entry.source ?? "user", entry.sourceThreadId ?? null, start, end);
     } else {
-      const q = this.db.prepare("SELECT id FROM questions WHERE generation=? AND thread=? AND turn=? AND start>=? ORDER BY start DESC LIMIT 1")
-        .get(file.generation, file.thread, turn, file.barrier) as { id: string } | undefined;
-      this.db.prepare("INSERT OR IGNORE INTO question_anchors VALUES(?,?,?,?,?)").run(file.generation, file.thread, turn, entry.id, q?.id ?? null);
+      const q = this.db.prepare("SELECT id FROM questions WHERE generation=? AND thread=? AND turn=? AND start>=? AND start<? ORDER BY start DESC LIMIT 1")
+        .get(file.generation, file.thread, turn, file.barrier, start) as { id: string } | undefined;
+      // Preserve the first occurrence even when it has no attributable question.
+      this.db.prepare(`INSERT INTO question_anchors VALUES(?,?,?,?,?,?)
+        ON CONFLICT(generation,thread,turn,id) DO UPDATE SET question=excluded.question,start=excluded.start
+        WHERE excluded.start < question_anchors.start`).run(file.generation, file.thread, turn, entry.id, q?.id ?? null, start);
     }
   }
 
-  private async scan(file: FileRow) {
+  private async scan(file: FileRow, tail = false, skipFirst = false) {
     let handle: FileHandle | undefined;
     try {
       handle = await open(file.path, "r");
@@ -193,24 +235,27 @@ export class QuestionIndex {
         try {
           let cursor = 0;
           for (let n = 0; n < bytesRead; n++) if (block[n] === 10) {
-            reader.write(block.subarray(cursor, n));
             const end = position + n + 1;
-            const entry = reader.finish();
-            if (!reader.valid) file.barrier = end;
-            this.saveRecord(file, entry, start, end);
+            if (skipFirst) skipFirst = false;
+            else {
+              reader.write(block.subarray(cursor, n));
+              const entry = reader.finish();
+              if (!reader.valid) { file.barrier = end; if (tail) file.turn = null; }
+              this.saveRecord(file, entry, start, end, tail);
+            }
             file.scanned = end;
             start = end;
             reader = new QuestionRecordReader();
             cursor = n + 1;
           }
-          reader.write(block.subarray(cursor, bytesRead));
-          this.db.prepare("UPDATE question_files SET scanned=?,turn=?,barrier=? WHERE generation=?").run(file.scanned, file.turn, file.barrier, file.generation);
+          if (!skipFirst) reader.write(block.subarray(cursor, bytesRead));
+          this.db.prepare(`UPDATE ${tail ? "question_tails" : "question_files"} SET scanned=?,turn=?,barrier=? WHERE generation=?`).run(file.scanned, file.turn, file.barrier, file.generation);
           this.db.exec("COMMIT");
         } catch (error) { this.db.exec("ROLLBACK"); throw error; }
         position += bytesRead;
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
-      if (this.current(file)) this.db.prepare("UPDATE question_files SET observed=? WHERE generation=?").run(file.size, file.generation);
+      if (this.current(file)) this.db.prepare(`UPDATE ${tail ? "question_tails" : "question_files"} SET observed=? WHERE generation=?`).run(file.size, file.generation);
     } catch {
       if (!this.closed) this.db.prepare("UPDATE question_files SET error=? WHERE generation=?").run("问题索引读取失败", file.generation);
     } finally { if (handle) { this.handles.delete(handle); await handle.close().catch(() => {}); } }

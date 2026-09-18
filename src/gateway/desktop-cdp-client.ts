@@ -63,6 +63,7 @@ export class DesktopCdpClient {
   private endpoint?: URL;
   private stopping = false;
   private disconnectNotified = false;
+  private contextGeneration = 0;
   private threadOwnerRequestTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: DesktopCdpClientOptions) {}
@@ -87,7 +88,9 @@ export class DesktopCdpClient {
     );
     const socket = new WebSocket(websocketUrl, { maxPayload: 8 * 1024 * 1024 });
     this.socket = socket;
-    socket.on("message", (raw) => this.handleFrame(raw.toString()));
+    socket.on("message", (raw) => {
+      if (this.socket === socket) this.handleFrame(raw.toString());
+    });
     socket.on("close", (code, reason) => this.handleDisconnect(
       socket,
       new Error(`desktop-cdp-closed:${code}:${reason.toString() || "no-reason"}`),
@@ -106,11 +109,15 @@ export class DesktopCdpClient {
         // A fresh renderer has no previous binding to remove.
       }
       await this.call("Runtime.addBinding", { name: BINDING_NAME });
+      const contextGeneration = this.contextGeneration;
       const installed = await this.call("Runtime.evaluate", {
         expression: listenerExpression(),
         returnByValue: false,
         awaitPromise: false,
       });
+      if (this.socket !== socket || this.contextGeneration !== contextGeneration) {
+        throw new Error("desktop-cdp-context-lost-during-install");
+      }
       const runtimeResult = installed.result;
       if (!runtimeResult || typeof runtimeResult !== "object") {
         throw new Error("desktop-cdp-window-object-missing");
@@ -411,6 +418,13 @@ export class DesktopCdpClient {
       }
       return;
     }
+    if (frame.method === "Runtime.executionContextsCleared" || frame.method === "Inspector.detached") {
+      this.contextGeneration += 1;
+      if (this.windowObjectId && this.socket) {
+        this.handleDisconnect(this.socket, new Error(`desktop-cdp-context-lost:${frame.method}`));
+      }
+      return;
+    }
     if (frame.method !== "Runtime.bindingCalled") return;
     if (frame.params?.name !== BINDING_NAME || typeof frame.params.payload !== "string") return;
     try {
@@ -443,6 +457,12 @@ export class DesktopCdpClient {
     if (this.socket !== socket) return;
     this.socket = undefined;
     this.windowObjectId = undefined;
+    socket.terminate();
+    const ownerSocket = this.ownerSocket;
+    if (ownerSocket) {
+      this.handleOwnerDisconnect(ownerSocket);
+      ownerSocket.terminate();
+    }
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error("desktop-cdp-disconnected"));

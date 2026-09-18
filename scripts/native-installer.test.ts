@@ -388,7 +388,7 @@ touch "\${@: -1}"
     const menuBarIcon = appSource.match(
       /private func menuBarIcon\(\)[\s\S]*?\n  \}\n\n  private func appBrandIcon/,
     )?.[0] ?? "";
-    expect(buildScript).toContain('cp assets/app-icon.png "$RES/MenuBarIcon.png"');
+    expect(buildScript).toContain('swift scripts/render-menu-bar-icon.swift assets/app-icon.png "$RES/MenuBarIcon.png"');
     expect(menuBarIcon).toContain('Bundle.main.url(forResource: "MenuBarIcon", withExtension: "png")');
     expect(menuBarIcon).not.toContain("NSApplication.shared.applicationIconImage");
     expect(menuBarIcon).not.toContain("alphaFromApplicationIcon");

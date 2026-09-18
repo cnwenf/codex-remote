@@ -35,15 +35,17 @@ cp scripts/install-launch-agents.sh "$RES/install-launch-agents.sh"
 cp scripts/launch-codex-desktop.sh "$RES/launch-codex-desktop.sh"
 cp scripts/restart-codex-desktop.sh "$RES/restart-codex-desktop.sh"
 cp scripts/perform-macos-update.sh "$RES/perform-macos-update.sh"
-cp assets/app-icon.png "$RES/MenuBarIcon.png"
+swift scripts/render-menu-bar-icon.swift assets/app-icon.png "$RES/MenuBarIcon.png"
 print "$VERSION" > "$RES/VERSION"
 chmod 755 "$RES"/*.sh "$RES/bin/node" "$APP/Contents/MacOS/Codex Remote"
 
 iconset="$OUTPUT/AppIcon.iconset"
+macos_icon="$OUTPUT/AppIcon.png"
+swift scripts/render-macos-icon.swift assets/app-icon.png "$macos_icon"
 rm -rf "$iconset"; mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" assets/app-icon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
-  double=$((size * 2)); sips -z "$double" "$double" assets/app-icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+  sips -z "$size" "$size" "$macos_icon" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  double=$((size * 2)); sips -z "$double" "$double" "$macos_icon" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$RES/AppIcon.icns"
 

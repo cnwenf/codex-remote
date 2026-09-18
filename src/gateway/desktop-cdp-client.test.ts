@@ -240,4 +240,44 @@ describe("DesktopCdpClient", () => {
       .toHaveLength(2);
     await client.stop();
   });
+
+  it("does not retain a stale window when a context clears during bridge installation", async () => {
+    server = new FakeCdpServer();
+    server.clearContextDuringInstall = true;
+    const endpoint = await server.start();
+    const disconnected = vi.fn();
+    const client = new DesktopCdpClient({ endpoint });
+    try {
+      const outcome = await client.start(() => undefined, disconnected).then(() => "started", () => "failed");
+      await vi.waitFor(() => expect(outcome === "failed" || disconnected.mock.calls.length > 0).toBe(true));
+      server.clearContextDuringInstall = false;
+      await client.start(() => undefined, disconnected);
+      await expect(client.sendDesktopMessage({ type: "mcp-request" })).resolves.toBeUndefined();
+    } finally {
+      await client.stop();
+    }
+  });
+
+  it.each(["Runtime.executionContextsCleared", "Inspector.detached"])("reattaches both bridge connections after %s without restarting Desktop", async (method) => {
+    server = new FakeCdpServer();
+    const endpoint = await server.start();
+    const disconnected = vi.fn();
+    const messages: unknown[] = [];
+    const client = new DesktopCdpClient({ endpoint });
+    try {
+      await client.start((message) => messages.push(message), disconnected);
+      await client.broadcastQueuedFollowUps("thread-1", []);
+      server.emitRendererEvent(method);
+      await vi.waitFor(() => expect(disconnected).toHaveBeenCalledTimes(1));
+      await client.start((message) => messages.push(message), disconnected);
+      await client.broadcastQueuedFollowUps("thread-1", []);
+      expect(server.requests.filter((request) => request.method === "Runtime.enable")).toHaveLength(2);
+      expect(server.ownerRequests.filter((request) => request.method === "Runtime.enable")).toHaveLength(2);
+      server.emitBinding({ type: "mcp-notification", message: { method: "thread/started" } });
+      await vi.waitFor(() => expect(messages).toHaveLength(1));
+      expect(disconnected).toHaveBeenCalledTimes(1);
+    } finally {
+      await client.stop();
+    }
+  });
 });

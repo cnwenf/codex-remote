@@ -292,7 +292,7 @@ export function MobileShell({
         // 图片下载/显示问题不得改动此处；修改发送逻辑须用户再次明确授权。
         uploadImagesViaSocket: Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android",
         imageUploader: Capacitor.isNativePlatform() && Capacitor.getPlatform() !== "android"
-          ? (file) => uploadNativeImage(connection.baseUrl, token, file)
+          ? (file, onProgress) => uploadNativeImage(connection.baseUrl, token, file, onProgress)
           : undefined,
         connections: availableConnections.map(({ id: connectionId, name, pairingStatus }) => ({
           id: connectionId,

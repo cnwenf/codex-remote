@@ -200,7 +200,7 @@ describe("message pipeline invariants", () => {
     state = reduceCodexState(state, { method: "turn/started", params: { threadId: "t", turn: { id: "turn" } } });
     const { rerender } = render(<Timeline thread={state.threads.t} />);
     const firstNode = screen.getByText("第一段正文");
-    await userEvent.click(screen.getByText("执行过程（1 项）"));
+    await userEvent.click(screen.getByLabelText("执行详情，1 项"));
     state = reduceCodexState(state, { method: "turn/completed", params: { threadId: "t", turn: { id: "turn" } } });
     rerender(<Timeline thread={state.threads.t} />);
     for (const text of ["用户问题", "第一段正文", "中途追加", "中间正文", "最终正文", "执行工具"]) {

@@ -12,6 +12,7 @@ export class FakeCdpServer {
   readonly requests: CdpRequest[] = [];
   readonly ownerRequests: CdpRequest[] = [];
   visibleSettingsSyncDelayMs = 0;
+  clearContextDuringInstall = false;
   maxConcurrentVisibleSettingsSyncRequests = 0;
   ownerResponse: unknown = {
     method: "thread-follower-update-thread-settings",
@@ -121,6 +122,9 @@ export class FakeCdpServer {
           : visibleTextInspection
             ? { value: ((request.params?.arguments as Array<{ value?: unknown }> | undefined)?.[0]?.value) === "visible steer" }
           : { value: true };
+        if (!owner && request.method === "Runtime.evaluate" && this.clearContextDuringInstall) {
+          socket.send(JSON.stringify({ method: "Runtime.executionContextsCleared", params: {} }));
+        }
         socket.send(JSON.stringify({ id: request.id, result: { result: runtimeResult } }));
       });
     });
@@ -140,6 +144,10 @@ export class FakeCdpServer {
         payload: JSON.stringify(payload),
       },
     }));
+  }
+
+  emitRendererEvent(method: string) {
+    this.socket?.send(JSON.stringify({ method, params: {} }));
   }
 
   disconnect() {

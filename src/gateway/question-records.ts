@@ -3,6 +3,7 @@ import { StringDecoder } from "node:string_decoder";
 export type QuestionRecord = {
   kind: "turn" | "question" | "anchor";
   turnId?: string;
+  turnStart?: boolean;
   id?: string;
   text?: string;
   textLength?: number;
@@ -220,7 +221,7 @@ export class QuestionRecordReader {
     for (const group of this.textGroups.values()) group.visible.write("", true);
     const payload = record(entry.payload);
     if (entry.type === "turn_context" || entry.type === "event_msg" && payload.type === "task_started") {
-      return { kind: "turn", turnId: str(payload.turn_id) };
+      return { kind: "turn", turnId: str(payload.turn_id), turnStart: entry.type === "event_msg" };
     }
     const replay = entry.type === "event_msg" && payload.type === "item_completed";
     if (entry.type !== "response_item" && !replay) return;
@@ -256,7 +257,7 @@ export class QuestionRecordReader {
       return { kind: "question", turnId, id, text, textLength: length, imageCount, source: "user", replay };
     }
     if (type === "message" && item.role === "assistant" || ["agentmessage", "assistantmessage", "functioncall", "customtoolcall", "reasoning"].includes(type ?? "")) {
-      return { kind: "anchor", turnId, id };
+      return { kind: "anchor", turnId, id, replay };
     }
   }
 }

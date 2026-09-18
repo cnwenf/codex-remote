@@ -46,6 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var restartDesktopButton = NSButton(title: "Restart Desktop", target: nil, action: nil)
   private var bridgeTimer: Timer?
   private var gatewayHealthPolicy = GatewayHealthPolicy()
+  private var desktopRecoveryPolicy = DesktopRecoveryPolicy()
+  private var desktopRecoveryProbeInFlight = false
+  private var desktopRestartProcess: Process?
   private var toggle = NSButton(checkboxWithTitle: "Remote enabled", target: nil, action: nil)
   private var connectionMode = NSPopUpButton()
   private var pairingImageView = NSImageView()
@@ -449,9 +452,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
           self.restartGateway()
           return
         }
+        guard self.desktopRestartProcess == nil else { return }
         self.bridgeStatusLabel.stringValue = ready ? "Connected" : "Unavailable"
         self.bridgeStatusLabel.textColor = ready ? .systemGreen : .systemOrange
         self.restartDesktopButton.isEnabled = !ready
+        if httpResponse?.statusCode == 200, self.toggle.state == .on {
+          self.recoverDesktopBridgeIfNeeded(bridgeAvailable: ready)
+        }
+      }
+    }.resume()
+  }
+
+  private func recoverDesktopBridgeIfNeeded(bridgeAvailable: Bool) {
+    let pid = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+      .first?.processIdentifier
+    guard !bridgeAvailable, let pid else {
+      _ = desktopRecoveryPolicy.observe(processIdentifier: pid, bridgeAvailable: bridgeAvailable,
+        now: ProcessInfo.processInfo.systemUptime)
+      return
+    }
+    guard !desktopRecoveryProbeInFlight, desktopRestartProcess == nil else { return }
+    desktopRecoveryProbeInFlight = true
+    var request = URLRequest(url: URL(string: "http://127.0.0.1:9229/json/list")!)
+    request.timeoutInterval = 2
+    URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+      let cdpAvailable = (response as? HTTPURLResponse)?.statusCode == 200
+      Task { @MainActor in
+        guard let self else { return }
+        self.desktopRecoveryProbeInFlight = false
+        guard self.toggle.state == .on, self.desktopRestartProcess == nil else { return }
+        if self.desktopRecoveryPolicy.observe(processIdentifier: pid, bridgeAvailable: cdpAvailable,
+          now: ProcessInfo.processInfo.systemUptime) {
+          self.restartDesktopOnce(recoveryPID: pid)
+        }
       }
     }.resume()
   }
@@ -466,28 +499,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     restartDesktopOnce()
   }
 
-  private func restartDesktopOnce() {
+  private func restartDesktopOnce(recoveryPID: Int32? = nil) {
+    guard desktopRestartProcess == nil else { return }
     let script = Bundle.main.resourceURL!.appendingPathComponent("restart-codex-desktop.sh")
     guard FileManager.default.isExecutableFile(atPath: script.path) else {
       bridgeStatusLabel.stringValue = "Restart helper is unavailable"
       return
     }
     restartDesktopButton.isEnabled = false
-    bridgeStatusLabel.stringValue = "Restarting Desktop…"
+    bridgeStatusLabel.stringValue = recoveryPID == nil ? "Restarting Desktop…" : "Restoring Desktop connection…"
     let process = Process()
     process.executableURL = script
-    process.arguments = ["--execute"]
+    process.arguments = recoveryPID.map { ["--recover", String($0)] } ?? ["--execute"]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
     process.terminationHandler = { [weak self] process in
       Task { @MainActor in
+        self?.desktopRestartProcess = nil
         self?.bridgeStatusLabel.stringValue = process.terminationStatus == 0 ? "Waiting for gateway bridge…" : "Desktop restart failed"
         self?.restartDesktopButton.isEnabled = process.terminationStatus != 0
         self?.refreshDesktopBridgeStatus()
       }
     }
+    desktopRestartProcess = process
     do { try process.run() }
     catch {
+      desktopRestartProcess = nil
       bridgeStatusLabel.stringValue = "Desktop restart failed"
       restartDesktopButton.isEnabled = true
     }

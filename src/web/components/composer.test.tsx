@@ -182,8 +182,70 @@ describe("Composer", () => {
     expect(await screen.findByText("second.jpg")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    expect(onSend).toHaveBeenCalledWith("", [first, second]);
+    expect(onSend).toHaveBeenCalledWith("", [first, second], expect.any(Function));
     expect(screen.queryByText("first.png")).not.toBeInTheDocument();
+  });
+
+  it("shows an independent determinate ring on each preview even while collapsed", async () => {
+    let report!: (index: number, progress: { phase: string; percent: number }) => void;
+    let finish!: () => void;
+    const onSend = vi.fn((_text, _images, observer) => {
+      report = observer;
+      return new Promise<void>((resolve) => { finish = resolve; });
+    });
+    const { rerender } = render(<Composer onSend={onSend} running={false} expanded />);
+    await userEvent.upload(screen.getByLabelText("添加图片"), [pngFile("one.png", 10, 10), pngFile("two.png", 10, 10)]);
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByRole("progressbar", { name: "one.png 上传进度" })).toHaveAttribute("aria-valuenow", "0");
+    act(() => { report(0, { phase: "uploading", percent: 42 }); report(1, { phase: "uploading", percent: 17 }); });
+    rerender(<Composer onSend={onSend} running={false} expanded={false} />);
+    expect(screen.getByRole("progressbar", { name: "one.png 上传进度" })).toHaveAttribute("aria-valuenow", "42");
+    expect(screen.getByRole("progressbar", { name: "two.png 上传进度" })).toHaveAttribute("aria-valuenow", "17");
+    expect(screen.getByRole("button", { name: "移除 one.png" })).toBeDisabled();
+    act(() => report(0, { phase: "complete", percent: 100 }));
+    expect(screen.getByRole("progressbar", { name: "one.png 上传进度" })).toHaveAttribute("aria-valuenow", "100");
+    await act(async () => finish());
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("does not clear a new task draft or apply late upload progress after switching tasks", async () => {
+    let report!: (index: number, progress: { phase: string; percent: number }) => void;
+    let finish!: () => void;
+    const onSend = vi.fn((_text, _images, observer) => {
+      report = observer;
+      return new Promise<void>((resolve) => { finish = resolve; });
+    });
+    const { rerender } = render(<Composer draftKey="upload-a" onSend={onSend} running={false} expanded />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "old message");
+    await userEvent.upload(screen.getByLabelText("添加图片"), pngFile("old.png", 10, 10));
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    rerender(<Composer draftKey="upload-b" onSend={onSend} running={false} expanded />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "new draft");
+    act(() => report(0, { phase: "uploading", percent: 90 }));
+    await act(async () => finish());
+    expect(screen.getByRole("textbox", { name: "Instruction" })).toHaveValue("new draft");
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    rerender(<Composer draftKey="upload-a" onSend={onSend} running={false} expanded />);
+    expect(screen.getByRole("textbox", { name: "Instruction" })).toHaveValue("");
+  });
+
+  it("preserves newer edits after returning to a task whose old upload is pending", async () => {
+    let finish!: () => void;
+    const onSend = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const props = { onSend, running: false, expanded: true };
+    const { rerender } = render(<Composer {...props} draftKey="return-a" />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "sent text");
+    await userEvent.upload(screen.getByLabelText("添加图片"), pngFile("one.png", 10, 10));
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    rerender(<Composer {...props} draftKey="return-b" />);
+    rerender(<Composer {...props} draftKey="return-a" />);
+    await userEvent.clear(screen.getByRole("textbox", { name: "Instruction" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Instruction" }), "newer text");
+    await act(async () => finish());
+    expect(screen.getByRole("textbox", { name: "Instruction" })).toHaveValue("newer text");
+    rerender(<Composer {...props} draftKey="return-b" />);
+    rerender(<Composer {...props} draftKey="return-a" />);
+    expect(screen.getByRole("textbox", { name: "Instruction" })).toHaveValue("newer text");
   });
 
   it("keeps selected images when sending fails", async () => {
@@ -332,7 +394,7 @@ describe("Composer", () => {
     expect(await screen.findByText("recovered.png")).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    expect(onSend).toHaveBeenCalledWith("", [existing, recovered]);
+    expect(onSend).toHaveBeenCalledWith("", [existing, recovered], expect.any(Function));
   });
 
   it("drops a pending preview when switching conversations", async () => {

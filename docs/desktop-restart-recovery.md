@@ -29,3 +29,9 @@ The script never force-kills Desktop. If AppleScript cannot close it cleanly, th
 ## Native/mobile restart helper (v0.5.36+)
 
 The native app and the mobile confirmation flow use `scripts/restart-codex-desktop.sh`, not the legacy persistent-bridge scripts above. Once the user confirms, this helper force-stops only the current user's exact Desktop main executable and reopens it with the loopback bridge enabled. It does not send an AppleScript quit request, so Codex's own quit confirmation cannot block remote recovery. Running work or unsaved changes may be lost. A healthy bridge check does not stop Desktop, and this is still a one-time action rather than an automatic restart loop.
+
+## Automatic recovery
+
+While Remote is enabled, the native app checks for a running Codex Desktop whose bridge remains unavailable. If its loopback CDP endpoint is absent for 20 seconds, it calls the same helper with `--recover <observed-pid>` once for that process. The helper rechecks the endpoint, exact executable and owner, and refuses to restart a replacement process or one already launched with a debugging-port argument. The replacement therefore cannot enter a restart loop if its port fails to open. Closing Desktop intentionally does not cause it to reopen. Automatic recovery may interrupt work in the process being restarted.
+
+When CDP remains reachable but its renderer context is cleared or detached, the gateway discards both stale CDP connections and reinstalls its bridge through the existing reconnect path. No Desktop restart is needed in that case. The login LaunchAgents remain one-shot (`KeepAlive=false`).
