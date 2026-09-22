@@ -1299,6 +1299,54 @@ describe("useCodex", () => {
     expect(result.current.threadsError).toBe("读取对话列表失败");
   });
 
+  it("orders running tasks before idle tasks, then by updatedAt descending", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    const { result } = renderHook(() => useCodex(socket));
+    await act(() => result.current.connect("secret", "ws://local/rpc"));
+    let refresh: Promise<void>;
+    act(() => {
+      refresh = result.current.refreshThreads();
+    });
+    const { live, desktop } = taskListRequests(fake);
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: live.id,
+        result: {
+          data: [
+            { id: "idle-new", name: "Idle new", status: { type: "idle" }, updatedAt: 300 },
+            { id: "running-old", name: "Running old", status: { type: "active" }, updatedAt: 100 },
+            { id: "idle-old", name: "Idle old", status: { type: "idle" }, updatedAt: 200 },
+            { id: "running-new", name: "Running new", status: { type: "active" }, updatedAt: 400 },
+          ],
+        },
+      },
+    });
+    fake.serverSend({
+      type: "rpc",
+      payload: {
+        id: desktop.id,
+        result: {
+          data: [
+            { id: "idle-new", title: "Idle new", updatedAt: 300 },
+            { id: "running-old", title: "Running old", updatedAt: 100 },
+            { id: "idle-old", title: "Idle old", updatedAt: 200 },
+            { id: "running-new", title: "Running new", updatedAt: 400 },
+          ],
+        },
+      },
+    });
+    await act(() => refresh);
+
+    expect(result.current.state.threadOrder).toEqual([
+      "running-new",
+      "running-old",
+      "idle-new",
+      "idle-old",
+    ]);
+  });
+
   it("loads and normalizes the task list", async () => {
     const fake = new FakeBrowserSocket();
     const socket = new CodexSocket(() => fake);

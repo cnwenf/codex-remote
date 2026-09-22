@@ -1358,10 +1358,19 @@ function replaceThreadList(state: CodexState, value: unknown, metadataValue?: un
   }
   const threads = { ...state.threads };
   const order: string[] = [];
-  for (const entry of data) {
-    const record = asRecord(entry);
-    const id = stringValue(record.id);
-    if (!id) continue;
+  const entries = data
+    .map((entry, index) => ({ record: asRecord(entry), index }))
+    .filter(({ record }) => Boolean(stringValue(record.id)))
+    .sort((left, right) => {
+      const leftRunning = normalizeStatus(left.record.status) === "running" ? 0 : 1;
+      const rightRunning = normalizeStatus(right.record.status) === "running" ? 0 : 1;
+      if (leftRunning !== rightRunning) return leftRunning - rightRunning;
+      const timeDelta = (numberValue(right.record.updatedAt) ?? numberValue(right.record.updated_at) ?? 0) -
+        (numberValue(left.record.updatedAt) ?? numberValue(left.record.updated_at) ?? 0);
+      return timeDelta || left.index - right.index;
+    });
+  for (const { record } of entries) {
+    const id = stringValue(record.id) as string;
     order.push(id);
     const current = threads[id];
     const incomingStatus = normalizeStatus(record.status, current?.status);
