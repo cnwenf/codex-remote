@@ -472,6 +472,27 @@ test("mobile task list and conversation scroll independently", async ({ page }) 
   await expect(composer).toHaveClass(/composer-collapsed/);
 });
 
+test("reopens a collapsed composer when the textbox still has focus", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Access token").fill("e2e-token");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /codex-fixture.*\d+ 个对话/ }).click();
+  await page.getByRole("button", { name: /^Fixture task，/ }).click();
+  const input = page.getByRole("textbox", { name: "Instruction" });
+  const composer = page.locator(".composer");
+  await input.fill("Keep this draft");
+  await expect(composer).toHaveClass(/composer-expanded/);
+  // Pointer interaction collapses the composer before any browser blur occurs.
+  await page.getByTestId("timeline-scroll").dispatchEvent("pointerdown");
+  await expect(composer).toHaveClass(/composer-collapsed/);
+  await expect(input).toBeFocused();
+  if (test.info().project.name === "chrome-mobile") await input.tap();
+  else await input.click();
+  await expect(composer).toHaveClass(/composer-expanded/);
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue("Keep this draft");
+});
+
 test("mobile browser back swipe history returns to the conversation list", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 720 });
   await page.goto("/");

@@ -259,6 +259,7 @@ export function Composer({
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         onFocus={() => setExpanded(true)}
+        onClick={() => setExpanded(true)}
         placeholder={running
           ? runningMode === "queue"
             ? english ? "Queue until the current turn finishes" : "发送后排队，当前任务完成后执行"
