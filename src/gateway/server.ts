@@ -38,6 +38,7 @@ import { registerAssistantImages } from "./assistant-images";
 import { registerToolOutputImages } from "./tool-output-images";
 import { itemText, messageKind } from "../protocol/message-content";
 import { MAX_TRANSFER_IMAGE_BYTES } from "../protocol/image-transfer";
+import { MessageDeliveries, messageSubmission } from "./message-delivery";
 
 const MAX_FRAME_BYTES = 2 * 1024 * 1024;
 const MAX_AUTH_BODY_BYTES = 4 * 1024;
@@ -123,6 +124,23 @@ export function createGateway(options: GatewayOptions) {
     timeout: ReturnType<typeof setTimeout>;
   }>();
   let nextInternalRequestId = 1;
+  const deliveries = new MessageDeliveries(
+    (method, value) => {
+      const params = recordValue(value);
+      const active = liveThreadActivity.get(String(params.threadId));
+      // A preceding accepted start can become active before this send runs.
+      if (method === "turn/start" && active?.status === "running") {
+        const desktop = options.transport.getSessionInfo?.().transport === "desktop-live";
+        return requestTransport(desktop ? "desktop/queue/add" : "turn/steer", {
+          ...params,
+          text: Array.isArray(params.input) ? params.input.map((item) => recordValue(item).text ?? "").join("\n") : "",
+          expectedTurnId: active.turnId,
+        }, 120_000);
+      }
+      return requestTransport(method, params, 120_000);
+    },
+    (receipt) => broadcastEnvelope({ type: "rpc", payload: { method: "gateway/message/updated", params: receipt } }),
+  );
   let mobileStatusSyncTimer: ReturnType<typeof setInterval> | undefined;
   let sessionSyncTimer: ReturnType<typeof setInterval> | undefined;
   const restartConfirmations = new Map<string, { token: string; expiresAt: number }>();
@@ -261,11 +279,15 @@ export function createGateway(options: GatewayOptions) {
       type: "session",
       state: "ready",
       imageUpload: true,
+      messageDelivery: true,
       ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
       ...options.transport.getSessionInfo?.(),
     });
     for (const snapshot of activeMessages.snapshots()) {
       sendEnvelope(socket, { type: "rpc", payload: snapshot });
+    }
+    for (const receipt of deliveries.snapshots()) {
+      sendEnvelope(socket, { type: "rpc", payload: { method: "gateway/message/updated", params: receipt } });
     }
 
     socket.on("message", (data, isBinary) => {
@@ -276,6 +298,10 @@ export function createGateway(options: GatewayOptions) {
       try {
         const envelope = JSON.parse(rawDataToBuffer(data).toString("utf8")) as unknown;
         if (!isRpcEnvelope(envelope)) throw new Error("invalid-envelope");
+        if (isRpcRequest(envelope.payload) && envelope.payload.method.startsWith("gateway/message/")) {
+          handleMessageDelivery(socket, envelope.payload);
+          return;
+        }
         if (isRpcRequest(envelope.payload) && envelope.payload.method === "gateway/image/upload") {
           void handleSocketImageUpload(socket, envelope.payload);
           return;
@@ -340,6 +366,27 @@ export function createGateway(options: GatewayOptions) {
       router.dropClient(clientId);
     });
   });
+
+  function handleMessageDelivery(socket: WebSocket, request: RpcRequest) {
+    try {
+      let result: unknown;
+      if (request.method === "gateway/message/submit") {
+        const submission = messageSubmission(request.params);
+        const method = submission.operation === "start" ? "turn/start"
+          : submission.operation === "steer" ? "turn/steer"
+          : submission.operation === "promote" ? "desktop/queue/steer" : "desktop/queue/add";
+        const resolved = resolveRemoteImages({ id: request.id, method, params: submission.params }, imageStore);
+        result = deliveries.submit({ ...submission, params: (resolved as RpcRequest).params as Record<string, unknown> });
+      } else if (request.method === "gateway/message/retry") {
+        result = deliveries.retry(String(recordValue(request.params).id ?? ""));
+      } else throw new Error("不支持的消息操作");
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result } });
+    } catch (cause) {
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, error: {
+        code: -32602, message: cause instanceof Error ? cause.message : "消息接收失败",
+      } } });
+    }
+  }
 
   async function handleDesktopRestartRequest(clientId: string, socket: WebSocket, request: RpcRequest) {
     if (!options.restartDesktop) {
@@ -422,6 +469,7 @@ export function createGateway(options: GatewayOptions) {
               type: "session",
               state: "ready",
               imageUpload: true,
+              messageDelivery: true,
               ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
               ...sessionInfo,
             });
@@ -450,6 +498,7 @@ export function createGateway(options: GatewayOptions) {
           type: "session",
           state: "ready",
           imageUpload: true,
+          messageDelivery: true,
           ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
           ...sessionInfo,
         });
@@ -528,7 +577,7 @@ export function createGateway(options: GatewayOptions) {
       if (pending) {
         pendingInternalRequests.delete(message.id);
         clearTimeout(pending.timeout);
-        if (message.error) pending.reject(new Error(message.error.message));
+        if (message.error) pending.reject(Object.assign(new Error(message.error.message), { rpcCode: message.error.code }));
         else pending.resolve(message.result);
         return;
       }

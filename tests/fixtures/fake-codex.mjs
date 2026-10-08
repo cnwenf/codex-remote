@@ -12,7 +12,7 @@ const deletedThreads = new Set();
 const threadNames = new Map();
 const pinnedSection = { id: "fixture-pinned-section", name: "Pinned", appearance: null };
 
-lines.on("line", (line) => {
+lines.on("line", async (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
     send({ id: message.id, result: { ready: true } });
@@ -143,6 +143,9 @@ lines.on("line", (line) => {
     return;
   }
   if (message.method === "turn/start" || message.method === "turn/steer") {
+    if (message.params?.input?.some((item) => item.text === "Async delivery regression")) {
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
     if (!loadedThreads.has(message.params?.threadId)) {
       send({ id: message.id, error: { code: -32000, message: "thread not loaded" } });
       return;
@@ -186,6 +189,13 @@ lines.on("line", (line) => {
           item,
         },
       });
+    }
+    if (text === "Async delivery regression") {
+      send({ method: "turn/completed", params: {
+        threadId: "fixture-thread", turn: { id: "fixture-live-turn", status: "completed" },
+      } });
+      activeTurnId = undefined;
+      return;
     }
     if (text === "Inspect live commentary presentation") {
       send({ method: "item/started", params: { threadId: "fixture-thread", turnId: "fixture-live-turn",

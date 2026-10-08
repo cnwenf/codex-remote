@@ -4,6 +4,7 @@ import { ApprovalSheet, type ApprovalResolution } from "./components/approval-sh
 import { BrandMark } from "./components/brand-mark";
 import { Composer } from "./components/composer";
 import { QueuedFollowUps } from "./components/queued-follow-ups";
+import { MessageDeliveries } from "./components/message-deliveries";
 import { ConversationViewport } from "./components/conversation-viewport";
 import { DiffViewer } from "./components/diff-viewer";
 import { NewConversation } from "./components/new-conversation";
@@ -458,6 +459,8 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                 ) : null}
               </ConversationViewport>
               <div className={`conversation-controls ${composerExpanded ? "controls-expanded" : "controls-collapsed"}`}>
+                <MessageDeliveries messages={codex.selectedMessageDeliveries ?? []}
+                  onRetry={codex.retryMessageDelivery} language={language} />
                 <TodoListDock
                   todoList={codex.selectedThread.todoList}
                   running={codex.selectedThread.status === "running"}

@@ -35,6 +35,7 @@ export type GatewayEnvelope =
       readOnly?: boolean;
       appServerVersion?: string;
       imageUpload?: boolean;
+      messageDelivery?: boolean;
     }
   | { type: "rpc"; payload: RpcMessage }
   | { type: "diagnostic"; category: string; message: string };

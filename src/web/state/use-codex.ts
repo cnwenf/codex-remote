@@ -23,6 +23,7 @@ import {
 } from "../../protocol/permissions";
 import { CodexSocket, uploadImage, type RemoteApiOptions, type ImageUploadObserver } from "../api/socket";
 import { isQuestionContext, type QuestionContextRequest } from "../../protocol/question-context";
+import type { MessageDelivery, MessageOperation } from "../../protocol/message-delivery";
 
 export type ConnectionState = "disconnected" | "connecting" | "reconnecting" | "ready";
 export type TransportMode = "desktop-live" | "desktop-cold" | "web-live";
@@ -226,6 +227,32 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
   const [pinnedSectionId, setPinnedSectionId] = useState<string>();
   const [pendingRequests, setPendingRequests] = useState<RpcRequest[]>([]);
   const [queuedByThread, setQueuedByThread] = useState<Record<string, QueuedFollowUp[]>>({});
+  const [messageDeliveries, setMessageDeliveries] = useState<MessageDelivery[]>([]);
+  const messageDeliverySupported = useRef(false);
+  const receiveDelivery = useCallback((receipt: MessageDelivery) => {
+    setMessageDeliveries((current) => {
+      const previous = current.find((item) => item.id === receipt.id);
+      if (previous && previous.revision > receipt.revision) return current;
+      return [...current.filter((item) => item.id !== receipt.id), receipt].slice(-256);
+    });
+  }, []);
+  const submitMessage = useCallback(async (operation: MessageOperation, params: Record<string, unknown>) => {
+    const id = `web-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      const receipt = await socket.request("gateway/message/submit", {
+        id, operation, params: { ...params, clientMessageId: id },
+      });
+      receiveDelivery(receipt as MessageDelivery);
+    } catch (cause) {
+      if (cause instanceof Error && cause.message === "codex-socket-disconnected") {
+        throw new Error("连接中断，消息可能已接收。重连后确认发送结果。");
+      }
+      throw cause;
+    }
+  }, [receiveDelivery, socket]);
+  const retryMessageDelivery = useCallback(async (id: string) => {
+    receiveDelivery(await socket.request("gateway/message/retry", { id }) as MessageDelivery);
+  }, [receiveDelivery, socket]);
   const [creationOptions, setCreationOptions] = useState(emptyCreationOptions);
   const [desktopStateAvailable, setDesktopStateAvailable] = useState(false);
   const desktopStateAvailableRef = useRef(false);
@@ -265,6 +292,10 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
 
   useEffect(() => {
     const unsubscribeRpc = socket.subscribe((message) => {
+      if ("method" in message && message.method === "gateway/message/updated") {
+        receiveDelivery(message.params as MessageDelivery);
+        return;
+      }
       if ("method" in message) {
         const id = stringValue(asRecord(message.params).threadId);
         if (id) liveRevisions.current.set(id, (liveRevisions.current.get(id) ?? 0) + 1);
@@ -290,6 +321,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     const unsubscribeSession = socket.subscribeSession((envelope) => {
       if (envelope.type !== "session") return;
       if (envelope.state === "ready") {
+        messageDeliverySupported.current = envelope.messageDelivery === true;
         setConnection("ready");
         setState((current) => ({ ...current, stale: false }));
         if (envelope.defaultCwd) setDefaultCwd(envelope.defaultCwd);
@@ -310,7 +342,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       unsubscribeRpc();
       unsubscribeSession();
     };
-  }, [reconciler, socket]);
+  }, [receiveDelivery, reconciler, socket]);
 
   const connect = useCallback(
     async (token: string, url?: string, reuseTokenOnReconnect = false) => {
@@ -836,6 +868,20 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         ...uploaded.map((image) => ({ type: "remoteImage", id: image.id })),
       ];
       if (input.length === 0) throw new Error("请输入消息或添加图片");
+      if (messageDeliverySupported.current) {
+        const running = thread?.status === "running";
+        const operation = running ? thread.desktopMirror
+          ? runningMessageMode === "steer" ? "guide" : "queue" : "steer" : "start";
+        await submitMessage(operation, {
+          threadId: selectedThreadId, input,
+          ...(running ? { text, cwd: thread.cwd, expectedTurnId: thread.activeTurnId } : {
+            ...(thread?.model ? { model: thread.model } : {}),
+            ...(thread?.reasoningEffort ? { effort: thread.reasoningEffort } : {}),
+            ...permissionRpcParamsFromState(thread ?? {}),
+          }),
+        });
+        return;
+      }
       if (thread?.status === "running") {
         if (thread.desktopMirror) {
           const result = await socket.request("desktop/queue/add", {
@@ -960,12 +1006,16 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
         }
       }
     },
-    [desktopControlAvailable, reconciler, remoteApi.baseUrl, remoteApi.imageUploader, remoteApi.uploadImagesViaSocket, remoteApi.token, selectedThreadId, socket, state.threads, threadLoadError],
+    [desktopControlAvailable, reconciler, remoteApi.baseUrl, remoteApi.imageUploader, remoteApi.uploadImagesViaSocket, remoteApi.token, selectedThreadId, socket, state.threads, submitMessage, threadLoadError],
   );
 
   const steerQueuedMessage = useCallback(async (messageId: string) => {
     if (!selectedThreadId) throw new Error("Select a task first");
     const thread = state.threads[selectedThreadId];
+    if (messageDeliverySupported.current) {
+      await submitMessage("promote", { threadId: selectedThreadId, messageId, expectedTurnId: thread?.activeTurnId });
+      return;
+    }
     setQueuedByThread((current) => {
       const message = (current[selectedThreadId] ?? []).find((item) => item.id === messageId);
       return message
@@ -984,7 +1034,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       );
       throw cause;
     }
-  }, [reconciler, selectedThreadId, socket, state.threads]);
+  }, [reconciler, selectedThreadId, socket, state.threads, submitMessage]);
 
   const updateSelectedThreadSettings = useCallback((settings: CreateThreadOptions) => {
     if (!selectedThreadId) return;
@@ -1107,7 +1157,15 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       selectedThreadError:
         threadLoadError?.threadId === selectedThreadId ? threadLoadError?.message : undefined,
       selectedThread: selectedThreadId ? state.threads[selectedThreadId] : undefined,
-      selectedQueuedMessages: selectedThreadId ? queuedByThread[selectedThreadId] ?? [] : [],
+      selectedQueuedMessages: selectedThreadId ? (queuedByThread[selectedThreadId] ?? [])
+        .filter((message) => !messageDeliveries.some((receipt) => receipt.threadId === selectedThreadId && receipt.messageId === message.id &&
+          (receipt.operation === "guide" || receipt.operation === "promote") && receipt.status === "delivered"))
+        .map((message) =>
+        messageDeliveries.some((receipt) => receipt.threadId === selectedThreadId && receipt.messageId === message.id && receipt.status === "accepted")
+          ? { ...message, lifecycle: "promoting" as const } : message
+      ) : [],
+      selectedMessageDeliveries: messageDeliveries.filter((receipt) => receipt.threadId === selectedThreadId && receipt.status !== "delivered"),
+      retryMessageDelivery,
       selectedThreadHistory: selectedThreadId
         ? visibleHistoryState(threadHistory[selectedThreadId] ?? emptyThreadHistory, historyCoverage.current.get(selectedThreadId) ?? [], automaticGapPages.current.get(selectedThreadId) ?? 0)
         : emptyThreadHistory,
@@ -1172,6 +1230,8 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       steerQueuedMessage,
       state,
       queuedByThread,
+      messageDeliveries,
+      retryMessageDelivery,
       threadHistory,
       transportMode,
       transportReadOnly,
