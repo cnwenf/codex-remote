@@ -266,7 +266,7 @@ export function Composer({
             : chinese ? "引导当前轮次" : "Add guidance while Codex works"
           : chinese ? "输入下一条消息" : "What should Codex do next?"}
         rows={isExpanded ? 3 : 1}
-        disabled={disabled || busy}
+        disabled={busy}
       />
       {previews.length > 0 ? (
         <>

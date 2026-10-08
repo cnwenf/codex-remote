@@ -133,3 +133,63 @@ test("keeps the pinned question out of the conversation flow while paging upward
   await expect(page.locator("#root main")).toBeVisible();
   expect(pageErrors).toEqual([]);
 });
+
+test("keeps drafting responsive during pending question lookup and recovery", async ({ page }, testInfo) => {
+  const fixture = await build({
+    stdin: {
+      resolveDir: process.cwd(), loader: "tsx",
+      contents: `
+        import React, { useState } from "react";
+        import { createRoot } from "react-dom/client";
+        import { ConversationViewport } from "./src/web/components/conversation-viewport";
+        import { Composer } from "./src/web/components/composer";
+        const readQuestionContext = () => new Promise(() => {});
+        function Fixture() {
+          const [recovering, setRecovering] = useState(true);
+          const [expanded, setExpanded] = useState(false);
+          const [sent, setSent] = useState("");
+          window.finishRecovery = () => setRecovering(false);
+          return <main className="task-pane" style={{ height: "100dvh", display: "flex" }}>
+            <ConversationViewport threadId="pending-thread" connection="ready"
+              readQuestionContext={readQuestionContext}
+              history={{ hasMoreBefore: false, loading: false }} onLoadEarlier={async () => {}}
+              onInteract={() => setExpanded(false)}>
+              <article data-question-anchor="true" data-turn-id="turn-1" data-anchor-item-id="answer-1"
+                style={{ minHeight: 1800 }}>An existing answer</article>
+            </ConversationViewport>
+            <div className="conversation-controls">
+              <Composer draftKey="pending-thread" running={false} disabled={recovering}
+                expanded={expanded} onExpandedChange={setExpanded} onSend={async (text) => setSent(text)} />
+            </div>
+            <output aria-label="Sent message">{sent}</output>
+          </main>;
+        }
+        createRoot(document.getElementById("root")).render(<Fixture />);`,
+    },
+    bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic",
+    define: { "process.env.NODE_ENV": '"test"' },
+  });
+  await page.route("**/__pending-question", (route) => route.fulfill({
+    contentType: "text/html", body: '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="root"></div>',
+  }));
+  await page.goto("/__pending-question");
+  await page.addStyleTag({ path: resolve("src/web/styles.css") });
+  await page.addScriptTag({ content: fixture.outputFiles[0].text });
+  await expect(page.getByText("正在定位原始问题…")).toBeVisible();
+  const input = page.getByRole("textbox", { name: "Instruction" });
+  await expect(input).toBeEnabled();
+  if (testInfo.project.name === "chrome-mobile") await input.tap();
+  else await input.click();
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute("rows", "3");
+  await input.fill("Keep typing while locating the question");
+  await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+  await input.press("Control+Enter");
+  await expect(page.getByLabel("Sent message")).toHaveText("");
+  await page.evaluate(() => (window as unknown as { finishRecovery: () => void }).finishRecovery());
+  await expect(page.getByText("正在定位原始问题…")).toBeVisible();
+  await expect(input).toHaveValue("Keep typing while locating the question");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByLabel("Sent message")).toHaveText("Keep typing while locating the question");
+  await expect(input).toHaveValue("");
+});

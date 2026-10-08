@@ -512,6 +512,46 @@ describe("App", () => {
     expect(value.sendInstruction).toHaveBeenCalledWith("Guide now", [], "steer", undefined);
   });
 
+  it("allows drafting while question lookup and conversation recovery are still pending", async () => {
+    const thread = {
+      id: "pending-thread", title: "Recovering task", status: "idle", desktopMirror: true,
+      turnOrder: ["turn-1"],
+      turns: { "turn-1": { id: "turn-1", status: "completed", itemOrder: ["answer-1"], items: {
+        "answer-1": { id: "answer-1", type: "agentMessage", text: "Existing answer" },
+      } } },
+    };
+    const value = codexState({
+      state: { threadOrder: [thread.id], threads: { [thread.id]: thread }, stale: false },
+      connection: "ready", selectedThreadId: thread.id, selectedThread: thread,
+      selectedThreadLoading: true, desktopControlAvailable: true,
+      readQuestionContext: () => new Promise(() => {}),
+    });
+    useCodexMock.mockReturnValue(value);
+    const { container, rerender } = render(<App />);
+    const viewport = screen.getByTestId("timeline-scroll");
+    viewport.getBoundingClientRect = () => ({ top: 100, bottom: 500 } as DOMRect);
+    container.querySelector<HTMLElement>('[data-anchor-item-id="answer-1"]')!
+      .getBoundingClientRect = () => ({ top: 120, bottom: 220 } as DOMRect);
+    fireEvent.scroll(viewport);
+    expect(await screen.findByText("正在定位原始问题…")).toBeVisible();
+
+    const input = screen.getByRole("textbox", { name: "Instruction" });
+    expect(input).toBeEnabled();
+    await userEvent.click(input);
+    await userEvent.type(input, "Write before lookup completes");
+    expect(input).toHaveFocus();
+    expect(input).toHaveAttribute("rows", "3");
+    expect(input).toHaveValue("Write before lookup completes");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    useCodexMock.mockReturnValue({ ...value, selectedThreadLoading: false });
+    rerender(<App />);
+    expect(screen.getByText("正在定位原始问题…")).toBeVisible();
+    expect(input).toHaveValue("Write before lookup completes");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(value.sendInstruction).toHaveBeenCalledWith("Write before lookup completes", [], undefined, undefined);
+  });
+
   it("wires the visible assistant identity to the dedicated question RPC", async () => {
     const thread = {
       id: "thread-1", title: "Task", status: "idle", turnOrder: ["turn-1"],
