@@ -30,7 +30,12 @@ umask 077
 print -r -- "$$" > "$PID_FILE.tmp"
 /bin/mv -f "$PID_FILE.tmp" "$PID_FILE"
 
-CODEX_VERSION=$("$APP_PATH/Contents/Resources/codex" --version | /usr/bin/sed -E 's/^codex-cli[[:space:]]+//')
+CODEX_BIN="$APP_PATH/Contents/Resources/codex"
+# Desktop 更新后 CLI 移入独立目录；保留旧路径优先以兼容未升级的安装。
+if [[ ! -x "$CODEX_BIN" ]]; then
+  CODEX_BIN="$APP_PATH/Contents/Resources/codex-cli/bin/codex"
+fi
+CODEX_VERSION=$("$CODEX_BIN" --version | /usr/bin/sed -E 's/^codex-cli[[:space:]]+//')
 ADDITIONAL_HOSTS=""
 ORIGINS="http://$BIND_HOST:$PORT"
 if [[ "$BIND_HOST" != 127.0.0.1 ]]; then

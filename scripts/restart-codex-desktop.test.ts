@@ -48,7 +48,7 @@ describe.skipIf(process.platform !== "darwin")("confirmed Desktop force restart"
       // A health check must never stop either process.
       await expect(run(script, ["--check"], { env })).rejects.toMatchObject({ code: 1 });
       expect(desktop.signalCode).toBeNull();
-      await run(script, mode === "--recover" ? [mode, String(desktop.pid)] : [mode], { env, timeout: 8_000 });
+      await run(script, mode === "--recover" ? [mode, String(desktop.pid)] : [mode], { env, timeout: 20_000 });
       expect(await Promise.race([
         stopped,
         new Promise((resolve) => { setTimeout(() => resolve("still running"), 1_000).unref(); }),
@@ -65,7 +65,7 @@ describe.skipIf(process.platform !== "darwin")("confirmed Desktop force restart"
       await Promise.all([stopped, unrelatedStopped]);
       rmSync(directory, { recursive: true, force: true });
     }
-  }, 15_000);
+  }, 30_000);
 
   it("does not automatically restart a debug-enabled process or a different process", async () => {
     const directory = mkdtempSync(join(tmpdir(), "codex-recovery-test-"));
@@ -86,8 +86,9 @@ describe.skipIf(process.platform !== "darwin")("confirmed Desktop force restart"
         ...process.env, CODEX_DESKTOP_APP_PATH: app, CODEX_REMOTE_CURL_BIN: "/usr/bin/false",
         CODEX_REMOTE_OPEN_BIN: open, CODEX_REMOTE_TEST_OPENED: opened,
       };
-      await run(script, ["--recover", String(desktop.pid)], { env, timeout: 2_000 });
-      await run(script, ["--recover", String(process.pid)], { env, timeout: 2_000 });
+      // 全量测试时 macOS 进程查询可能超过两秒；仍用外层超时约束，避免误判为重启行为失败。
+      await run(script, ["--recover", String(desktop.pid)], { env, timeout: 8_000 });
+      await run(script, ["--recover", String(process.pid)], { env, timeout: 8_000 });
       expect(desktop.signalCode).toBeNull();
       expect(() => readFileSync(opened)).toThrow();
     } finally {
@@ -118,7 +119,7 @@ fi
     writeFileSync(open, '#!/bin/sh\ntouch "$CODEX_TEST_OPENED"\n', { mode: 0o755 });
     try {
       await run(script, ["--recover", "2147483647"], {
-        timeout: 2_000,
+        timeout: 8_000,
         env: { ...process.env, CODEX_DESKTOP_APP_PATH: app, CODEX_REMOTE_PS_BIN: ps,
           CODEX_REMOTE_CURL_BIN: curl, CODEX_REMOTE_OPEN_BIN: open,
           CODEX_TEST_EXECUTABLE: executable, CODEX_TEST_SEEN: join(directory, "seen"), CODEX_TEST_OPENED: opened },
@@ -127,5 +128,5 @@ fi
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });

@@ -74,6 +74,19 @@ function createStartedTransport(overrides: {
 }
 
 describe("DesktopBridgeTransport", () => {
+  it("stops through the Desktop owner so user-stop also pauses automatic goals", async () => {
+    const { client, messages, transport } = await createStartedTransport();
+    try {
+      client.ownerRequestResult = { method: "thread-follower-interrupt-turn", result: { ok: true, interruptedTurnId: "turn-1" } };
+      transport.send({ id: "stop", method: "turn/interrupt", params: { threadId: "thread-1", turnId: "turn-1" } });
+      await vi.waitFor(() => expect(client.ownerRequests).toEqual([{
+        method: "thread-follower-interrupt-turn", params: { conversationId: "thread-1", mode: "user-stop" },
+      }]));
+      expect(messages).toContainEqual({ id: "stop", result: { ok: true, interruptedTurnId: "turn-1" } });
+      expect(client.sent).toEqual([]);
+    } finally { await transport.stop(); }
+  });
+
   it("reads bounded turn summaries and preserves Desktop failure details", async () => {
     const { client, messages, transport } = await createStartedTransport();
     try {
@@ -1063,6 +1076,7 @@ describe("DesktopBridgeTransport", () => {
     const writeRequest = client.sent[1] as Record<string, unknown>;
     expect(JSON.parse(String(writeRequest.body))).toEqual({
       key: "queued-follow-ups",
+      threadId: "thread-1",
       value: { "thread-1": [{ id: "queued-2", text: "Keep queued", createdAt: 8 }] },
     });
     client.onMessage?.({
@@ -1371,6 +1385,7 @@ describe("DesktopBridgeTransport", () => {
     const restoreWriteRequest = client.sent[5] as Record<string, unknown>;
     expect(JSON.parse(String(restoreWriteRequest.body))).toEqual({
       key: "queued-follow-ups",
+      threadId: "thread-1",
       value: {
         "thread-1": [
           { id: "queued-1", text: "Guide now", createdAt: 7 },

@@ -135,6 +135,26 @@ export class DesktopCdpClient {
 
   async sendDesktopMessage(message: unknown): Promise<void> {
     if (!this.windowObjectId) throw new Error("desktop-cdp-not-ready");
+    const envelope = asRecord(message);
+    if (envelope.type === "fetch" && envelope.method === "POST" &&
+        (envelope.url === "vscode://codex/get-global-state" || envelope.url === "vscode://codex/set-global-state")) {
+      const body = typeof envelope.body === "string" ? asRecord(JSON.parse(envelope.body)) : {};
+      if (body.key === "queued-follow-ups") {
+        try {
+          // 新 Desktop 将队列迁入专用服务；保留原回执关联，让去重及不确定投递恢复逻辑不变。
+          const result = await this.requestThreadOwner("codex-remote-queue-state", {
+            operation: envelope.url.endsWith("/get-global-state") ? "read" : "write",
+            ...(envelope.url.endsWith("/set-global-state") ? { value: body.value, threadId: body.threadId } : {}),
+          });
+          this.onDesktopMessage?.({ type: "fetch-response", requestId: envelope.requestId,
+            responseType: "success", status: 200, bodyJsonString: JSON.stringify(result) });
+          return;
+        } catch (cause) {
+          // 仅旧版明确缺少服务时走旧路由；超时或断连的写入绝不换路径重试。
+          if (!(cause instanceof Error) || !cause.message.includes("desktop-queue-service-unavailable")) throw cause;
+        }
+      }
+    }
     await this.call("Runtime.callFunctionOn", {
       objectId: this.windowObjectId,
       functionDeclaration: "function(message) { return this.electronBridge.sendMessageFromView(message); }",
@@ -237,6 +257,11 @@ export class DesktopCdpClient {
     }
     const record = remoteResult as Record<string, unknown>;
     if (record.subtype === "error") throw new Error("desktop-thread-owner-request-failed");
+    const ownerResponse = asRecord(record.value);
+    // IPC 的错误也是正常 RPC 返回值，不能把未执行的停止或引导当成成功。
+    if (ownerResponse.resultType === "error") {
+      throw new Error(typeof ownerResponse.error === "string" ? ownerResponse.error : "desktop-thread-owner-request-failed");
+    }
     if (method === "thread-follower-update-thread-settings") {
       await this.syncVisibleThreadSettings(params);
     }
@@ -322,10 +347,9 @@ export class DesktopCdpClient {
     const endpoint = this.endpoint;
     if (!endpoint) throw new Error("desktop-thread-owner-unavailable");
     const targets = await this.discoverTargets(endpoint);
-    // The avatar overlay renderer can be suspended by Electron while the main
-    // window remains active. Use a second CDP connection to the main renderer
-    // for app-host RPC so owner calls cannot hang behind a frozen overlay.
-    const target = targets.find(isCodexRenderer);
+    // renderer 间 RPC 不回送发送者；连接 owner 自己会超时。优先独立窗口，避免浮层休眠。
+    const target = targets.find((target) => isCodexAuxiliaryRenderer(target) &&
+      String(target.url).includes("detached-window")) ?? targets.find(isCodexAuxiliaryRenderer) ?? targets.find(isCodexRenderer);
     if (!target) throw new Error("desktop-thread-owner-unavailable");
     const websocketUrl = parseLoopbackUrl(
       String(target.webSocketDebuggerUrl),
@@ -519,7 +543,9 @@ function isCodexAuxiliaryRenderer(value: unknown): value is CdpTarget {
   if (typeof target.url !== "string") return false;
   try {
     const parsed = new URL(target.url);
-    return parsed.protocol === "app:" && parsed.searchParams.get("initialRoute") === "/avatar-overlay";
+    return parsed.protocol === "app:" && parsed.hostname === "-" &&
+      ((parsed.pathname === "/index.html" && parsed.searchParams.get("initialRoute") === "/avatar-overlay") ||
+       (parsed.pathname === "/detached-window.html" && parsed.searchParams.get("initialRoute") === "/detached-window"));
   } catch {
     return false;
   }
@@ -888,32 +914,35 @@ function visibleThreadSettingsHelperExpression(): string {
 
 function ownerHelperExpression(): string {
   return `(() => {
-    if (window.__codexRemoteRequestThreadOwnerVersion !== 6) {
-      window.__codexRemoteRequestThreadOwnerVersion = 6;
+    if (window.__codexRemoteRequestThreadOwnerVersion !== 9) {
+      window.__codexRemoteRequestThreadOwnerVersion = 9;
       let coordinationPromise;
-      const getCoordination = async () => {
+      const getServices = async () => {
         if (coordinationPromise) return coordinationPromise;
         coordinationPromise = (async () => {
           const urls = [
             ...Array.from(document.querySelectorAll('link[href],script[src]')).map((node) => node.href || node.src),
             ...performance.getEntriesByType('resource').map((entry) => entry.name),
           ];
-          const moduleUrl = urls.find((url) => /\\/app-initial-[^/]+\\.js(?:$|\\?)/.test(url));
-          if (!moduleUrl) throw new Error('desktop-owner-module-not-found');
-          const loaded = await import(moduleUrl);
-          const createRemoteMain = Object.values(loaded).find((value) => {
-            if (typeof value !== 'function') return false;
-            try {
-              const source = String(value);
-              // The exported RPC client class also defines getRemoteMain.
-              // Only its factory accepts a MessagePort without construction.
-              return !/^\\s*class\\b/.test(source) && source.includes('getRemoteMain');
-            } catch {
-              // Desktop can export callable proxies whose primitive/string
-              // conversion intentionally throws. They are not RPC factories.
-              return false;
-            }
-          });
+          // RPC 工厂新版在 app-shared，旧版在 app-initial；只检查页面已加载的本地模块。
+          const moduleUrls = [...new Set(urls)].filter((url) =>
+            url.startsWith(window.location.origin + '/') && /\\/app-(?:initial|shared)-[^/]+\\.js(?:$|\\?)/.test(url));
+          if (!moduleUrls.length) throw new Error('desktop-owner-module-not-found');
+          let createRemoteMain;
+          for (const moduleUrl of moduleUrls) {
+            const loaded = await import(moduleUrl);
+            createRemoteMain = Object.values(loaded).find((value) => {
+              if (typeof value !== 'function') return false;
+              try {
+                const source = String(value);
+                // 排除需要 new 的客户端类，以及不能安全转字符串的导出代理。
+                return !/^\\s*class\\b/.test(source) && source.includes('getRemoteMain');
+              } catch {
+                return false;
+              }
+            });
+            if (createRemoteMain) break;
+          }
           if (!createRemoteMain) throw new Error('desktop-owner-rpc-factory-not-found');
           const channel = new MessageChannel();
           window.postMessage(
@@ -924,16 +953,44 @@ function ownerHelperExpression(): string {
           const remoteMain = createRemoteMain(channel.port1, {});
           const services = await remoteMain.services;
           if (!services?.clientCoordination) throw new Error('desktop-owner-coordination-unavailable');
-          return services.clientCoordination;
+          return services;
         })();
         return coordinationPromise;
       };
+      const requestOwner = async (services, method, params) => {
+        // 新版会话归主进程管理，旧 renderer 广播找不到 owner；按能力选择，失败不重复投递。
+        if (services.appServerManagers) {
+          const opened = await services.appServerManagers.open('local');
+          if (opened.status !== 'ready') throw new Error('desktop-thread-owner-unavailable');
+          try {
+            return await opened.manager.handleThreadFollowerRequest({ method, params });
+          } finally {
+            opened.manager[Symbol.dispose]();
+          }
+        }
+        const coordination = services.clientCoordination;
+        return coordination.requestThreadFollower({ hostId: 'local', request: { method, params } });
+      };
       window.__codexRemoteRequestThreadOwner = async (method, params) => {
         try {
-          const coordination = await getCoordination();
+          const services = await getServices();
+          if (method === 'codex-remote-queue-state') {
+            if (!services.queuedFollowUps) throw new Error('desktop-queue-service-unavailable');
+            if (params?.operation === 'read') return { value: (await services.queuedFollowUps.read()).state ?? {} };
+            if (params?.operation !== 'write' || !params.value || typeof params.value !== 'object' || Array.isArray(params.value)) {
+              throw new Error('desktop-queue-state-invalid');
+            }
+            if (typeof params.threadId !== 'string') throw new Error('desktop-thread-id-invalid');
+            // 只更新目标会话，由 owner 串行持久化并唤醒队列，不能用旧全量快照覆盖其他会话。
+            const response = await requestOwner(services, 'thread-follower-set-queued-follow-ups-state', {
+              conversationId: params.threadId, state: { [params.threadId]: params.value[params.threadId] ?? [] },
+            });
+            if (response?.resultType === 'error') throw new Error(response.error || 'desktop-queue-write-failed');
+            return { success: true };
+          }
           const conversationId = params?.conversationId;
           if (typeof conversationId !== 'string') throw new Error('desktop-thread-id-invalid');
-          return coordination.requestThreadFollower({ hostId: 'local', request: { method, params } });
+          return requestOwner(services, method, params);
         } catch (error) {
           // Renderer changes can leave the app-host coordination port stale.
           coordinationPromise = undefined;
@@ -942,8 +999,8 @@ function ownerHelperExpression(): string {
       };
       window.__codexRemoteBroadcastQueuedFollowUps = async (conversationId, messages) => {
         try {
-          const coordination = await getCoordination();
-          return coordination.threadQueuedFollowUpsChanged({ conversationId, messages });
+          const coordination = (await getServices()).clientCoordination;
+          return coordination.threadQueuedFollowUpsChanged({ hostId: 'local', conversationId, messages });
         } catch (error) {
           coordinationPromise = undefined;
           throw error;

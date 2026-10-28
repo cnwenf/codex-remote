@@ -1134,7 +1134,7 @@ export class DesktopBridgeTransport implements CodexTransport {
       requestId,
       method: "POST",
       url: "vscode://codex/set-global-state",
-      body: JSON.stringify({ key: "queued-follow-ups", value: state }),
+      body: JSON.stringify({ key: "queued-follow-ups", value: state, threadId }),
       reportUploadProgress: false,
     });
   }
@@ -1597,6 +1597,10 @@ function createOwnerRequest(message: RpcMessage) {
   const params = message.params as Record<string, unknown>;
   const conversationId = typeof params.threadId === "string" ? params.threadId : undefined;
   if (!conversationId) return undefined;
+  if (message.method === "turn/interrupt") {
+    // 用户停止必须由 Desktop 暂停自动目标并清理执行；携带旧 turnId 会跳过目标暂停。
+    return { method: "thread-follower-interrupt-turn", params: { conversationId, mode: "user-stop" } };
+  }
   if (message.method === "thread/settings/update") {
     const { threadId: _threadId, ...threadSettings } = params;
     return {

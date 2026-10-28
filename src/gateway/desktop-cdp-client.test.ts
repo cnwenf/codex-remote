@@ -71,7 +71,7 @@ describe("DesktopCdpClient", () => {
     await client.stop();
   });
 
-  it("uses a second main-renderer connection to call the current thread owner", async () => {
+  it("uses a neutral renderer to call the current thread owner without self-routing", async () => {
     server = new FakeCdpServer();
     const endpoint = await server.start();
     const client = new DesktopCdpClient({ endpoint });
@@ -161,6 +161,7 @@ describe("DesktopCdpClient", () => {
       messages: unknown[],
     ) => Promise<unknown>;
     await expect(broadcast("thread-1", [])).resolves.toEqual({
+      hostId: "local",
       conversationId: "thread-1",
       messages: [],
     });
@@ -187,6 +188,133 @@ describe("DesktopCdpClient", () => {
 
     expect(server.maxConcurrentVisibleSettingsSyncRequests).toBe(1);
     await client.stop();
+  });
+
+  it("discovers the RPC factory in app-shared and uses the dedicated queue service", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    await client.start(() => undefined, () => undefined);
+    await client.broadcastQueuedFollowUps("thread-1", []);
+    const expression = String(server.ownerRequests[1]?.params?.expression).replace(
+      "await import(moduleUrl)", "await window.__testImport(moduleUrl)",
+    );
+    const read = vi.fn(async () => ({ state: { other: [{ id: "keep" }] } }));
+    const write = vi.fn(async (_value: unknown) => undefined);
+    const broadcast = vi.fn(async (value: unknown) => value);
+    const services = { queuedFollowUps: { read, write }, clientCoordination: { threadQueuedFollowUpsChanged: broadcast } };
+    const window = {
+      location: { origin: "app://-" }, postMessage: vi.fn(),
+      __testImport: vi.fn(async (url: string) => url.includes("app-shared-") ? {
+        factory: function createRemoteMain() { const getRemoteMain = () => ({ services }); return getRemoteMain(); },
+      } : {}),
+    } as Record<string, any>;
+    const document = { querySelectorAll: () => [{ href: "app://-/assets/app-initial-new.js" }] };
+    const performance = { getEntriesByType: () => [{ name: "app://-/assets/app-shared-new.js" }] };
+    class MessageChannel { port1 = {}; port2 = {}; }
+    try {
+      eval(expression);
+      await expect(window.__codexRemoteRequestThreadOwner("codex-remote-queue-state", { operation: "read" }))
+        .resolves.toEqual({ value: { other: [{ id: "keep" }] } });
+      await window.__codexRemoteBroadcastQueuedFollowUps("t", []);
+      expect(broadcast).toHaveBeenCalledWith({ hostId: "local", conversationId: "t", messages: [] });
+    } finally { await client.stop(); }
+  });
+
+  it("adapts only queue fetches to app-host services and preserves fetch response correlation", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    const received: unknown[] = [];
+    await client.start((message) => received.push(message), () => undefined);
+    server.ownerResponse = { value: { t: [] } };
+    try {
+      await client.sendDesktopMessage({ type: "fetch", method: "POST", requestId: "queue-read",
+        url: "vscode://codex/get-global-state", body: JSON.stringify({ key: "queued-follow-ups" }) });
+      expect(received).toContainEqual({ type: "fetch-response", requestId: "queue-read",
+        responseType: "success", status: 200, bodyJsonString: JSON.stringify({ value: { t: [] } }) });
+      expect(server.ownerRequests.at(-1)?.params?.arguments).toEqual([
+        { value: "codex-remote-queue-state" }, { value: { operation: "read" } },
+      ]);
+      const original = { type: "fetch", method: "POST", requestId: "unrelated",
+        url: "vscode://codex/get-global-state", body: JSON.stringify({ key: "other" }) };
+      await client.sendDesktopMessage(original);
+      expect(server.requests.at(-1)?.params?.arguments).toEqual([{ value: original }]);
+    } finally { await client.stop(); }
+  });
+
+  it("uses the main-process owner for control and thread-scoped queue writes", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    await client.start(() => undefined, () => undefined);
+    await client.broadcastQueuedFollowUps("t", []);
+    const expression = String(server.ownerRequests[1]?.params?.expression).replace(
+      "await import(moduleUrl)", "await window.__testImport(moduleUrl)",
+    );
+    const handleThreadFollowerRequest = vi.fn(async (request: unknown) => ({ result: { ok: true }, request }));
+    const dispose = vi.fn();
+    const requestThreadFollower = vi.fn();
+    const write = vi.fn();
+    const services = {
+      appServerManagers: { open: vi.fn(async () => ({ status: "ready", manager: { handleThreadFollowerRequest, [Symbol.dispose]: dispose } })) },
+      clientCoordination: { requestThreadFollower }, queuedFollowUps: { write },
+    };
+    const window = { location: { origin: "app://-" }, postMessage: vi.fn(),
+      __testImport: async () => ({ factory: function() { const getRemoteMain = () => ({ services }); return getRemoteMain(); } }),
+    } as Record<string, any>;
+    const document = { querySelectorAll: () => [{ href: "app://-/assets/app-shared-new.js" }] };
+    const performance = { getEntriesByType: () => [] };
+    class MessageChannel { port1 = {}; port2 = {}; }
+    try {
+      eval(expression);
+      await window.__codexRemoteRequestThreadOwner("thread-follower-interrupt-turn", { conversationId: "t", mode: "user-stop" });
+      await window.__codexRemoteRequestThreadOwner("codex-remote-queue-state", {
+        operation: "write", threadId: "t", value: { t: [{ id: "new" }], other: [{ id: "stale" }] },
+      });
+      expect(handleThreadFollowerRequest.mock.calls.map(([request]) => request)).toEqual([
+        { method: "thread-follower-interrupt-turn", params: { conversationId: "t", mode: "user-stop" } },
+        { method: "thread-follower-set-queued-follow-ups-state", params: { conversationId: "t", state: { t: [{ id: "new" }] } } },
+      ]);
+      expect(write).not.toHaveBeenCalled();
+      expect(requestThreadFollower).not.toHaveBeenCalled();
+      expect(dispose).toHaveBeenCalledTimes(2);
+    } finally { await client.stop(); }
+  });
+
+  it("routes queue changes through the renderer owner rather than replacing shared storage", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    await client.start(() => undefined, () => undefined);
+    await client.broadcastQueuedFollowUps("t", []);
+    const expression = String(server.ownerRequests[1]?.params?.expression).replace(
+      "await import(moduleUrl)", "await window.__testImport(moduleUrl)",
+    );
+    const requestThreadFollower = vi.fn(async () => ({ resultType: "success", result: { ok: true } }));
+    const write = vi.fn();
+    const services = { clientCoordination: { requestThreadFollower }, queuedFollowUps: { write } };
+    const window = { location: { origin: "app://-" }, postMessage: vi.fn(),
+      __testImport: async () => ({ factory: function() { const getRemoteMain = () => ({ services }); return getRemoteMain(); } }),
+    } as Record<string, any>;
+    const document = { querySelectorAll: () => [{ href: "app://-/assets/app-shared-new.js" }] };
+    const performance = { getEntriesByType: () => [] };
+    class MessageChannel { port1 = {}; port2 = {}; }
+    try {
+      eval(expression);
+      await window.__codexRemoteRequestThreadOwner("codex-remote-queue-state", { operation: "write", threadId: "t", value: { t: [], other: [] } });
+      expect(requestThreadFollower).toHaveBeenCalledWith({ hostId: "local", request: {
+        method: "thread-follower-set-queued-follow-ups-state", params: { conversationId: "t", state: { t: [] } },
+      } });
+      expect(write).not.toHaveBeenCalled();
+    } finally { await client.stop(); }
+  });
+
+  it("surfaces rejected owner responses instead of acknowledging a stop that did not happen", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    await client.start(() => undefined, () => undefined);
+    server.ownerResponse = { resultType: "error", error: "owner denied" };
+    try {
+      await expect(client.requestThreadOwner("thread-follower-interrupt-turn", { conversationId: "t", mode: "user-stop" }))
+        .rejects.toThrow("owner denied");
+    } finally { await client.stop(); }
   });
 
   it("reads the visible Desktop composer settings for live E2E verification", async () => {

@@ -13,6 +13,27 @@ const gatewayLauncher = readFileSync(join(root, "scripts/launch-bundled-gateway.
 const macosUpdater = readFileSync(join(root, "scripts/perform-macos-update.sh"), "utf8");
 
 describe("native installer contract", () => {
+  it("starts the bundled gateway with the relocated Desktop CLI", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "codex-remote-cli-layout-"));
+    const script = join(fixture, "launch-gateway.sh");
+    const app = join(fixture, "Desktop.app");
+    try {
+      execFileSync("/bin/mkdir", ["-p", join(fixture, "bin"), join(app, "Contents/Resources/codex-cli/bin")]);
+      writeFileSync(script, gatewayLauncher, { mode: 0o755 });
+      writeFileSync(join(app, "Contents/Resources/codex-cli/bin/codex"), '#!/bin/sh\necho "codex-cli 0.159.2"\n', { mode: 0o755 });
+      writeFileSync(join(fixture, "bin/node"), '#!/bin/sh\nprintf "%s" "$CODEX_DESKTOP_APP_SERVER_VERSION"\n', { mode: 0o755 });
+      expect(execFileSync("/bin/zsh", [script], {
+        env: {
+          ...process.env, CODEX_DESKTOP_APP_PATH: app,
+          CODEX_REMOTE_GATEWAY_PID_FILE: join(fixture, "gateway.pid"),
+        },
+        encoding: "utf8",
+      })).toBe("0.159.2");
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   it("preserves externally configured origins in the bundled gateway launcher", () => {
     const fixture = mkdtempSync(join(tmpdir(), "codex-remote-origins-"));
     const script = join(fixture, "launch-gateway.sh");
