@@ -622,6 +622,66 @@ describe("DesktopState", () => {
     state.close();
   });
 
+  it.each([false, true])("restores and refreshes direct update_plan calls (outside history page: %s)", (paged) => {
+    const { databasePath, rolloutPath } = fixture();
+    const appendPlan = (id: string, plan: Array<{ step: string; status: string }>) => {
+      appendFileSync(rolloutPath, [
+        { type: "response_item", payload: {
+          type: "function_call", id: `${id}-record`, call_id: id, name: "update_plan",
+          arguments: JSON.stringify({ explanation: "Current work", plan }),
+          internal_chat_message_metadata_passthrough: { turn_id: "direct-plan" },
+        } },
+        { type: "response_item", payload: { type: "function_call_output", call_id: id, output: "Plan updated" } },
+        ...(paged ? [{ type: "event_msg", payload: { type: "agent_reasoning", text: "x".repeat(100_000) } }] : []),
+      ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    };
+    appendFileSync(rolloutPath, JSON.stringify({ type: "event_msg", payload: {
+      type: "task_started", turn_id: "direct-plan",
+    } }) + "\n");
+    appendPlan("plan-1", [{ step: "Inspect", status: "in_progress" }, { step: "Verify", status: "pending" }]);
+    let desktop = new DesktopState(databasePath);
+    const read = () => desktop.request("desktopState/readThread", {
+      threadId: "thread-1", history: { maxBytes: 64 * 1024 },
+    }) as any;
+    try {
+      expect(hydrateThread(initialCodexState, read()).threads["thread-1"]).toMatchObject({
+        status: "running",
+        todoList: { explanation: "Current work", items: [
+          { step: "Inspect", status: "inProgress" }, { step: "Verify", status: "pending" },
+        ] },
+      });
+      appendPlan("plan-2", [{ step: "Inspect", status: "completed" }, { step: "Verify", status: "in_progress" }]);
+      const snapshot = read();
+      expect(snapshot.thread.todoList.plan).toEqual([
+        { step: "Inspect", status: "completed" }, { step: "Verify", status: "in_progress" },
+      ]);
+      if (!paged) expect(snapshot.thread.turns.at(-1).items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "plan-2", type: "todoList", toolOutput: "Plan updated" }),
+      ]));
+      desktop.close();
+      desktop = new DesktopState(databasePath);
+      expect(hydrateThread(initialCodexState, read()).threads["thread-1"].todoList?.items).toEqual([
+        { step: "Inspect", status: "completed" }, { step: "Verify", status: "inProgress" },
+      ]);
+      appendPlan("plan-3", [{ step: "Inspect", status: "completed" }, { step: "Verify", status: "completed" }]);
+      expect(hydrateThread(initialCodexState, read()).threads["thread-1"].todoList).toBeUndefined();
+    } finally { desktop.close(); }
+  });
+
+  it.each(["{", "null", '{"plan":"invalid"}', " ".repeat(1024 * 1024) + '{"plan":[{"step":"Too large"}]}'])
+    ("ignores malformed or oversized direct plan arguments (%#)", (args) => {
+      const { databasePath, rolloutPath } = fixture();
+      appendFileSync(rolloutPath, JSON.stringify({ type: "response_item", payload: {
+        type: "function_call", call_id: "invalid-plan", name: "update_plan", arguments: args,
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+      } }) + "\n");
+      const desktop = new DesktopState(databasePath);
+      try {
+        expect((desktop.request("desktopState/readThread", { threadId: "thread-1" }) as any).thread.todoList)
+          .toBeUndefined();
+      } finally { desktop.close(); }
+    });
+
   it.each([false, true])("preserves long assistant Markdown through persisted records (completion event: %s)", (withCompletion) => {
     const { databasePath, rolloutPath } = fixture();
     const text = `# 长回复\n${"正文".repeat(3_000)}\nTHE_END`;

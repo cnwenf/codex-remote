@@ -1517,7 +1517,7 @@ function rolloutItem(
   if (type === "custom_tool_call" || type === "function_call") {
     const name = stringValue(payload.name) ?? "tool";
     const input = stringValue(payload.input);
-    const todoList = name === "exec" && input ? todoListFromExecInput(input) : undefined;
+    const todoList = todoListFromToolCall(payload);
     if (todoList) {
       return {
         id: stringValue(payload.call_id) ?? id,
@@ -1550,6 +1550,23 @@ function rolloutItem(
     };
   }
   return undefined;
+}
+
+function todoListFromToolCall(payload: Record<string, unknown>): ParsedTodoList | undefined {
+  if (payload.type === "function_call" && payload.name === "update_plan") {
+    // 新版 Desktop 直接保存 JSON 参数；分页和增量刷新共用解析，且绝不执行工具输入。
+    const args = stringValue(payload.arguments);
+    if (!args || args.length > 1024 * 1024) return undefined;
+    try {
+      const value = asRecord(JSON.parse(args));
+      const plan = rolloutPlan(value.plan);
+      return plan.length > 0 ? { explanation: stringValue(value.explanation), plan } : undefined;
+    } catch { return undefined; }
+  }
+  const input = stringValue(payload.input);
+  return (payload.type === "custom_tool_call" || payload.type === "function_call") && payload.name === "exec" && input
+    ? todoListFromExecInput(input)
+    : undefined;
 }
 
 function todoListFromExecInput(input: string) {
@@ -1585,13 +1602,8 @@ function todoListFromRolloutText(raw: string): ParsedTodoList | undefined {
         return { explanation: stringValue(payload.explanation), plan };
       }
     }
-    if (
-      entry.type === "response_item" &&
-      payload.type === "custom_tool_call" &&
-      payload.name === "exec"
-    ) {
-      const input = stringValue(payload.input);
-      const todoList = input ? todoListFromExecInput(input) : undefined;
+    if (entry.type === "response_item") {
+      const todoList = todoListFromToolCall(payload);
       if (todoList) return todoList;
     }
   }
