@@ -1134,7 +1134,9 @@ export class DesktopBridgeTransport implements CodexTransport {
       requestId,
       method: "POST",
       url: "vscode://codex/set-global-state",
-      body: JSON.stringify({ key: "queued-follow-ups", value: state, threadId }),
+      // 无 owner 的新版队列使用单条原生修改，避免旧快照删除同一会话刚排入的内容。
+      body: JSON.stringify({ key: "queued-follow-ups", value: state, threadId,
+        queueMutation: { operation, message } }),
       reportUploadProgress: false,
     });
   }
@@ -1515,6 +1517,9 @@ export class DesktopBridgeTransport implements CodexTransport {
     this.reconnecting = true;
     let connected = false;
     try {
+      // 发送超时不一定关闭 CDP；先释放旧连接，避免重连永远撞上 already-started。
+      await this.options.client.stop();
+      if (this.isStopped()) return;
       await this.options.client.start(
         (message) => this.receiveDesktopMessage(message),
         (cause) => this.markDisconnected(true, cause),
@@ -1525,7 +1530,11 @@ export class DesktopBridgeTransport implements CodexTransport {
     } finally {
       this.reconnecting = false;
     }
-    if (this.isStopped()) return;
+    if (this.isStopped()) {
+      // stop 可能发生在连接等待中；不能留下迟到的 CDP 连接。
+      if (connected) await this.options.client.stop();
+      return;
+    }
     if (!connected) {
       this.scheduleReconnect();
       return;
@@ -1667,13 +1676,10 @@ function unwrapOwnerResponse(value: unknown) {
 function isOwnerUnavailable(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
   return message.includes("desktop-thread-owner-unavailable") ||
-    message.endsWith("Error: timeout") ||
     message.includes("desktop-owner-module-not-found") ||
     message.includes("desktop-owner-rpc-factory-not-found") ||
     message.includes("desktop-owner-coordination-unavailable") ||
-    message.includes("no-client-found") ||
-    message.includes("client-disconnected") ||
-    message.includes("webcontents-destroyed");
+    message.includes("no-client-found");
 }
 
 function isInactiveQueueSteerError(cause: unknown) {

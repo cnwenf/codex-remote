@@ -1077,6 +1077,9 @@ describe("DesktopBridgeTransport", () => {
     expect(JSON.parse(String(writeRequest.body))).toEqual({
       key: "queued-follow-ups",
       threadId: "thread-1",
+      queueMutation: { operation: "steer", message: {
+        id: "queued-1", text: "Guide now", cwd: "/safe/project", createdAt: 7, context: { prompt: "Guide now" },
+      } },
       value: { "thread-1": [{ id: "queued-2", text: "Keep queued", createdAt: 8 }] },
     });
     client.onMessage?.({
@@ -1386,6 +1389,7 @@ describe("DesktopBridgeTransport", () => {
     expect(JSON.parse(String(restoreWriteRequest.body))).toEqual({
       key: "queued-follow-ups",
       threadId: "thread-1",
+      queueMutation: { operation: "restore", message: { id: "queued-1", text: "Guide now", createdAt: 7 } },
       value: {
         "thread-1": [
           { id: "queued-1", text: "Guide now", createdAt: 7 },
@@ -2551,7 +2555,7 @@ describe("DesktopBridgeTransport", () => {
     await transport.stop();
   });
 
-  it("falls back when Desktop reports a stale thread owner timeout", async () => {
+  it("does not retry a mutating owner request after a timeout with unknown delivery", async () => {
     const { client, messages, transport } = await createStartedTransport();
     client.ownerRequestError = new Error("desktop-thread-owner-request-failed:Error: timeout");
     transport.send({
@@ -2560,12 +2564,9 @@ describe("DesktopBridgeTransport", () => {
       params: { threadId: "thread-stale", input: [{ type: "text", text: "Continue" }] },
     });
 
-    await vi.waitFor(() => expect(client.sent).toHaveLength(1));
-    expect(client.sent[0]).toMatchObject({
-      type: "mcp-request",
-      request: { id: 24, method: "turn/steer" },
-    });
-    expect(messages).toEqual([]);
+    await vi.waitFor(() => expect(messages).toContainEqual({ id: 24,
+      error: { code: -32003, message: "desktop-thread-owner-request-failed:Error: timeout" } }));
+    expect(client.sent).toEqual([]);
     await transport.stop();
   });
 
@@ -2596,6 +2597,59 @@ describe("DesktopBridgeTransport", () => {
     expect(transport.state).toBe("live");
     expect(diagnostics).toContain("Desktop bridge reconnected");
     await transport.stop();
+  });
+
+  it("replaces the still-open CDP client after a failed send instead of retrying an already-started client", async () => {
+    const client = new FakeBridgeClient();
+    let connected = false;
+    let stale = true;
+    client.start = async (onMessage, onDisconnect) => {
+      if (connected) throw new Error("desktop-cdp-already-started");
+      connected = true;
+      client.onMessage = onMessage;
+      client.onDisconnect = onDisconnect;
+    };
+    client.stop = async () => { connected = false; stale = false; };
+    client.sendDesktopMessage = async (value) => {
+      if (stale) throw new Error("desktop-cdp-call-timeout");
+      const request = (value as { request: { id: number } }).request;
+      client.onMessage?.({ type: "mcp-response", hostId: "local", message: {
+        id: request.id, result: { data: [] },
+      } });
+    };
+    const messages: RpcMessage[] = [];
+    const transport = new DesktopBridgeTransport({ client, appServerVersion: "0.148.0-alpha.15", reconnectDelayMs: 0 });
+    try {
+      await transport.start(message => messages.push(message), () => undefined);
+      transport.send({ id: 1, method: "thread/list", params: {} });
+      await vi.waitFor(() => {
+        expect(stale).toBe(false);
+        expect(transport.state).toBe("live");
+      });
+      transport.send({ id: 2, method: "thread/list", params: {} });
+      await vi.waitFor(() => expect(messages).toContainEqual({ id: 2, result: { data: [] } }));
+    } finally { await transport.stop(); }
+  });
+
+  it("closes a late reconnect when the transport is stopped while start is pending", async () => {
+    const client = new FakeBridgeClient();
+    const transport = new DesktopBridgeTransport({ client, appServerVersion: "0.148.0-alpha.15", reconnectDelayMs: 0 });
+    await transport.start(() => undefined, () => undefined);
+    let finishStart!: () => void;
+    let started = false;
+    let connected = false;
+    client.start = async () => {
+      started = true;
+      await new Promise<void>(resolve => { finishStart = resolve; });
+      connected = true;
+    };
+    client.stop = async () => { connected = false; };
+    client.onDisconnect?.();
+    await vi.waitFor(() => expect(started).toBe(true));
+    await transport.stop();
+    finishStart();
+    await vi.waitFor(() => expect(connected).toBe(false));
+    expect(transport.state).toBe("stopped");
   });
 
   it("returns to live when Desktop reconnects its App Server", async () => {

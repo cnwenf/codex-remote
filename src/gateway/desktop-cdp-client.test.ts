@@ -254,7 +254,9 @@ describe("DesktopCdpClient", () => {
     const requestThreadFollower = vi.fn();
     const write = vi.fn();
     const services = {
-      appServerManagers: { open: vi.fn(async () => ({ status: "ready", manager: { handleThreadFollowerRequest, [Symbol.dispose]: dispose } })) },
+      appServerManagers: { open: vi.fn(async () => ({ status: "ready", manager: {
+        getStreamRole: async () => ({ role: "owner" }), handleThreadFollowerRequest, [Symbol.dispose]: dispose,
+      } })) },
       clientCoordination: { requestThreadFollower }, queuedFollowUps: { write },
     };
     const window = { location: { origin: "app://-" }, postMessage: vi.fn(),
@@ -276,6 +278,92 @@ describe("DesktopCdpClient", () => {
       expect(write).not.toHaveBeenCalled();
       expect(requestThreadFollower).not.toHaveBeenCalled();
       expect(dispose).toHaveBeenCalledTimes(2);
+    } finally { await client.stop(); }
+  });
+
+  it("stops an ownerless thread through bounded Desktop hydration without resuming or changing its configuration", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    await client.start(() => undefined, () => undefined);
+    await client.broadcastQueuedFollowUps("t", []);
+    const expression = String(server.ownerRequests[1]?.params?.expression).replace(
+      "await import(moduleUrl)", "await window.__testImport(moduleUrl)",
+    );
+    const handleThreadFollowerRequest = vi.fn(async () => { throw new Error("Please continue this conversation on the window where it was started."); });
+    const hydrateBackgroundThreads = vi.fn();
+    const setThreadGoalStatus = vi.fn();
+    const interruptConversation = vi.fn(async () => "active-turn");
+    const resumeConversation = vi.fn();
+    const sendRequest = vi.fn(async (method: string) => method === "thread/goal/get"
+      ? { goal: { status: "active" } } : { turnId: "active-turn" });
+    const dispose = vi.fn();
+    let role: { role: string; ownerClientId?: string } | null = null;
+    const removeQueuedMessage = vi.fn();
+    const restoreQueuedMessage = vi.fn();
+    const releaseDeferral = vi.fn();
+    const releaseCoordinator = vi.fn();
+    const manager = { getStreamRole: async () => role, handleThreadFollowerRequest, hydrateBackgroundThreads,
+      getThreadExecutionState: async () => ({ inProgress: true }), setThreadGoalStatus, interruptConversation,
+      getLatestTurnId: async () => "active-turn", resumeConversation, sendRequest, [Symbol.dispose]: dispose,
+      getTurnCoordinator: async () => ({ removeQueuedMessage, restoreQueuedMessage,
+        deferAutomaticTurns: async () => ({ [Symbol.dispose]: releaseDeferral }), [Symbol.dispose]: releaseCoordinator }),
+    };
+    const requestThreadFollower = vi.fn(async () => ({ result: { ok: true } }));
+    const write = vi.fn();
+    const services = { appServerManagers: { open: async () => ({ status: "ready", manager }) },
+      clientCoordination: { requestThreadFollower }, queuedFollowUps: { write } };
+    const window = { location: { origin: "app://-" }, postMessage: vi.fn(),
+      __testImport: async () => ({ factory: function() { const getRemoteMain = () => ({ services }); return getRemoteMain(); } }),
+    } as Record<string, any>;
+    const document = { querySelectorAll: () => [{ href: "app://-/assets/app-shared-new.js" }] };
+    const performance = { getEntriesByType: () => [] };
+    class MessageChannel { port1 = {}; port2 = {}; }
+    try {
+      eval(expression);
+      await expect(window.__codexRemoteRequestThreadOwner("thread-follower-interrupt-turn", {
+        conversationId: "t", mode: "user-stop",
+      })).resolves.toMatchObject({ result: { interruptedTurnId: "active-turn", ok: true } });
+      expect(hydrateBackgroundThreads).toHaveBeenCalledWith(["t"], { includeTurns: true, maxTurns: 1, refreshExisting: true });
+      expect(setThreadGoalStatus).toHaveBeenCalledWith("t", { status: "paused" });
+      expect(interruptConversation).toHaveBeenCalledWith("t", "user-stop");
+      expect(handleThreadFollowerRequest).not.toHaveBeenCalled();
+      expect(resumeConversation).not.toHaveBeenCalled();
+      expect(dispose).toHaveBeenCalledOnce();
+      await window.__codexRemoteRequestThreadOwner("thread-follower-steer-turn", {
+        conversationId: "t", input: [{ type: "text", text: "next" }], clientUserMessageId: "stable-id",
+      });
+      expect(sendRequest).toHaveBeenLastCalledWith("turn/steer", {
+        threadId: "t", expectedTurnId: "active-turn", input: [{ type: "text", text: "next" }],
+        clientUserMessageId: "stable-id", additionalContext: undefined,
+      });
+      const message = { id: "new", text: "next" };
+      for (const operation of ["add", "steer", "restore"]) {
+        await window.__codexRemoteRequestThreadOwner("codex-remote-queue-state", {
+          operation: "write", threadId: "t", value: { t: [message], other: [] },
+          queueMutation: { operation, message },
+        });
+      }
+      expect(removeQueuedMessage).toHaveBeenCalledExactlyOnceWith("t", "new");
+      expect(restoreQueuedMessage).toHaveBeenCalledTimes(2);
+      expect(restoreQueuedMessage).toHaveBeenLastCalledWith("t", {
+        message, index: 0, previousMessageId: undefined, nextMessageId: undefined,
+      });
+      expect(write).not.toHaveBeenCalled();
+      expect(releaseDeferral).toHaveBeenCalledTimes(3);
+      expect(releaseCoordinator).toHaveBeenCalledTimes(3);
+      role = { role: "follower", ownerClientId: "actual-owner" };
+      const stopParams = { conversationId: "t", mode: "user-stop" };
+      await window.__codexRemoteRequestThreadOwner("thread-follower-interrupt-turn", stopParams);
+      expect(requestThreadFollower).toHaveBeenCalledExactlyOnceWith({ hostId: "local", targetClientId: "actual-owner",
+        request: { method: "thread-follower-interrupt-turn", params: stopParams } });
+      role = null;
+      setThreadGoalStatus.mockRejectedValueOnce(new Error("pause denied"));
+      await expect(window.__codexRemoteRequestThreadOwner("thread-follower-interrupt-turn", stopParams))
+        .rejects.toThrow("desktop-thread-goal-pause-failed");
+      expect(interruptConversation).toHaveBeenCalledTimes(2);
+      interruptConversation.mockResolvedValueOnce(null as any);
+      await expect(window.__codexRemoteRequestThreadOwner("thread-follower-interrupt-turn", stopParams))
+        .rejects.toThrow("desktop-thread-interrupt-unconfirmed");
     } finally { await client.stop(); }
   });
 

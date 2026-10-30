@@ -144,7 +144,9 @@ export class DesktopCdpClient {
           // 新 Desktop 将队列迁入专用服务；保留原回执关联，让去重及不确定投递恢复逻辑不变。
           const result = await this.requestThreadOwner("codex-remote-queue-state", {
             operation: envelope.url.endsWith("/get-global-state") ? "read" : "write",
-            ...(envelope.url.endsWith("/set-global-state") ? { value: body.value, threadId: body.threadId } : {}),
+            ...(envelope.url.endsWith("/set-global-state") ? {
+              value: body.value, threadId: body.threadId, queueMutation: body.queueMutation,
+            } : {}),
           });
           this.onDesktopMessage?.({ type: "fetch-response", requestId: envelope.requestId,
             responseType: "success", status: 200, bodyJsonString: JSON.stringify(result) });
@@ -262,6 +264,8 @@ export class DesktopCdpClient {
     if (ownerResponse.resultType === "error") {
       throw new Error(typeof ownerResponse.error === "string" ? ownerResponse.error : "desktop-thread-owner-request-failed");
     }
+    const goalPauseError = asRecord(ownerResponse.result).goalPauseError;
+    if (typeof goalPauseError === "string") throw new Error(`desktop-thread-goal-pause-failed:${goalPauseError}`);
     if (method === "thread-follower-update-thread-settings") {
       await this.syncVisibleThreadSettings(params);
     }
@@ -914,8 +918,8 @@ function visibleThreadSettingsHelperExpression(): string {
 
 function ownerHelperExpression(): string {
   return `(() => {
-    if (window.__codexRemoteRequestThreadOwnerVersion !== 9) {
-      window.__codexRemoteRequestThreadOwnerVersion = 9;
+    if (window.__codexRemoteRequestThreadOwnerVersion !== 10) {
+      window.__codexRemoteRequestThreadOwnerVersion = 10;
       let coordinationPromise;
       const getServices = async () => {
         if (coordinationPromise) return coordinationPromise;
@@ -958,14 +962,83 @@ function ownerHelperExpression(): string {
         return coordinationPromise;
       };
       const requestOwner = async (services, method, params) => {
-        // 新版会话归主进程管理，旧 renderer 广播找不到 owner；按能力选择，失败不重复投递。
+        // 服务存在不代表拥有目标会话；先查归属，写入失败后绝不换路径重复投递。
         if (services.appServerManagers) {
           const opened = await services.appServerManagers.open('local');
           if (opened.status !== 'ready') throw new Error('desktop-thread-owner-unavailable');
+          const manager = opened.manager;
           try {
-            return await opened.manager.handleThreadFollowerRequest({ method, params });
+            const role = typeof manager.getStreamRole === 'function'
+              ? await manager.getStreamRole(params.conversationId) : { role: 'owner' };
+            if (role?.role === 'owner') return await manager.handleThreadFollowerRequest({ method, params });
+            if (role?.role === 'follower') return await services.clientCoordination.requestThreadFollower({
+              hostId: 'local', targetClientId: role.ownerClientId, request: { method, params },
+            });
+            if (method === 'thread-follower-set-queued-follow-ups-state') {
+              // 无 owner 时只改请求指定的一条，保留同一会话并发排入的新消息。
+              const mutation = params.queueMutation;
+              if (!mutation?.message || typeof mutation.message.id !== 'string' ||
+                  !['add', 'restore', 'steer'].includes(mutation.operation)) {
+                throw new Error('desktop-queue-mutation-invalid');
+              }
+              const coordinator = await manager.getTurnCoordinator();
+              let deferred;
+              try {
+                deferred = await coordinator.deferAutomaticTurns(params.conversationId);
+                if (mutation.operation === 'steer') {
+                  await coordinator.removeQueuedMessage(params.conversationId, mutation.message.id);
+                } else {
+                  const desired = params.state[params.conversationId] ?? [];
+                  const index = desired.findIndex((entry) => entry.id === mutation.message.id);
+                  await coordinator.restoreQueuedMessage(params.conversationId, {
+                    message: mutation.message, index: Math.max(index, 0),
+                    previousMessageId: desired[index - 1]?.id, nextMessageId: desired[index + 1]?.id,
+                  });
+                }
+                return { result: { ok: true } };
+              } finally {
+                deferred?.[Symbol.dispose]();
+                coordinator[Symbol.dispose]();
+              }
+            }
+            if (method === 'thread-follower-update-thread-settings') return { result: {
+              applied: await manager.updateThreadSettingsForNextTurn(params.conversationId, params.threadSettings),
+            } };
+            if (method !== 'thread-follower-interrupt-turn' && method !== 'thread-follower-steer-turn') {
+              throw new Error('desktop-thread-owner-unavailable');
+            }
+            // 只补最新一轮缓存；不能 resume/adopt 运行任务，否则会改模型、权限或执行配置。
+            await manager.hydrateBackgroundThreads([params.conversationId], {
+              includeTurns: true, maxTurns: 1, refreshExisting: true,
+            });
+            const refreshedRole = await manager.getStreamRole(params.conversationId);
+            if (refreshedRole) return refreshedRole.role === 'owner'
+              ? await manager.handleThreadFollowerRequest({ method, params })
+              : await services.clientCoordination.requestThreadFollower({ hostId: 'local',
+                  targetClientId: refreshedRole.ownerClientId, request: { method, params } });
+            const execution = await manager.getThreadExecutionState(params.conversationId);
+            if (!execution) throw new Error('desktop-thread-control-state-unavailable');
+            if (method === 'thread-follower-steer-turn') {
+              const turnId = await manager.getLatestTurnId(params.conversationId);
+              if (!execution.inProgress || !turnId) throw new Error('no active turn to steer');
+              return { result: await manager.sendRequest('turn/steer', {
+                threadId: params.conversationId, expectedTurnId: turnId, input: params.input,
+                clientUserMessageId: params.clientUserMessageId, additionalContext: params.additionalContext,
+              }) };
+            }
+            // 缓存未必带自动目标；先读服务端目标并暂停，再走 Desktop 的完整 user-stop 清理。
+            const { goal } = await manager.sendRequest('thread/goal/get', { threadId: params.conversationId });
+            let goalPauseError;
+            if (goal?.status === 'active') {
+              try { await manager.setThreadGoalStatus(params.conversationId, { status: 'paused' }); }
+              catch (error) { goalPauseError = String(error); }
+            }
+            const interruptedTurnId = await manager.interruptConversation(params.conversationId, 'user-stop');
+            if (goalPauseError) throw new Error('desktop-thread-goal-pause-failed:' + goalPauseError);
+            if (execution.inProgress && !interruptedTurnId) throw new Error('desktop-thread-interrupt-unconfirmed');
+            return { result: { interruptedTurnId, ok: true } };
           } finally {
-            opened.manager[Symbol.dispose]();
+            manager[Symbol.dispose]();
           }
         }
         const coordination = services.clientCoordination;
@@ -984,6 +1057,7 @@ function ownerHelperExpression(): string {
             // 只更新目标会话，由 owner 串行持久化并唤醒队列，不能用旧全量快照覆盖其他会话。
             const response = await requestOwner(services, 'thread-follower-set-queued-follow-ups-state', {
               conversationId: params.threadId, state: { [params.threadId]: params.value[params.threadId] ?? [] },
+              ...(params.queueMutation ? { queueMutation: params.queueMutation } : {}),
             });
             if (response?.resultType === 'error') throw new Error(response.error || 'desktop-queue-write-failed');
             return { success: true };
