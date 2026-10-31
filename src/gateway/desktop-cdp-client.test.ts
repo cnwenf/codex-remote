@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeCdpServer } from "../../tests/fixtures/fake-cdp-server";
 import * as poisonedDesktopModule from "../../tests/fixtures/app-initial-poisoned";
 import { DesktopCdpClient } from "./desktop-cdp-client";
+import { DesktopBridgeTransport } from "./desktop-bridge-transport";
+import type { RpcMessage } from "../protocol/types";
 
 let server: FakeCdpServer | undefined;
 
@@ -238,6 +240,67 @@ describe("DesktopCdpClient", () => {
         url: "vscode://codex/get-global-state", body: JSON.stringify({ key: "other" }) };
       await client.sendDesktopMessage(original);
       expect(server.requests.at(-1)?.params?.arguments).toEqual([{ value: original }]);
+    } finally { await client.stop(); }
+  });
+
+  it.each(["read", "write"] as const)("keeps the bridge writable after a queue %s owner rejection", async (phase) => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    const transport = new DesktopBridgeTransport({ client, appServerVersion: "0.148.0-alpha.15", reconnectDelayMs: 5 });
+    const messages: RpcMessage[] = [];
+    const diagnostics: string[] = [];
+    const error = "Error: Please continue this conversation on the window where it was started.";
+    try {
+      await transport.start(message => messages.push(message), diagnostic => diagnostics.push(diagnostic.message));
+      server.ownerException = error;
+      server.ownerExceptionOperation = phase;
+      server.ownerResponse = { value: {} };
+      transport.send({ id: 1, method: "desktop/queue/add", params: { threadId: "t", text: "next" } });
+      await vi.waitFor(() => expect(messages).toContainEqual({ id: 1, error: {
+        code: -32002, message: `desktop-thread-owner-request-failed:${error}`,
+      } }));
+      expect(transport.state).toBe("live");
+      expect(diagnostics).toEqual([]);
+      server.ownerException = undefined;
+      server.ownerResponse = { value: {} };
+      transport.send({ id: 2, method: "desktop/queue/list", params: { threadId: "other" } });
+      await vi.waitFor(() => expect(messages).toContainEqual({ id: 2, result: { messages: [] } }));
+      transport.send({ id: 3, method: "thread/list", params: {} });
+      server.emitBinding({ type: "mcp-response", hostId: "local", message: { id: 3, result: { data: [] } } });
+      await vi.waitFor(() => expect(messages).toContainEqual({ id: 3, result: { data: [] } }));
+      expect(server.requests.filter(request => request.method === "Runtime.enable")).toHaveLength(1);
+    } finally { await transport.stop(); }
+  });
+
+  it("returns an IPC queue rejection without invalidating CDP or replaying the write", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    const received: unknown[] = [];
+    try {
+      await client.start(message => received.push(message), () => undefined);
+      server.ownerResponse = { resultType: "error", error: "owner denied" };
+      await expect(client.sendDesktopMessage({ type: "fetch", method: "POST", requestId: "queue-write",
+        url: "vscode://codex/set-global-state", body: JSON.stringify({ key: "queued-follow-ups", threadId: "t", value: { t: [] } }),
+      })).resolves.toBeUndefined();
+      expect(received).toContainEqual({ type: "fetch-response", requestId: "queue-write",
+        responseType: "error", status: 500, error: "owner denied" });
+      expect(server.ownerRequests.filter(request => request.method === "Runtime.callFunctionOn")).toHaveLength(1);
+      await expect(client.sendDesktopMessage({ type: "mcp-request", hostId: "local", request: { id: 1, method: "thread/list" } }))
+        .resolves.toBeUndefined();
+    } finally { await client.stop(); }
+  });
+
+  it("still propagates a queue CDP timeout instead of claiming an owner rejection", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    const received: unknown[] = [];
+    try {
+      await client.start(message => received.push(message), () => undefined);
+      vi.spyOn(client, "requestThreadOwner").mockRejectedValueOnce(new Error("desktop-cdp-owner-call-timeout"));
+      await expect(client.sendDesktopMessage({ type: "fetch", method: "POST", requestId: "queue-write",
+        url: "vscode://codex/set-global-state", body: JSON.stringify({ key: "queued-follow-ups", threadId: "t", value: { t: [] } }),
+      })).rejects.toThrow("desktop-cdp-owner-call-timeout");
+      expect(received).toEqual([]);
     } finally { await client.stop(); }
   });
 

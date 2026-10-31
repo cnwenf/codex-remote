@@ -965,7 +965,7 @@ export class DesktopBridgeTransport implements CodexTransport {
         id: pending.request.id,
         error: {
           code: -32002,
-          message: "Desktop queue read failed",
+          message: typeof response.error === "string" ? response.error : "Desktop queue read failed",
         },
       });
       return;
@@ -1157,7 +1157,7 @@ export class DesktopBridgeTransport implements CodexTransport {
         id: pending.request.id,
         error: {
           code: -32002,
-          message: "Desktop queue update failed",
+          message: typeof response.error === "string" ? response.error : "Desktop queue update failed",
         },
       });
       return;
@@ -1595,8 +1595,9 @@ export class DesktopBridgeTransport implements CodexTransport {
   }
 
   private dispatch(message: unknown) {
-    void this.options.client.sendDesktopMessage(message).catch(() => {
-      this.markDisconnected(true);
+    void this.options.client.sendDesktopMessage(message).catch((cause) => {
+      // 保留实际断连原因，不记录消息内容，避免下次只留下无因的只读提示。
+      this.markDisconnected(true, cause instanceof Error ? cause : new Error("desktop-send-failed"));
     });
   }
 }

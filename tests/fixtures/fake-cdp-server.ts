@@ -18,6 +18,8 @@ export class FakeCdpServer {
     method: "thread-follower-update-thread-settings",
     result: { ok: true },
   };
+  ownerException?: string;
+  ownerExceptionOperation?: "read" | "write";
   private readonly httpServer: Server;
   private readonly websocketServer: WebSocketServer;
   private socket?: WebSocket;
@@ -87,6 +89,14 @@ export class FakeCdpServer {
       socket.on("message", (raw) => {
         const request = JSON.parse(raw.toString()) as CdpRequest;
         (owner ? this.ownerRequests : this.requests).push(request);
+        const ownerParams = (request.params?.arguments as Array<{ value?: { operation?: string } }> | undefined)?.[1]?.value;
+        if (owner && request.method === "Runtime.callFunctionOn" && this.ownerException &&
+            (!this.ownerExceptionOperation || ownerParams?.operation === this.ownerExceptionOperation)) {
+          socket.send(JSON.stringify({ id: request.id, result: {
+            exceptionDetails: { exception: { description: this.ownerException } },
+          } }));
+          return;
+        }
         const visibleSettingsSync = !owner &&
           request.method === "Runtime.callFunctionOn" &&
           String(request.params?.functionDeclaration).includes("__codexRemoteSyncVisibleThreadSettings");

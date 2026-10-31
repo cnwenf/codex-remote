@@ -2,6 +2,8 @@ import WebSocket from "ws";
 
 const BINDING_NAME = "__codexLocalDesktopEvent";
 const DEFAULT_TIMEOUT_MS = 5_000;
+// owner 已返回的业务错误不代表 CDP 断连；与无回执的超时分开，避免全桥只读或重复写入。
+class DesktopOwnerRequestError extends Error {}
 const FORWARDED_MESSAGE_TYPES = [
   "mcp-request",
   "mcp-response",
@@ -153,7 +155,14 @@ export class DesktopCdpClient {
           return;
         } catch (cause) {
           // 仅旧版明确缺少服务时走旧路由；超时或断连的写入绝不换路径重试。
-          if (!(cause instanceof Error) || !cause.message.includes("desktop-queue-service-unavailable")) throw cause;
+          if (cause instanceof Error && cause.message.includes("desktop-queue-service-unavailable")) {
+            // 旧 Desktop 继续使用原有 fetch 路由。
+          } else if (cause instanceof DesktopOwnerRequestError) {
+            // 单个会话拒绝通过原请求回执返回，保留其他会话的控制能力。
+            this.onDesktopMessage?.({ type: "fetch-response", requestId: envelope.requestId,
+              responseType: "error", status: 500, error: cause.message });
+            return;
+          } else throw cause;
         }
       }
     }
@@ -252,17 +261,21 @@ export class DesktopCdpClient {
       awaitPromise: true,
       returnByValue: true,
     }, 30_000);
-    throwRuntimeException(response, "desktop-thread-owner-request-failed");
+    try {
+      throwRuntimeException(response, "desktop-thread-owner-request-failed");
+    } catch (cause) {
+      throw new DesktopOwnerRequestError((cause as Error).message);
+    }
     const remoteResult = response.result;
     if (!remoteResult || typeof remoteResult !== "object") {
       throw new Error("desktop-thread-owner-response-invalid");
     }
     const record = remoteResult as Record<string, unknown>;
-    if (record.subtype === "error") throw new Error("desktop-thread-owner-request-failed");
+    if (record.subtype === "error") throw new DesktopOwnerRequestError("desktop-thread-owner-request-failed");
     const ownerResponse = asRecord(record.value);
     // IPC 的错误也是正常 RPC 返回值，不能把未执行的停止或引导当成成功。
     if (ownerResponse.resultType === "error") {
-      throw new Error(typeof ownerResponse.error === "string" ? ownerResponse.error : "desktop-thread-owner-request-failed");
+      throw new DesktopOwnerRequestError(typeof ownerResponse.error === "string" ? ownerResponse.error : "desktop-thread-owner-request-failed");
     }
     const goalPauseError = asRecord(ownerResponse.result).goalPauseError;
     if (typeof goalPauseError === "string") throw new Error(`desktop-thread-goal-pause-failed:${goalPauseError}`);
