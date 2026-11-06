@@ -931,8 +931,8 @@ function visibleThreadSettingsHelperExpression(): string {
 
 function ownerHelperExpression(): string {
   return `(() => {
-    if (window.__codexRemoteRequestThreadOwnerVersion !== 10) {
-      window.__codexRemoteRequestThreadOwnerVersion = 10;
+    if (window.__codexRemoteRequestThreadOwnerVersion !== 11) {
+      window.__codexRemoteRequestThreadOwnerVersion = 11;
       let coordinationPromise;
       const getServices = async () => {
         if (coordinationPromise) return coordinationPromise;
@@ -941,23 +941,38 @@ function ownerHelperExpression(): string {
             ...Array.from(document.querySelectorAll('link[href],script[src]')).map((node) => node.href || node.src),
             ...performance.getEntriesByType('resource').map((entry) => entry.name),
           ];
-          // RPC 工厂新版在 app-shared，旧版在 app-initial；只检查页面已加载的本地模块。
+          // 保留旧版 ESM 入口；新版 Rspack 只读取页面已有的同源入口，不猜测 chunk ID 或导入任意 URL。
           const moduleUrls = [...new Set(urls)].filter((url) =>
             url.startsWith(window.location.origin + '/') && /\\/app-(?:initial|shared)-[^/]+\\.js(?:$|\\?)/.test(url));
-          if (!moduleUrls.length) throw new Error('desktop-owner-module-not-found');
+          const entryPrefix = window.location.origin + '/assets/';
+          const entryUrls = Array.from(document.querySelectorAll('script[type="module"][src]'), (node) => node.src)
+            .filter((url) => typeof url === 'string' && url.startsWith(entryPrefix) &&
+              /^\\d+\\.[a-f0-9]+\\.js$/.test(url.slice(entryPrefix.length)));
+          if (!moduleUrls.length && !entryUrls.length) throw new Error('desktop-owner-module-not-found');
+          const findFactory = (exports) => Object.values(exports).find((value) => {
+            if (typeof value !== 'function') return false;
+            try {
+              const source = String(value);
+              // 排除需要 new 的客户端类，以及不能安全转字符串的导出代理。
+              return !/^\\s*class\\b/.test(source) && source.includes('getRemoteMain');
+            } catch {
+              return false;
+            }
+          });
           let createRemoteMain;
-          for (const moduleUrl of moduleUrls) {
+          for (const moduleUrl of new Set([...moduleUrls, ...entryUrls])) {
             const loaded = await import(moduleUrl);
-            createRemoteMain = Object.values(loaded).find((value) => {
-              if (typeof value !== 'function') return false;
-              try {
-                const source = String(value);
-                // 排除需要 new 的客户端类，以及不能安全转字符串的导出代理。
-                return !/^\\s*class\\b/.test(source) && source.includes('getRemoteMain');
-              } catch {
-                return false;
+            createRemoteMain = findFactory(loaded);
+            const requireModule = loaded.__webpack_require__;
+            if (!createRemoteMain && typeof requireModule === 'function' && requireModule.m) {
+              // 工厂在已注册的模块里；只加载包含 RPC 工厂调用特征的模块，跳过无关模块。
+              for (const [id, initializer] of Object.entries(requireModule.m)) {
+                if (typeof initializer !== 'function' ||
+                    !Function.prototype.toString.call(initializer).includes('.getRemoteMain()')) continue;
+                createRemoteMain = findFactory(requireModule(id));
+                if (createRemoteMain) break;
               }
-            });
+            }
             if (createRemoteMain) break;
           }
           if (!createRemoteMain) throw new Error('desktop-owner-rpc-factory-not-found');

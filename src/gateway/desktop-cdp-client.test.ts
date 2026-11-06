@@ -222,6 +222,53 @@ describe("DesktopCdpClient", () => {
     } finally { await client.stop(); }
   });
 
+  it("reads and writes the queue through a hashed Rspack entry with no resource timing entries", async () => {
+    server = new FakeCdpServer();
+    const client = new DesktopCdpClient({ endpoint: await server.start() });
+    try {
+      await client.start(() => undefined, () => undefined);
+      await client.broadcastQueuedFollowUps("t", []);
+      const expression = String(server.ownerRequests[1]?.params?.expression).replace(
+        "await import(moduleUrl)", "await window.__testImport(moduleUrl)",
+      );
+      const entry = "app://-/assets/357055.66646607e6.js";
+      const read = vi.fn(async () => ({ state: { other: [] } }));
+      const write = vi.fn(async () => ({ result: { ok: true } }));
+      const manager = { getStreamRole: async () => ({ role: "owner" }),
+        handleThreadFollowerRequest: write, [Symbol.dispose]() {} };
+      const services = { queuedFollowUps: { read }, clientCoordination: {},
+        appServerManagers: { open: async () => ({ status: "ready", manager }) } };
+      const requireModule = Object.assign(vi.fn(() => ({
+        minified: function(port: unknown) { return { port, getRemoteMain: () => ({ services }) }.getRemoteMain(); },
+      })), { m: {
+        unrelated() { throw new Error("do not initialize unrelated modules"); },
+        rpc() { return "new Session(port).getRemoteMain()"; },
+      } });
+      const window = { location: { origin: "app://-" }, postMessage: vi.fn(),
+        __testImport: vi.fn(async () => ({ __webpack_require__: requireModule })),
+      } as Record<string, any>;
+      const document = {
+        querySelectorAll: (selector: string) => selector === 'script[type="module"][src]'
+          ? [{ src: "https://example.invalid/assets/123456.abcdef0123.js" }, { src: entry }]
+          : [{ src: entry }],
+      };
+      const performance = { getEntriesByType: () => [] };
+      class MessageChannel { port1 = {}; port2 = {}; }
+      eval(expression);
+      await expect(window.__codexRemoteRequestThreadOwner("codex-remote-queue-state", { operation: "read" }))
+        .resolves.toEqual({ value: { other: [] } });
+      const message = { id: "next", text: "next" };
+      await expect(window.__codexRemoteRequestThreadOwner("codex-remote-queue-state", {
+        operation: "write", threadId: "t", value: { t: [message], other: [] },
+      })).resolves.toEqual({ success: true });
+      expect(write).toHaveBeenCalledExactlyOnceWith({
+        method: "thread-follower-set-queued-follow-ups-state", params: { conversationId: "t", state: { t: [message] } },
+      });
+      expect(window.__testImport).toHaveBeenCalledExactlyOnceWith(entry);
+      expect(requireModule).toHaveBeenCalledExactlyOnceWith("rpc");
+    } finally { await client.stop(); }
+  });
+
   it("adapts only queue fetches to app-host services and preserves fetch response correlation", async () => {
     server = new FakeCdpServer();
     const client = new DesktopCdpClient({ endpoint: await server.start() });
