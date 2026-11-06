@@ -11,6 +11,11 @@ const IMAGE_READ_ERROR = "无法读取图片尺寸，请重新选择图片";
 
 export type ImageDimensions = { width: number; height: number; pixels: number };
 
+export async function hasJpegEndMarker(file: File): Promise<boolean> {
+  const end = await readBytes(file.slice(-2));
+  return end[0] === 0xff && end[1] === 0xd9;
+}
+
 export async function inspectImageFile(file: File): Promise<ImageDimensions> {
   if (!SUPPORTED_TRANSFER_IMAGE_TYPES.includes(file.type as typeof SUPPORTED_TRANSFER_IMAGE_TYPES[number])) {
     throw new Error("仅支持 PNG、JPEG、GIF 和 WebP 图片");

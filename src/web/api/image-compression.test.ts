@@ -94,6 +94,21 @@ describe("browser image compression", () => {
     expect(decodeCount).toBe(2);
     expect(maxActive).toBe(1);
   });
+
+  it("gives a waiting attachment its own compression budget after the preceding attachment", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const decode = vi.fn<() => Promise<void>>(async () => undefined).mockImplementationOnce(() => firstGate);
+    installImageAndCanvas({ width: 4_000, height: 2_000, operations: [], decode });
+    const first = compressImageForUpload(pngFile("first.png", 4_000, 2_000, MAX_TRANSFER_IMAGE_BYTES + 1));
+    const second = compressImageForUpload(pngFile("second.png", 4_000, 2_000, MAX_TRANSFER_IMAGE_BYTES + 1));
+    const outcomes = Promise.allSettled([first, second]);
+    await vi.waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
+    clock.mockReturnValue(20_001);
+    releaseFirst();
+    expect((await outcomes).map(({ status }) => status)).toEqual(["fulfilled", "fulfilled"]);
+  });
 });
 
 function installImageAndCanvas({

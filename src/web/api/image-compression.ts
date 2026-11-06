@@ -1,7 +1,7 @@
 import {
   MAX_TRANSFER_IMAGE_BYTES,
 } from "../../protocol/image-transfer";
-import { inspectImageFile } from "./image-metadata";
+import { hasJpegEndMarker, inspectImageFile } from "./image-metadata";
 
 const COMPRESSION_TIMEOUT_MS = 20_000;
 const MAX_IMAGE_EDGE = 2_048;
@@ -10,20 +10,20 @@ const MAX_RESIZE_STEPS = 6;
 let codecTail = Promise.resolve();
 
 export async function compressImageForUpload(file: File): Promise<File> {
-  const deadline = Date.now() + COMPRESSION_TIMEOUT_MS;
   await inspectImageFile(file);
-  if (file.size <= MAX_TRANSFER_IMAGE_BYTES) return file;
-  return withCodecSlot(() => compressImage(file, deadline));
+  // 某些 JPEG 结束标记后还有填充或附加数据。只重编码这些小图，保留普通小图的原始字节。
+  if (file.size <= MAX_TRANSFER_IMAGE_BYTES && (file.type !== "image/jpeg" || await hasJpegEndMarker(file))) return file;
+  // 多张图串行解码，等待前一张不能用掉后一张自己的压缩时间。
+  return withCodecSlot(() => compressImage(file));
 }
 
-async function compressImage(file: File, deadline: number) {
+async function compressImage(file: File) {
   let url: string | undefined;
   let canvas: HTMLCanvasElement | undefined;
   let image: HTMLImageElement | undefined;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   try {
-    if (deadline <= Date.now()) throw new Error("图片压缩超过 20 秒，请重试");
     url = URL.createObjectURL(file);
     image = new Image();
     image.src = url;
@@ -55,7 +55,7 @@ async function compressImage(file: File, deadline: number) {
       timeout = setTimeout(() => {
         timedOut = true;
         reject(new Error("图片压缩超过 20 秒，请重试"));
-      }, Math.max(1, deadline - Date.now()));
+      }, COMPRESSION_TIMEOUT_MS);
     });
     return await Promise.race([work, timeoutPromise]);
   } catch (cause) {

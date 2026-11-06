@@ -52,6 +52,25 @@ test("keeps an EXIF-rotated camera JPEG portrait through the browser codec", asy
   }
 });
 
+test("sends a small decodable camera JPEG with bytes after its end marker", async ({ page }) => {
+  await openFixtureTask(page);
+  const root = temporaryDirectory();
+  try {
+    const png = join(root, "camera.png");
+    const jpeg = join(root, "camera.jpg");
+    writeFileSync(png, createHighEntropyPng(100, 100));
+    execFileSync("/usr/bin/sips", ["-s", "format", "jpeg", png, "--out", jpeg]);
+    const original = Buffer.concat([readFileSync(jpeg), Buffer.from([0, 0, 0, 0])]);
+    expect(original.length).toBeLessThan(1_000_000);
+    const response = page.waitForResponse((res) => res.url().endsWith("/api/images") && res.request().method() === "POST");
+    await page.getByLabel("添加图片").setInputFiles({ name: "camera.jpg", mimeType: "image/jpeg", buffer: original });
+    await page.getByRole("button", { name: "Send" }).click();
+    expect((await response).status()).toBe(201);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function openFixtureTask(page: Page) {
   await page.goto("/");
   await page.getByLabel("Access token").fill("e2e-token");

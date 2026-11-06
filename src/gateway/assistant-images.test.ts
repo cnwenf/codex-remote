@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,19 @@ import { hydrateThread } from "../web/state/conversation-history";
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 
 describe("assistant Markdown local image registration", () => {
+  it("serves a local JPEG with a camera-style .JPEG extension", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "assistant-camera-image-"));
+    const png = join(dir, "source.png");
+    const jpeg = join(dir, "camera.JPEG");
+    writeFileSync(png, PNG);
+    execFileSync("/usr/bin/sips", ["-s", "format", "jpeg", png, "--out", jpeg]);
+    const store = new ImageUploadStore(join(dir, "uploads"));
+    const source = pathToFileURL(jpeg).href;
+    const images = registerAssistantImages(`![Camera](${source})`, store);
+    expect(images[source]).toBeDefined();
+    expect((await store.open(images[source])).mimeType).toBe("image/jpeg");
+  });
+
   it("registers real image nodes including spaces, file URLs and reference images, without altering Markdown", async () => {
     const dir = mkdtempSync(join(tmpdir(), "assistant-images-"));
     const path = join(dir, "local image.png");

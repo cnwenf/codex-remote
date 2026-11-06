@@ -1069,7 +1069,8 @@ export function createGateway(options: GatewayOptions) {
     response: ServerResponse,
     imageId: string,
   ) {
-    response.setHeader("Cache-Control", "private, max-age=86400");
+    // 暂时不可用、授权错误和压缩失败不能在手机端缓存一天；只缓存成功图片。
+    response.setHeader("Cache-Control", "no-store");
     if (request.method !== "GET") {
       response.writeHead(405, { Allow: "GET" }).end();
       return;
@@ -1108,6 +1109,7 @@ export function createGateway(options: GatewayOptions) {
           return;
         }
         response.writeHead(200, {
+          "cache-control": "private, max-age=86400",
           "content-type": image.mimeType,
           "content-length": String(image.size),
         });

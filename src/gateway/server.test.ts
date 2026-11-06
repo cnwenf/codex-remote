@@ -1603,6 +1603,7 @@ describe("gateway server", () => {
         { headers: { cookie: cookie as string } },
       );
       expect(rendered.status).toBe(200);
+      expect(rendered.headers.get("cache-control")).toBe("private, max-age=86400");
       expect(rendered.headers.get("content-type")).toBe("image/png");
       expect(Buffer.from(await rendered.arrayBuffer())).toEqual(png);
 
@@ -1610,6 +1611,7 @@ describe("gateway server", () => {
         `http://127.0.0.1:${address.port}/api/images/${uploaded.id}`,
       );
       expect(unauthenticatedRender.status).toBe(401);
+      expect(unauthenticatedRender.headers.get("cache-control")).toBe("no-store");
       socket.close();
       await once(socket, "close");
     } finally {
@@ -1659,6 +1661,7 @@ describe("gateway server", () => {
         headers: { authorization: `Bearer ${token}` },
       });
       expect(missingTransfer.status).toBe(500);
+      expect(missingTransfer.headers.get("cache-control")).toBe("no-store");
       expect((await fetch(`http://127.0.0.1:${address.port}/health`)).status).toBe(200);
     } finally {
       await gateway.stop();
@@ -2012,6 +2015,7 @@ describe("gateway server", () => {
         { headers: { origin, cookie } },
       );
       expect(missingSpoof.status).toBe(404);
+      expect(missingSpoof.headers.get("cache-control")).toBe("no-store");
 
       const empty = await fetch(`http://127.0.0.1:${address.port}/api/images`, {
         method: "POST",

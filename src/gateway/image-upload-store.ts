@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { chmod, lstat, mkdir, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { GatewayImageCompressor, GatewayImageCompressionError, type GatewayTransferImage } from "./image-compression";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -144,10 +144,13 @@ export class ImageUploadStore {
 
   referenceForPath(path: string): string | undefined {
     const name = basename(path);
-    const extension = formats.find((format) => name.endsWith(format.extension))?.extension;
-    if (!extension) return undefined;
-    const id = name.slice(0, -extension.length);
-    if (imageIdPattern.test(id) && resolve(this.root, name) === resolve(path)) return id;
+    const suffix = extname(name);
+    // 本地附件可能来自相机或图像工具，扩展名允许 JPEG 别名和大小写；仍按文件字节识别格式。
+    const lowerSuffix = suffix.toLowerCase();
+    if (lowerSuffix !== ".jpeg" && !formats.some((format) => format.extension === lowerSuffix)) return undefined;
+    const extension = formats.find((format) => format.extension === suffix)?.extension;
+    const id = name.slice(0, -suffix.length);
+    if (extension && imageIdPattern.test(id) && resolve(this.root, name) === resolve(path)) return id;
 
     try {
       const source = realpathSync(path);

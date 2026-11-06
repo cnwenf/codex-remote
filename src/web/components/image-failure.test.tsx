@@ -13,6 +13,24 @@ const thread = hydrateThread(initialCodexState, { thread: { id: "t", turns: [{ i
 afterEach(() => vi.unstubAllGlobals());
 
 describe("image failure evidence", () => {
+  it("retries a temporarily busy image download once without reusing an error from cache", async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response("image data"));
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL() { return "blob:retried-image"; }
+      static revokeObjectURL() {}
+    });
+    render(<Timeline thread={thread} imageRequest={request} />);
+    expect(await screen.findByRole("img", { name: "用户上传的图片 1" }, { timeout: 3000 }))
+      .toHaveAttribute("src", "blob:retried-image");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher).toHaveBeenLastCalledWith(`https://gateway.test/api/images/${id}`, {
+      headers: { authorization: "Bearer test-secret" }, cache: "reload",
+    });
+  });
+
   it("preserves an HTTP status instead of collapsing it into an unknown image error", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 403 })));
     render(<Timeline thread={thread} imageRequest={request} />);

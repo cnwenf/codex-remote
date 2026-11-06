@@ -262,25 +262,36 @@ function AuthenticatedImage({
     setSource(undefined);
     let disposed = false;
     let objectUrl: string | undefined;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     // Keep controlled stage labels: raw fetch errors can contain credentials.
     let failureStage = "下载请求失败";
-    void fetch(`${request.baseUrl}/api/images/${encodeURIComponent(imageId)}`, {
-      headers: { authorization: `Bearer ${request.token}` },
-    }).then((response) => {
+    const load = async (retry = false) => {
+      const response = await fetch(`${request.baseUrl}/api/images/${encodeURIComponent(imageId)}`, {
+        headers: { authorization: `Bearer ${request.token}` },
+        ...(retry ? { cache: "reload" as const } : {}),
+      });
+      if (disposed) return;
+      if (response.status === 503 && !retry) {
+        // Gateway 压缩队列忙时只补读一次，绕开旧客户端曾经缓存的失败响应。
+        retryTimer = setTimeout(() => void load(true).catch(fail), 1000);
+        return;
+      }
       if (!response.ok) {
         failureStage = `HTTP ${response.status}`;
         throw new Error("image-download-failed");
       }
       failureStage = "读取图片数据失败";
-      return response.blob();
-    }).then((blob) => {
+      const blob = await response.blob();
       if (disposed) return;
       failureStage = "创建图片预览失败";
       objectUrl = URL.createObjectURL(blob);
       setSource(objectUrl);
-    }).catch(() => { if (!disposed) setFailure(failureStage); });
+    };
+    const fail = () => { if (!disposed) setFailure(failureStage); };
+    void load().catch(fail);
     return () => {
       disposed = true;
+      clearTimeout(retryTimer);
       if (objectUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(objectUrl);
     };
   }, [fallback, imageId, request?.baseUrl, request?.token]);

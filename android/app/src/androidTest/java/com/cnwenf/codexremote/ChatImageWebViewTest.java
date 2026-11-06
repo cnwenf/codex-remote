@@ -41,17 +41,22 @@ public class ChatImageWebViewTest {
             });
             await(scenario, "window.imageProbe?.ready === true", 15);
             int count = 0;
-            for (int edge : new int[] {32, 480, 800}) {
+            for (int edge : new int[] {32, 480, 800, 96}) {
                 var context = InstrumentationRegistry.getInstrumentation().getTargetContext();
                 File directory = new File(context.getCacheDir(), "updates");
                 directory.mkdirs();
-                File file = new File(directory, "chat-image-qa-" + edge + ".png");
+                boolean paddedJpeg = edge == 96;
+                File file = new File(directory, "chat-image-qa-" + edge + (paddedJpeg ? ".jpg" : ".png"));
                 Bitmap bitmap = Bitmap.createBitmap(edge, edge, Bitmap.Config.ARGB_8888);
                 Random random = new Random(42);
                 int[] pixels = new int[edge * edge];
                 for (int i = 0; i < pixels.length; i++) pixels[i] = 0xff000000 | random.nextInt(0x1000000);
                 bitmap.setPixels(pixels, 0, edge, 0, 0, edge, edge);
-                try (var output = Files.newOutputStream(file.toPath())) { bitmap.compress(Bitmap.CompressFormat.PNG, 100, output); }
+                try (var output = Files.newOutputStream(file.toPath())) {
+                    bitmap.compress(paddedJpeg ? Bitmap.CompressFormat.JPEG : Bitmap.CompressFormat.PNG, 100, output);
+                    // 真实 WebView 文件选择和 WebSocket 必须接受可解码但结尾带填充的 JPEG。
+                    if (paddedJpeg) output.write(new byte[] {0, 0, 0, 0});
+                }
                 bitmap.recycle();
                 selected.set(FileProvider.getUriForFile(context, context.getPackageName() + ".fileprovider", file));
                 scenario.onActivity(activity -> {
