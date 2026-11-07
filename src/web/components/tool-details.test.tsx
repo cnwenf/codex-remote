@@ -58,7 +58,7 @@ describe("tool result disclosure", () => {
     await userEvent.click(screen.getByLabelText("执行详情，1 项"));
     await userEvent.click(screen.getByText("查看输入与结果"));
     expect(await screen.findByRole("img", { name: "工具返回图片 1" })).toHaveAttribute("src", "blob:tool-1");
-    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`https://gateway.test/api/images/${imageId}`, { headers: { authorization: "Bearer first-token" } });
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`https://gateway.test/api/images/${imageId}`, { headers: { authorization: "Bearer first-token" }, signal: expect.any(AbortSignal) });
     expect(screen.getByText(/部分工具图片不可用/)).toBeVisible();
     expect(screen.queryByText(/生成图片/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "预览工具返回图片 1" }));

@@ -649,7 +649,7 @@ describe("Timeline", () => {
         .toHaveAttribute("src", "blob:authenticated-image");
       expect(fetchImage).toHaveBeenCalledWith(
         "https://remote.example.test/api/images/remote-image-id",
-        { headers: { authorization: "Bearer secret-token" } },
+        { headers: { authorization: "Bearer secret-token" }, signal: expect.any(AbortSignal) },
       );
       expect(createObjectURL).toHaveBeenCalledOnce();
 

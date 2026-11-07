@@ -28,7 +28,7 @@ describe("assistant local image rendering", () => {
     const value = thread({ [source]: id });
     render(<Timeline thread={value} imageRequest={{ baseUrl: "https://gateway.test", token: "test-secret" }} />);
     expect(await screen.findByRole("img", { name: "Generated" })).toHaveAttribute("src", "blob:local-preview");
-    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`https://gateway.test/api/images/${id}`, { headers: { authorization: "Bearer test-secret" } });
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(`https://gateway.test/api/images/${id}`, { headers: { authorization: "Bearer test-secret" }, signal: expect.any(AbortSignal) });
     expect(screen.getByRole("img", { name: "Remote" })).toHaveAttribute("src", "https://example.test/image.png");
     expect(document.body.innerHTML).not.toContain("test-secret");
     await userEvent.click(screen.getByRole("button", { name: "预览Generated" }));
@@ -86,7 +86,7 @@ describe("assistant local image rendering", () => {
       imageRequest={{ baseUrl: "https://second.test", token: "second-secret" }} />);
     expect(await screen.findByRole("img", { name: "Generated" })).toHaveAttribute("src", "blob:second");
     expect(fetcher).toHaveBeenNthCalledWith(2, `https://second.test/api/images/${id}`, {
-      headers: { authorization: "Bearer second-secret" },
+      headers: { authorization: "Bearer second-secret" }, signal: expect.any(AbortSignal),
     });
     expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:first");
 
@@ -94,7 +94,7 @@ describe("assistant local image rendering", () => {
       imageRequest={{ baseUrl: "https://second.test", token: "second-secret" }} />);
     expect(await screen.findByRole("img", { name: "Generated" })).toHaveAttribute("src", "blob:third");
     expect(fetcher).toHaveBeenNthCalledWith(3, `https://second.test/api/images/${nextId}`, {
-      headers: { authorization: "Bearer second-secret" },
+      headers: { authorization: "Bearer second-secret" }, signal: expect.any(AbortSignal),
     });
     expect(revokeObjectURL).toHaveBeenNthCalledWith(2, "blob:second");
 

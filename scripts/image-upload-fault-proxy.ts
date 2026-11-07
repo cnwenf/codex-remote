@@ -3,7 +3,9 @@
 import { createServer, request } from "node:http";
 import { connect } from "node:net";
 const server = createServer((incoming, response) => {
-  if (incoming.method === "POST" && incoming.url === "/api/images") {
+  if ((incoming.method === "POST" && incoming.url === "/api/images") ||
+      (process.env.CODEX_REMOTE_TEST_BLOCK_IMAGE_GET === "1" && incoming.method === "GET" &&
+        /^\/api\/images\//.test(incoming.url ?? ""))) {
     incoming.resume();
     console.log("Held native HTTP image upload open");
     return;

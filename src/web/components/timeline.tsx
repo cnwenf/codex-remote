@@ -9,7 +9,8 @@ import { isToolActivity, MAX_TOOL_OUTPUT_IMAGES } from "../../protocol/tool-cont
 import { remarkAssistantPresentation } from "./assistant-presentation";
 import { activitySummary } from "./activity-summary";
 
-type ImageRequest = { baseUrl: string; token: string };
+type ImageRequest = { baseUrl: string; token: string;
+  download?: (imageId: string, signal?: AbortSignal) => Promise<Blob | undefined> };
 type ImagePreview = { source: string; alt: string };
 type MarkdownImageContextValue = {
   assistant?: boolean;
@@ -256,6 +257,7 @@ function AuthenticatedImage({
   const fallback = `/api/images/${encodeURIComponent(imageId)}`;
   const [source, setSource] = useState(request ? undefined : fallback);
   const [failure, setFailure] = useState<string>();
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     setFailure(undefined);
     if (!request) { setSource(fallback); return; }
@@ -263,39 +265,59 @@ function AuthenticatedImage({
     let disposed = false;
     let objectUrl: string | undefined;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let expired = false;
+    const controller = new AbortController();
+    // 包括响应体读取在内都必须有截止时间；弱网下不能永久停在“正在加载”。
+    const deadline = setTimeout(() => {
+      expired = true;
+      controller.abort();
+      setFailure("图片下载超时，请重试");
+    }, 30_000);
     // Keep controlled stage labels: raw fetch errors can contain credentials.
     let failureStage = "下载请求失败";
     const load = async (retry = false) => {
-      const response = await fetch(`${request.baseUrl}/api/images/${encodeURIComponent(imageId)}`, {
-        headers: { authorization: `Bearer ${request.token}` },
-        ...(retry ? { cache: "reload" as const } : {}),
-      });
-      if (disposed) return;
-      if (response.status === 503 && !retry) {
-        // Gateway 压缩队列忙时只补读一次，绕开旧客户端曾经缓存的失败响应。
-        retryTimer = setTimeout(() => void load(true).catch(fail), 1000);
-        return;
+      let blob = await request.download?.(imageId, controller.signal);
+      if (!blob) {
+        const response = await fetch(`${request.baseUrl}/api/images/${encodeURIComponent(imageId)}`, {
+          headers: { authorization: `Bearer ${request.token}` },
+          signal: controller.signal,
+          ...(retry ? { cache: "reload" as const } : {}),
+        });
+        if (disposed || expired) return;
+        if (response.status === 503 && !retry) {
+          // Gateway 压缩队列忙时只补读一次，绕开旧客户端曾经缓存的失败响应。
+          retryTimer = setTimeout(() => void load(true).catch(fail), 1000);
+          return;
+        }
+        if (!response.ok) {
+          failureStage = `HTTP ${response.status}`;
+          throw new Error("image-download-failed");
+        }
+        failureStage = "读取图片数据失败";
+        blob = await response.blob();
       }
-      if (!response.ok) {
-        failureStage = `HTTP ${response.status}`;
-        throw new Error("image-download-failed");
-      }
-      failureStage = "读取图片数据失败";
-      const blob = await response.blob();
-      if (disposed) return;
+      if (disposed || expired) return;
+      clearTimeout(deadline);
       failureStage = "创建图片预览失败";
       objectUrl = URL.createObjectURL(blob);
       setSource(objectUrl);
     };
-    const fail = () => { if (!disposed) setFailure(failureStage); };
+    const fail = () => {
+      clearTimeout(deadline);
+      if (!disposed && !expired) setFailure(failureStage);
+    };
     void load().catch(fail);
     return () => {
       disposed = true;
+      clearTimeout(deadline);
+      controller.abort();
       clearTimeout(retryTimer);
       if (objectUrl && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(objectUrl);
     };
-  }, [fallback, imageId, request?.baseUrl, request?.token]);
-  if (failure) return <span className="image-error">图片加载失败：{alt}（{failure}）</span>;
+  }, [fallback, imageId, request?.baseUrl, request?.token, request?.download, attempt]);
+  if (failure) return <span className="image-error">图片加载失败：{alt}（{failure}）
+    <button type="button" onClick={() => setAttempt(value => value + 1)}>重试图片</button>
+  </span>;
   return source ? (
     <button
       type="button"

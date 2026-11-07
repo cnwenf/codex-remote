@@ -2,7 +2,7 @@
 import { CodexSocket, uploadImage } from "../../src/web/api/socket";
 import { uploadNativeImage } from "../../src/mobile/native-image-upload";
 
-const state = { ready: false, selected: 0, phase: "idle", uploads: [] as { source: number; stored: number; elapsedMs: number }[], legacy: "pending", error: "" };
+const state = { ready: false, selected: 0, rendered: 0, phase: "idle", uploads: [] as { source: number; stored: number; elapsedMs: number }[], legacy: "pending", error: "" };
 Object.assign(window, { imageProbe: state });
 const socket = new CodexSocket();
 void socket.connect("e2e-token", "ws://127.0.0.1:4319/rpc", true).then(() => {
@@ -24,10 +24,16 @@ void socket.connect("e2e-token", "ws://127.0.0.1:4319/rpc", true).then(() => {
     }
     void uploadImage(file, fetch, { imageUploader: (image) => socket.uploadImage(image) }).then(async (image) => {
       state.phase = "download";
-      const response = await fetch(`http://127.0.0.1:4319/api/images/${image.id}`, {
-        headers: { authorization: "Bearer e2e-token" },
-      });
-      if (!response.ok || (await response.arrayBuffer()).byteLength !== image.size) throw new Error("roundtrip-mismatch");
+      const blob = await socket.downloadImage(image.id);
+      if (!blob || blob.size !== image.size) throw new Error("roundtrip-mismatch");
+      const source = URL.createObjectURL(blob);
+      try {
+        const preview = new Image();
+        preview.src = source;
+        await preview.decode();
+        if (!preview.naturalWidth) throw new Error("preview-empty");
+        state.rendered++;
+      } finally { URL.revokeObjectURL(source); }
       state.phase = "send";
       await socket.request("thread/resume", { threadId: "fixture-thread" }, { timeoutMs: 5_000 });
       const turn = await socket.request("turn/start", { threadId: "fixture-thread", input: [

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { homedir } from "node:os";
@@ -87,6 +88,7 @@ type GatewayOptions = {
 };
 
 export function createGateway(options: GatewayOptions) {
+  const activeImageReads = new WeakMap<WebSocket, number>();
   if (!options.token) throw new Error("gateway-token-required");
 
   const host = options.host ?? "127.0.0.1";
@@ -279,6 +281,7 @@ export function createGateway(options: GatewayOptions) {
       type: "session",
       state: "ready",
       imageUpload: true,
+      imageDownload: true,
       messageDelivery: true,
       ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
       ...options.transport.getSessionInfo?.(),
@@ -304,6 +307,10 @@ export function createGateway(options: GatewayOptions) {
         }
         if (isRpcRequest(envelope.payload) && envelope.payload.method === "gateway/image/upload") {
           void handleSocketImageUpload(socket, envelope.payload);
+          return;
+        }
+        if (isRpcRequest(envelope.payload) && envelope.payload.method === "gateway/image/read") {
+          void handleSocketImageRead(socket, envelope.payload);
           return;
         }
         if (isRpcRequest(envelope.payload) && envelope.payload.method === "gateway/threadActivity/read") {
@@ -469,6 +476,7 @@ export function createGateway(options: GatewayOptions) {
               type: "session",
               state: "ready",
               imageUpload: true,
+              imageDownload: true,
               messageDelivery: true,
               ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
               ...sessionInfo,
@@ -498,6 +506,7 @@ export function createGateway(options: GatewayOptions) {
           type: "session",
           state: "ready",
           imageUpload: true,
+          imageDownload: true,
           messageDelivery: true,
           ...(options.defaultCwd ? { defaultCwd: options.defaultCwd } : {}),
           ...sessionInfo,
@@ -802,6 +811,34 @@ export function createGateway(options: GatewayOptions) {
       response.writeHead(204).end();
     } catch (cause) {
       response.writeHead(cause instanceof AuthBodyTooLargeError ? 413 : 400).end();
+    }
+  }
+
+  async function handleSocketImageRead(socket: WebSocket, request: RpcRequest) {
+    const count = activeImageReads.get(socket) ?? 0;
+    if (count >= 16) {
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, error: { code: -32002, message: "图片读取繁忙，请重试" } } });
+      return;
+    }
+    activeImageReads.set(socket, count + 1);
+    let image: Awaited<ReturnType<ImageUploadStore["openTransfer"]>> | undefined;
+    try {
+      // 此 socket 已认证；只按不透明 ID 读取传输副本，不接受路径、不转发到 Desktop。
+      const imageId = recordValue(request.params).imageId;
+      if (typeof imageId !== "string") throw new ImageUploadError("image-upload-not-found", 404);
+      image = await imageStore.openTransfer(imageId);
+      const bytes = await readFile(image.path);
+      if (bytes.length > MAX_TRANSFER_IMAGE_BYTES) throw new ImageUploadError("image-too-large", 413);
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, result: {
+        imageId, mimeType: image.mimeType, size: bytes.length, data: bytes.toString("base64"),
+      } } });
+    } catch (cause) {
+      sendEnvelope(socket, { type: "rpc", payload: { id: request.id, error: {
+        code: -32002, message: cause instanceof ImageUploadError ? cause.message : "图片读取失败，请重试",
+      } } });
+    } finally {
+      image?.release?.();
+      activeImageReads.set(socket, (activeImageReads.get(socket) ?? 1) - 1);
     }
   }
 

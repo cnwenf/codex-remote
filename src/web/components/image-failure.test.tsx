@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialCodexState } from "../../protocol/thread-store";
 import { hydrateThread } from "../state/conversation-history";
@@ -10,9 +10,42 @@ const thread = hydrateThread(initialCodexState, { thread: { id: "t", turns: [{ i
   { id: "user", type: "userMessage", text: "Picture", imageIds: [id] },
 ] }] } }).threads.t;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("image failure evidence", () => {
+  it.each(["request", "body"])("bounds a stalled HTTP %s and allows retry", async (stage) => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn().mockImplementationOnce(() => stage === "request"
+      ? new Promise(() => {})
+      : Promise.resolve({ ok: true, blob: () => new Promise(() => {}) }))
+      .mockResolvedValue(new Response("image"));
+    vi.stubGlobal("fetch", fetcher);
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL() { return "blob:recovered"; }
+      static revokeObjectURL() {}
+    });
+    render(<Timeline thread={thread} imageRequest={request} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(screen.getByText(/图片下载超时/)).toBeInTheDocument();
+    expect(fetcher.mock.calls[0][1].signal.aborted).toBe(true);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "重试图片" })); });
+    expect(screen.getByRole("img", { name: "用户上传的图片 1" })).toHaveAttribute("src", "blob:recovered");
+  });
+
+  it("renders over the chat downloader without starting a stalled HTTP fetch", async () => {
+    const http = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", http);
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL() { return "blob:chat-image"; }
+      static revokeObjectURL() {}
+    });
+    const download = vi.fn(async () => new Blob(["image"], { type: "image/png" }));
+    render(<Timeline thread={thread} imageRequest={{ ...request, download }} />);
+    expect(await screen.findByRole("img", { name: "用户上传的图片 1" })).toHaveAttribute("src", "blob:chat-image");
+    expect(http).not.toHaveBeenCalled();
+    expect(download).toHaveBeenCalledWith(id, expect.any(AbortSignal));
+  });
+
   it("retries a temporarily busy image download once without reusing an error from cache", async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(new Response(null, { status: 503 }))
@@ -27,7 +60,7 @@ describe("image failure evidence", () => {
       .toHaveAttribute("src", "blob:retried-image");
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(fetcher).toHaveBeenLastCalledWith(`https://gateway.test/api/images/${id}`, {
-      headers: { authorization: "Bearer test-secret" }, cache: "reload",
+      headers: { authorization: "Bearer test-secret" }, signal: expect.any(AbortSignal), cache: "reload",
     });
   });
 

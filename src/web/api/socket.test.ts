@@ -42,6 +42,60 @@ afterEach(() => {
 });
 
 describe("CodexSocket", () => {
+  it.each([
+    { imageId: "other", mimeType: "image/png", size: 3, data: "AQID" },
+    { imageId: "image", mimeType: "image/svg+xml", size: 3, data: "AQID" },
+    { imageId: "image", mimeType: "image/png", size: 2, data: "AQID" },
+    { imageId: "image", mimeType: "image/png", size: 1_000_001, data: "AQID" },
+  ])("rejects an invalid image read response %#", async (value) => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    await socket.connect("secret", "ws://127.0.0.1/rpc");
+    fake.serverSend({ type: "session", state: "ready", imageDownload: true });
+    const result = socket.downloadImage("image").catch(error => error);
+    const request = JSON.parse(fake.sent[0]).payload;
+    fake.serverSend({ type: "rpc", payload: { id: request.id, result: value } });
+    expect(await result).toBeInstanceOf(Error);
+    socket.disconnect();
+  });
+
+  it("retains compatibility with old Gateways and aborts a pending chat image read", async () => {
+    const fake = new FakeBrowserSocket();
+    const socket = new CodexSocket(() => fake);
+    await socket.connect("secret", "ws://127.0.0.1/rpc");
+    expect(await socket.downloadImage("image")).toBeUndefined();
+    expect(fake.sent).toHaveLength(0);
+    fake.serverSend({ type: "session", state: "ready", imageDownload: true });
+    const controller = new AbortController();
+    const result = socket.downloadImage("image", controller.signal).catch(error => error);
+    controller.abort();
+    expect(await result).toMatchObject({ message: "codex-socket-request-aborted" });
+    socket.disconnect();
+  });
+
+  it("downloads a bounded image through the authenticated chat socket when HTTP is unavailable", async () => {
+    const fake = new FakeBrowserSocket(false);
+    const socket = new CodexSocket(() => fake);
+    const connecting = socket.connect("secret", "ws://127.0.0.1/rpc");
+    fake.serverSend({ type: "session", state: "ready", imageDownload: true });
+    await connecting;
+    const http = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("HTTP stalled"));
+    const imageId = "00000000-0000-4000-8000-000000000001";
+    const result = socket.downloadImage(imageId);
+    await vi.waitFor(() => expect(fake.sent).toHaveLength(1));
+    const request = JSON.parse(fake.sent[0]).payload;
+    expect(request).toMatchObject({ method: "gateway/image/read", params: { imageId } });
+    fake.serverSend({ type: "rpc", payload: { id: request.id, result: {
+      imageId, mimeType: "image/png", data: "AQID", size: 3,
+    } } });
+    const image = await result;
+    expect(image?.type).toBe("image/png");
+    expect(image?.size).toBe(3);
+    expect(http).not.toHaveBeenCalled();
+    http.mockRestore();
+    socket.disconnect();
+  });
+
   it("uploads an image on the authenticated chat connection without an HTTP request", async () => {
     const fake = new FakeBrowserSocket(false);
     const socket = new CodexSocket(() => fake);

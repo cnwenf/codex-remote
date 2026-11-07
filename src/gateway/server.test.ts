@@ -1856,6 +1856,15 @@ describe("gateway server", () => {
       expect(reply.result).toMatchObject({ name: "phone%2Fphoto.png", size: PNG_1X1.length });
       expect(reply.result.path).toBeUndefined();
       expect((await readFile(join(uploadDir, `${reply.result.id}.png`))).equals(PNG_1X1)).toBe(true);
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: "download", method: "gateway/image/read",
+        params: { imageId: reply.result.id } } }));
+      expect((await nextJson(socket)).payload).toEqual({ id: "download", result: {
+        imageId: reply.result.id, mimeType: "image/png", size: PNG_1X1.length, data: PNG_1X1.toString("base64"),
+      } });
+      expect(transport.sent.some((message) => "method" in message && message.method === "gateway/image/read")).toBe(false);
+      socket.send(JSON.stringify({ type: "rpc", payload: { id: "invalid-read", method: "gateway/image/read",
+        params: { imageId: "../../private.png" } } }));
+      expect((await nextJson(socket)).payload).toMatchObject({ id: "invalid-read", error: { code: -32002 } });
       expect(transport.sent.some((message) => "method" in message && message.method === "gateway/image/upload")).toBe(false);
       for (const params of [
         { mimeType: "image/png", data: "!!!!" },

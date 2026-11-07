@@ -1123,6 +1123,9 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
     };
   }, [socket]);
 
+  const downloadImage = useCallback((imageId: string, signal?: AbortSignal) =>
+    socket.downloadImage(imageId, signal), [socket]);
+
   const readQuestionContext = useCallback(async (request: QuestionContextRequest, signal?: AbortSignal) => {
     const result = await socket.request("desktopState/readQuestionContext", request, { signal, timeoutMs: 10_000 });
     if (!isQuestionContext(result)) throw new Error("原始问题响应无效");
@@ -1190,6 +1193,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       prepareDesktopRestart,
       confirmDesktopRestart,
       readQuestionContext,
+      downloadImage,
       steerQueuedMessage,
       interrupt,
       resolveRequest,
@@ -1203,6 +1207,7 @@ export function useCodex(socketOverride?: CodexSocket, remoteApi: RemoteApiOptio
       threadsError,
       confirmDesktopRestart,
       readQuestionContext,
+      downloadImage,
       createThread,
       creationOptions,
       defaultCwd,

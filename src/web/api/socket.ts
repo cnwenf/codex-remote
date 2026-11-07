@@ -48,6 +48,7 @@ export class CodexSocket {
   private deliberateDisconnect = false;
   private recoveryListenersBound = false;
   private imageUploadSupported = false;
+  private imageDownloadSupported = false;
 
   constructor(
     private readonly factory: SocketFactory = (url, protocols) =>
@@ -71,6 +72,7 @@ export class CodexSocket {
 
   private open(url: string, protocols: string[], reconnecting: boolean): Promise<void> {
     this.imageUploadSupported = false;
+    this.imageDownloadSupported = false;
     const socket = this.factory(
       url,
       protocols,
@@ -179,6 +181,25 @@ export class CodexSocket {
     });
   }
 
+  async downloadImage(imageId: string, signal?: AbortSignal): Promise<Blob | undefined> {
+    if (!this.imageDownloadSupported) return undefined;
+    // 收图复用聊天鉴权和连接；限制回包大小，旧 Gateway 才保留 HTTP 兼容路径。
+    const result = await this.request("gateway/image/read", { imageId }, { signal, timeoutMs: 30_000 }) as {
+      imageId?: unknown; mimeType?: unknown; size?: unknown; data?: unknown;
+    };
+    if (result?.imageId !== imageId || typeof result.mimeType !== "string" ||
+        !["image/png", "image/jpeg", "image/gif", "image/webp"].includes(result.mimeType) ||
+        typeof result.data !== "string" || result.data.length > 4 * Math.ceil(MAX_TRANSFER_IMAGE_BYTES / 3) ||
+        !/^[A-Za-z0-9+/]*={0,2}$/.test(result.data) ||
+        typeof result.size !== "number" || result.size <= 0 || result.size > MAX_TRANSFER_IMAGE_BYTES) {
+      throw new Error("图片下载响应无效");
+    }
+    const raw = atob(result.data);
+    if (raw.length !== result.size) throw new Error("图片下载数据不完整");
+    const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+    return new Blob([bytes], { type: result.mimeType });
+  }
+
   async uploadImage(file: File, onProgress?: UploadBytesObserver): Promise<UploadedImage> {
     if (!this.imageUploadSupported) throw new Error("请先更新 Mac 端 Codex Remote，再发送图片");
     if (file.size > MAX_TRANSFER_IMAGE_BYTES) throw new Error("图片传输副本不能超过 1 MB");
@@ -251,6 +272,7 @@ export class CodexSocket {
     }
     if (envelope.type === "session" && envelope.state === "ready") {
       this.imageUploadSupported = envelope.imageUpload === true;
+      this.imageDownloadSupported = envelope.imageDownload === true;
     }
     for (const listener of this.sessionListeners) listener(envelope);
     if (envelope.type !== "rpc") return envelope;

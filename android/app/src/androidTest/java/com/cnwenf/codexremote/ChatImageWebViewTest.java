@@ -74,6 +74,7 @@ public class ChatImageWebViewTest {
                 file.delete();
             }
             await(scenario, "window.imageProbe.legacy !== 'pending'", 65);
+            assertEquals("4", evaluate(scenario, "window.imageProbe.rendered"));
             assertEquals("\"failed\"", evaluate(scenario, "window.imageProbe.legacy"));
             String result = evaluate(scenario, "JSON.stringify(window.imageProbe)");
             System.out.println("Chat image WebView results: " + result);

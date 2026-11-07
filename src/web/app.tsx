@@ -448,7 +448,7 @@ export function App({ remote }: { remote?: NativeRemoteSession } = {}) {
                   thread={codex.selectedThread}
                   loading={codex.selectedThreadLoading}
                   loadFailed={Boolean(codex.selectedThreadError)}
-                  imageRequest={remote ? { baseUrl: remote.baseUrl, token: remote.token } : undefined}
+                  imageRequest={remote ? { baseUrl: remote.baseUrl, token: remote.token, download: codex.downloadImage } : undefined}
                   onOpenExternalUrl={remote?.onOpenExternalUrl}
                 />
                 {codex.selectedThread.diff ? (
